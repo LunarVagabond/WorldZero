@@ -1,0 +1,33 @@
+name: Feature request
+description: Suggest an improvement or new capability
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Every feature is checked against WorldZero's Design Principles (see docs/PROPOSAL.md) —
+        in particular, does this keep the core small and push game-specific behavior to
+        plugins rather than growing the core? A short description is enough to start.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      placeholder: e.g. I need a way to gate a zone behind a character level without writing a full plugin
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed approach (optional)
+      placeholder: How might WorldZero solve this? Rough ideas welcome.
+
+  - type: checkboxes
+    id: acceptance
+    attributes:
+      label: Feature filter
+      options:
+        - label: This keeps the core small/generic and pushes game-specific behavior to a plugin or configuration, rather than hardcoding a game-specific concept into the core
+          required: true

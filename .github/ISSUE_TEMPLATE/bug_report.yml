@@ -1,0 +1,59 @@
+name: Bug report
+description: Something isn't working as expected
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. A few details help us reproduce it quickly.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      placeholder: e.g. Zone-service crashes on the second player joining the same layer
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+      placeholder: e.g. Both players see each other move without error
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Start a zone-service with the starter game
+        2. ...
+      value: |
+        1.
+        2.
+    validations:
+      required: true
+
+  - type: input
+    id: component
+    attributes:
+      label: Affected crate/component
+      placeholder: e.g. world, plugin-host, content manifest validator
+
+  - type: input
+    id: version
+    attributes:
+      label: WorldZero version
+      placeholder: e.g. 0.1.0 or main @ abc1234
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: |
+        OS:
+        Rust toolchain version:
+        Deployment mode (single-process / multi-service, self-hosted / dev):

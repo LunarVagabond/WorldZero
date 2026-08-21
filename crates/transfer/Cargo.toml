@@ -1,0 +1,9 @@
+[package]
+name = "transfer"
+description = "Character transfer execution, ticket/cash gating, and audit trail."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]

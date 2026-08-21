@@ -1,0 +1,3 @@
+# No overrides yet — full default lint set applies. This file exists as a
+# placeholder so future tuning (msrv, cognitive-complexity-threshold, etc.)
+# has an obvious home rather than being decided ad hoc per crate.

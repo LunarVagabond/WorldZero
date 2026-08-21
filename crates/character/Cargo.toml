@@ -1,0 +1,9 @@
+[package]
+name = "character"
+description = "Character records, inventory, and declared-schema stats — the durable \"who is this player\" data."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]

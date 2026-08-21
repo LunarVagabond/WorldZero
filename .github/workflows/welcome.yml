@@ -1,0 +1,28 @@
+name: Welcome
+
+on:
+  issues:
+    types: [opened]
+  pull_request_target:
+    types: [opened]
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  welcome:
+    if: github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/first-interaction@v3
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          issue_message: |
+            Thanks for taking the time to file this — reports like this are what keep WorldZero moving in the right direction. Someone will take a look and follow up here soon.
+
+            Want to talk it through before or while it's being picked up? GitHub Discussions is there for anything worth keeping searchable. Glad to have you here.
+          pr_message: |
+            This looks like a first PR to WorldZero — welcome, and thanks for putting in the work. It genuinely means a lot to see the project picked up and built on.
+
+            CONTRIBUTING.md (in `.github/`) covers the branch/commit/PR conventions if anything looks unfamiliar, but don't sweat getting every detail perfect — a maintainer will review and help square it away. If anything's unclear or you get stuck, GitHub Discussions is a good place to ask. Looking forward to seeing this through.

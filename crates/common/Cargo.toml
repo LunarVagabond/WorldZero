@@ -1,0 +1,9 @@
+[package]
+name = "common"
+description = "Tightly-scoped cross-cutting code shared by every other crate: logging setup, shared error/result types, config loading. Not a general-purpose dumping ground — see the scope note in src/lib.rs before adding to it."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]

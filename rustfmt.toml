@@ -1,0 +1,4 @@
+# Defaults for everything except edition, which must match Cargo.toml's
+# workspace edition for edition-specific syntax to format correctly.
+# Tweak as real conventions emerge — nothing here is considered settled yet.
+edition = "2024"

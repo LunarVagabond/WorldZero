@@ -1,0 +1,9 @@
+[package]
+name = "content"
+description = "Map/NPC/route manifest loading, versioning, and validation."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]

@@ -1,0 +1,9 @@
+[package]
+name = "chat"
+description = "Cross-shard messaging, presence, and channels."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]

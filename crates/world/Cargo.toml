@@ -1,0 +1,9 @@
+[package]
+name = "world"
+description = "Per-zone simulation: tick loop, spatial index, and authoritative movement/collision."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]

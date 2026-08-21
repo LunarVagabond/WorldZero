@@ -1,0 +1,9 @@
+[package]
+name = "gateway"
+description = "Client connection termination (TCP + UDP), protocol framing, and request routing to backing services."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]

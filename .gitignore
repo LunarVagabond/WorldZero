@@ -1,0 +1,80 @@
+# -----------------------------------------------------------------------------
+# WorldZero — generated artifacts, dependencies, secrets, and local tooling
+# -----------------------------------------------------------------------------
+
+# Rust
+target/
+**/*.rs.bk
+# Cargo.lock is intentionally NOT ignored — WorldZero ships runnable services/binaries,
+# so the lockfile is committed for reproducible builds, per Rust convention for apps.
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.local
+*.key
+
+# Logs
+logs/
+*.log
+
+# Test and coverage output
+coverage/
+*.lcov
+
+# Caches and incremental build metadata
+.cache/
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Editor and IDE
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json.example
+.idea/
+*.iml
+.fleet/
+*.sublime-project
+*.sublime-workspace
+.project
+.classpath
+.settings/
+
+# Vim / Emacs swap files
+*.swp
+*.swo
+*~
+[._]*.s[a-v][a-z]
+[._]*.sw[a-p]
+Session.vim
+.netrwhist
+
+# Windows / Visual Studio
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Debug and profiling
+*.prof
+*.profraw
+criterion/
+
+# Patch and merge leftovers
+*.orig
+*.rej
+
+# Optional local scratch
+tmp/
+temp/
+scratch/

@@ -1,0 +1,15 @@
+# Default: everything not matched more specifically below.
+* @LunarVagabond
+
+# Per-area ownership
+# /crates/auth/             @LunarVagabond
+# /crates/character/        @LunarVagabond
+# /crates/realm-directory/  @LunarVagabond
+# /crates/gateway/          @LunarVagabond
+# /crates/world/            @LunarVagabond
+# /crates/chat/             @LunarVagabond
+# /crates/transfer/         @LunarVagabond
+# /crates/plugin-host/      @LunarVagabond
+# /crates/content/          @LunarVagabond
+# /docs/                    @LunarVagabond
+# /.github/                 @LunarVagabond

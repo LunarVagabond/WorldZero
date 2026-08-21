@@ -1,0 +1,9 @@
+[package]
+name = "plugin-host"
+description = "WASM runtime, sandboxing, and the host API surface exposed to plugins."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]

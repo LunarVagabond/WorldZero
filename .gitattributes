@@ -1,0 +1,6 @@
+# Normalize line endings to LF for all text files, regardless of what OS
+# checked them out or in.
+* text=auto eol=lf
+
+# Machine-generated — don't ask reviewers to read diffs of it line by line.
+Cargo.lock linguist-generated=true

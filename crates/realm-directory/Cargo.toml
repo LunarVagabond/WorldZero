@@ -1,0 +1,9 @@
+[package]
+name = "realm-directory"
+description = "Realm registry, open/bound policy enforcement, layer assignment, and transfer eligibility."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
