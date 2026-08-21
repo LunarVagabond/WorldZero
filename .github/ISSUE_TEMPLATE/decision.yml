@@ -7,10 +7,11 @@ body:
     attributes:
       value: |
         One decision per issue — don't reuse this for a decision that already has its own
-        thread elsewhere. Full convention: docs/architecture/Decisions.md. Short version:
-        leave this open while it's still being discussed, close it the moment the decision
-        is made (that's the signal, not a comment saying so), and if it changes later, open
-        a new decision issue with "Supersedes #<this one>" rather than editing this one.
+        thread elsewhere. Full convention: docs/project-management/issue-workflow.md. Short
+        version: leave this open while it's still being discussed, close it the moment the
+        decision is made (that's the signal, not a comment saying so), and if it changes
+        later, open a new decision issue with "Supersedes #<this one>" rather than editing
+        this one.
 
   - type: textarea
     id: context

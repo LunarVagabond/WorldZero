@@ -111,6 +111,7 @@ Follow the conventions in this file the same as any contributor would: `[#<issue
 - Don't add any other AI-attribution mention beyond that single trailer line unless explicitly asked to.
 - If you're unsure whether the trailer applies in a given situation, ask rather than guessing.
 - **Never reach for a lint/format suppression just to make a check pass.** A suppression without a genuine, specific justification comment is not an acceptable way to close out a failure; fix the underlying code instead, or ask if the rule itself seems wrong.
+- **When filing a work-item ticket, meet the bar in [Issue Workflow](../docs/project-management/issue-workflow.md#work-item-ticket-quality): what needs to be built, why, and real checkable acceptance criteria.** A title plus a one-line pointer to the proposal is not enough — someone with no other context should be able to pick it up.
 
 ## Documentation-First Workflow
 
@@ -127,7 +128,7 @@ There is no codebase yet, so there's no build/test/lint interface to document he
 ## Where To Contribute
 
 - New here? Start at [Getting Started (contributing)](../docs/developers/Getting_Started.md).
-- Product direction: [Product Requirements](../docs/product/Product_Requirements.md), [Roadmap](../docs/product/Roadmap.md), [Decisions](../docs/architecture/Decisions.md)
+- Product direction: [Product Requirements](../docs/product/Product_Requirements.md), [Roadmap](../docs/product/Roadmap.md), [Decisions](https://github.com/LunarVagabond/WorldZero/issues?q=is%3Aissue+label%3Adecision) (GitHub issues labeled `decision` — see [Issue Workflow](../docs/project-management/issue-workflow.md) for the convention, there is no decisions file)
 - Architecture: [System Architecture](../docs/architecture/System_Architecture.md)
 - Specifications: [`docs/specs/`](../docs/specs) — auth, realm/character policy, content manifest, networking, plugin API, data model, observability
 - The single source of truth for all of the above: [`docs/PROPOSAL.md`](../docs/PROPOSAL.md)
