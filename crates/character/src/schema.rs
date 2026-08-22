@@ -42,6 +42,12 @@ impl AttributeSchema {
         Self::from_yaml(&contents)
     }
 
+    /// Reads `stats.schema.yaml` from the dev's config directory
+    /// (`common::config::config_dir` — `WZ_CONFIG_DIR` or `./config`).
+    pub fn from_config_dir() -> Result<Self> {
+        Self::from_file(&common::config::config_dir().join("stats.schema.yaml"))
+    }
+
     fn declaration(&self, key: &str) -> Result<&StatDeclaration> {
         self.stats
             .iter()

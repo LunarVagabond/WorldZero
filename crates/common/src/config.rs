@@ -3,7 +3,25 @@
 //! `localhost`/default fallbacks: both stores are always reached over the
 //! network, so a missing var fails fast and names itself.
 
+use std::path::PathBuf;
+
 use crate::error::{Error, Result};
+
+/// Where a game developer's own config files (declared attribute schemas,
+/// content packs, etc.) live: `WZ_CONFIG_DIR` if set, otherwise `./config`
+/// relative to the process's working directory.
+///
+/// Unlike [`PostgresConfig`]/[`RedisConfig`], this one **does** default —
+/// it's a filesystem convention, not a credential, so "the obvious default
+/// just works" is the right behavior. Each crate that reads dev-provided
+/// files from here defines its own expected filename (e.g. `character`'s
+/// `stats.schema.yaml`) so a dev only ever has to know the flat list of
+/// filenames this directory expects, never a crate's internal path.
+pub fn config_dir() -> PathBuf {
+    std::env::var("WZ_CONFIG_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("config"))
+}
 
 #[derive(Debug, Clone)]
 pub struct PostgresConfig {
@@ -159,6 +177,21 @@ mod tests {
         with_clean_env(REDIS_VARS, || {
             let err = RedisConfig::from_env().unwrap_err();
             assert!(err.to_string().contains("WZ_REDIS_HOST"), "{err}");
+        });
+    }
+
+    #[test]
+    fn config_dir_defaults_to_config() {
+        with_clean_env(&["WZ_CONFIG_DIR"], || {
+            assert_eq!(config_dir(), std::path::PathBuf::from("config"));
+        });
+    }
+
+    #[test]
+    fn config_dir_honors_override() {
+        with_clean_env(&["WZ_CONFIG_DIR"], || {
+            unsafe { std::env::set_var("WZ_CONFIG_DIR", "/srv/mygame/config") };
+            assert_eq!(config_dir(), std::path::PathBuf::from("/srv/mygame/config"));
         });
     }
 }

@@ -278,6 +278,11 @@ dependencies = [
 [[package]]
 name = "content"
 version = "0.1.0"
+dependencies = [
+ "common",
+ "serde",
+ "serde_yaml",
+]
 
 [[package]]
 name = "cpufeatures"

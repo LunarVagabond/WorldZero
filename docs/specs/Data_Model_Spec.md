@@ -47,6 +47,8 @@ stats:
 - `default` — required. Returned on read when a character's stored `stats` blob is missing this key (see "Missing-key read behavior" below).
 - `min`, `max` — optional. When present, a write outside `[min, max]` is rejected. Absent means unbounded in that direction (see `reputation.ironclad_guild` above, which has neither).
 
+**Where this file lives:** a dev drops `stats.schema.yaml` into their config directory — `common::config::config_dir()` (`WZ_CONFIG_DIR` env var, or `./config` by default) — and loads it with `AttributeSchema::from_config_dir()`. No digging through crate source paths; every dev-provided file this framework expects lives in that one directory, under a filename each crate defines for itself.
+
 ## Validation at the API boundary
 
 Every stat read/write goes through `character`'s API, validated against the schema **before** touching the `stats` JSONB column — never a direct write from anywhere else (`world`, a plugin host function, etc. all go through this same boundary).
