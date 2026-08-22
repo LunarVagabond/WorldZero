@@ -7,3 +7,26 @@
 pub fn postgres_config() -> common::Result<common::config::PostgresConfig> {
     common::config::PostgresConfig::from_env()
 }
+
+pub async fn postgres_pool() -> common::Result<sqlx::PgPool> {
+    let config = postgres_config()?;
+    common::pool::postgres_pool(&config, common::pool::PoolOptions::default()).await
+}
+
+#[cfg(test)]
+mod tests {
+    use sqlx::Row;
+
+    use super::*;
+
+    #[tokio::test]
+    #[ignore] // real Postgres — set WZ_POSTGRES_* and run with `-- --ignored`
+    async fn acquires_a_connection_through_the_shared_pool() {
+        let pool = postgres_pool().await.unwrap();
+        let row = sqlx::query("SELECT 1 AS one")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(row.get::<i32, _>("one"), 1);
+    }
+}
