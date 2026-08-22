@@ -7,7 +7,7 @@ pub mod schema;
 pub mod store;
 
 pub use schema::{AttributeSchema, StatDeclaration, StatType};
-pub use store::CharacterStore;
+pub use store::{CharacterStore, CharacterSummary};
 
 pub fn postgres_config() -> common::Result<common::config::PostgresConfig> {
     common::config::PostgresConfig::from_env()

@@ -4,9 +4,20 @@
 
 use common::id::{AccountId, CharacterId, RealmId};
 use common::{Error, Result};
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 
 use crate::schema::AttributeSchema;
+
+/// Just enough of a character row for the phase-1 "load a character if
+/// one exists" flow (`server`, #39's acceptance criteria) — not a full
+/// character read model.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CharacterSummary {
+    pub id: CharacterId,
+    pub name: String,
+    pub zone_id: String,
+    pub position: (f64, f64, f64),
+}
 
 pub struct CharacterStore {
     pool: PgPool,
@@ -41,6 +52,62 @@ impl CharacterStore {
             .map_err(|e| Error::wrap("character", "failed to create character", e))?;
 
         Ok(id)
+    }
+
+    /// The open-realm-friendly "does this account already have a
+    /// character (in this realm), or do we need to create one" lookup —
+    /// picks the single most-recently-created one if an account somehow
+    /// has more than one (a real "which character" selection flow is
+    /// future work; phase 1 is one character per account per realm in
+    /// practice, per `#39`'s "load a character if one exists").
+    pub async fn find_by_account(
+        &self,
+        account_id: AccountId,
+        realm_id: RealmId,
+    ) -> Result<Option<CharacterSummary>> {
+        let row = sqlx::query(
+            "SELECT id, name, zone_id, position_x, position_y, position_z FROM characters \
+             WHERE account_id = $1 AND realm_id = $2 ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(account_id.as_uuid())
+        .bind(realm_id.as_uuid())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| Error::wrap("character", "failed to look up character by account", e))?;
+
+        Ok(row.map(|row| CharacterSummary {
+            id: CharacterId::from_uuid(row.get("id")),
+            name: row.get("name"),
+            zone_id: row.get("zone_id"),
+            position: (
+                row.get("position_x"),
+                row.get("position_y"),
+                row.get("position_z"),
+            ),
+        }))
+    }
+
+    /// Persists a character's current simulated position — called on
+    /// disconnect (and is safe to call periodically) so a reconnect finds
+    /// the character where it actually was, not where it started
+    /// (#39's "persists across a disconnect/reconnect" acceptance criteria).
+    pub async fn update_position(
+        &self,
+        character_id: CharacterId,
+        position: (f64, f64, f64),
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE characters SET position_x = $2, position_y = $3, position_z = $4, updated_at = now() WHERE id = $1",
+        )
+        .bind(character_id.as_uuid())
+        .bind(position.0)
+        .bind(position.1)
+        .bind(position.2)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| Error::wrap("character", "failed to update character position", e))?;
+
+        Ok(())
     }
 
     /// Validates against the declared schema, then writes — a rejected
@@ -127,6 +194,98 @@ stats:
             .unwrap();
 
         (store, character_id)
+    }
+
+    async fn store_with_account() -> (CharacterStore, AccountId, RealmId) {
+        let config = PostgresConfig::from_env().expect("WZ_POSTGRES_* env vars set");
+        let pool = postgres_pool(&config, PoolOptions::default())
+            .await
+            .unwrap();
+
+        let account_id = AccountId::new();
+        sqlx::query("INSERT INTO accounts (id, username, password_hash) VALUES ($1, $2, 'unused')")
+            .bind(account_id.as_uuid())
+            .bind(format!("find-by-account-test-{account_id}"))
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        (
+            CharacterStore::new(pool, schema()),
+            account_id,
+            RealmId::new(),
+        )
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn find_by_account_returns_none_before_any_character_exists() {
+        let (store, account_id, realm_id) = store_with_account().await;
+        assert_eq!(
+            store.find_by_account(account_id, realm_id).await.unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn find_by_account_returns_the_created_character() {
+        let (store, account_id, realm_id) = store_with_account().await;
+        let character_id = store
+            .create(account_id, "Aria", realm_id, "greenwood-forest")
+            .await
+            .unwrap();
+
+        let found = store
+            .find_by_account(account_id, realm_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.id, character_id);
+        assert_eq!(found.name, "Aria");
+        assert_eq!(found.zone_id, "greenwood-forest");
+        assert_eq!(found.position, (0.0, 0.0, 0.0));
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn find_by_account_does_not_cross_realms() {
+        let (store, account_id, realm_id) = store_with_account().await;
+        store
+            .create(account_id, "Aria", realm_id, "greenwood-forest")
+            .await
+            .unwrap();
+
+        let other_realm = RealmId::new();
+        assert_eq!(
+            store
+                .find_by_account(account_id, other_realm)
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn update_position_then_find_reflects_the_new_position() {
+        let (store, account_id, realm_id) = store_with_account().await;
+        let character_id = store
+            .create(account_id, "Aria", realm_id, "greenwood-forest")
+            .await
+            .unwrap();
+
+        store
+            .update_position(character_id, (12.5, -3.0, 0.0))
+            .await
+            .unwrap();
+
+        let found = store
+            .find_by_account(account_id, realm_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.position, (12.5, -3.0, 0.0));
     }
 
     #[tokio::test]
