@@ -2684,6 +2684,7 @@ version = "0.1.0"
 dependencies = [
  "auth",
  "character",
+ "chat",
  "common",
  "content",
  "futures-util",
@@ -2691,6 +2692,7 @@ dependencies = [
  "plugin-host",
  "serde",
  "serde_json",
+ "sqlx",
  "tokio",
  "tokio-rustls",
  "tokio-util",

@@ -43,7 +43,7 @@ envelope:
 | `message_type` | Owner | Payload encoding | Notes |
 |---|---|---|---|
 | 1 | `auth` (`auth::gateway_protocol`) | JSON | Login/registration handshake a connection performs first — docs/specs/Auth_Spec.md, "Gateway handshake". |
-| 100 | `chat` (`chat::gateway_protocol`) | JSON | Chat's dev-facing gateway demo integration, gated behind the auth handshake above — docs/specs/Chat_Spec.md, "Gateway demo integration". |
+| 100 | `chat` (`chat::gateway_protocol`) | JSON | Join/leave/send over the same connection as world/plugin traffic, gated behind the auth handshake above — wired into the combined `server` process per [#104](https://github.com/LunarVagabond/WorldZero/issues/104) (`WZ_SERVICE_CHAT_ENABLED`, default on), also still reachable via chat's own standalone demo entry point — docs/specs/Chat_Spec.md, "Gateway demo integration". |
 | 200 | `server` (`server::session_protocol`) | JSON | The phase-1 combined server's movement session (join a zone, move, see other entities move) — gated behind the same auth handshake. |
 
 **Plugin-declared message types (#95):** `message_type` 0-999 is core-reserved (the catalog above and any future core addition). A plugin declares its own values at `>= 1000` via `plugin.toml`'s `message_types` list (docs/specs/Plugin_API.md); `plugin-host` refuses to load a manifest declaring one below the floor, or the same value twice, before the plugin is ever instantiated. An envelope whose `message_type` matches a declared value is routed to that plugin's `on-message` hook instead of core dispatch — see docs/specs/Plugin_API.md's hooks table for the exact signature.
