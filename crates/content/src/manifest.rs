@@ -131,6 +131,7 @@ impl ZoneManifest {
             problems.push("display_name: must not be empty".to_string());
         }
 
+        // "polygon" is a 2D-only representation; see #89 (2D vs 3D movement/space support decision).
         if self.bounds.shape != "polygon" {
             problems.push(format!(
                 "bounds.shape: unsupported shape {:?} (only \"polygon\" is supported)",
