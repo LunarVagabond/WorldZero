@@ -462,12 +462,16 @@ dependencies = [
  "common",
  "deadpool-redis",
  "futures-util",
+ "gateway",
  "serde",
  "serde_json",
  "serde_yaml",
  "sqlx",
  "time",
  "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "tracing",
  "uuid",
 ]
 

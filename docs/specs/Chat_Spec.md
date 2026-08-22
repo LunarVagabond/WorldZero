@@ -80,11 +80,20 @@ Every channel, regardless of type, publishes to Redis pub/sub topic `chat:<chann
 
 Publishing and subscribing are the only two operations — no message is ever written to Postgres, per "No message persistence" above.
 
+## Gateway demo integration
+
+A dev-facing, demo-scoped piece of "wiring a connected client's messages into/out of these channels" (see "Not this pass" below for what's still explicitly deferred): `bin/gateway_server` and `bin/demo`, both in the `chat` crate, exercise the real `gateway` TCP+TLS transport end to end rather than talking to Postgres/Redis in-process.
+
+- **Wire protocol** (`chat::gateway_protocol`): a fixed, closed set of JSON-encoded messages carried in the envelope's `message_type` 100 (see docs/specs/Networking_Spec.md's catalog note) — `Hello`/`Join`/`Leave`/`Send` client→server, `Welcome`/`Joined`/`Left`/`Chat`/`Error` server→client. This is chat's own protocol, not a generic mechanism other message types share.
+- **`bin/gateway_server`** terminates the gateway's TCP+TLS listener and, per connection: resolves/creates a demo account from the client's `Hello` username, and on each `Join` finds-or-creates a `group` channel by name (`chat::demo_support`), joins it, and spawns a task forwarding that channel's pub/sub traffic back over the connection as `Chat` messages.
+- **`bin/demo`** defaults to this gateway-routed mode; `--no-gateway` switches back to talking to `ChannelStore`/`ChatBus` directly (no TCP/TLS at all). Either way it supports `/join`, `/leave`, and `/switch` for hopping between channels interactively.
+- **Explicitly out of scope even for this demo integration:** the auth crate's real login/session flow (identity here is just "trust whatever username the client's `Hello` claims" — fine for a local dev demo, not a security boundary); zone-channel membership validation; rate limiting/moderation. All still tracked below.
+
 ## Not this pass
 
 Explicitly out of scope for the current implementation, to keep in mind rather than lose track of:
 
-- **Wiring a connected client's messages into/out of these channels** — the `gateway`/`world` integration that takes a client's chat packet, figures out which channel(s) it's allowed to publish to (including validating zone membership for `zone` channels), and fans incoming pub/sub messages back out to connected clients. This spec covers `chat`'s own data model and pub/sub mechanics only.
+- **The real, production version of wiring a connected client's messages into/out of these channels** — a demo-scoped version now exists (see "Gateway demo integration" above), but the actual `gateway`/`world`/`auth` integration — real authenticated identity (not a trust-the-`Hello` username), figuring out which channel(s) a client is allowed to publish to, and validating zone membership for `zone` channels — is still not built.
 - **A real guild system** — `guild`-type channels exist in the data model but aren't backed by any actual guild roster/permissions system yet (see the `guild` row above).
 - **Rate limiting / moderation / profanity filtering** — not designed at all yet.
 - **Presence** — the crate's PROPOSAL.md description mentions "presence" alongside channels, but that's a distinct concern (who's online, not what channel they're in) not covered by this spec.

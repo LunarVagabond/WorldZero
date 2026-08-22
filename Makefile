@@ -8,7 +8,7 @@ LOG_DIR := $(RUN_DIR)/logs
 PID_FILE := $(PID_DIR)/server.pid
 LOG_FILE := $(LOG_DIR)/server.log
 
-.PHONY: help build run start stop restart status test test-live fmt fmt-check lint check clean migrate migrate-down
+.PHONY: help build run start stop restart status test test-live fmt fmt-check lint check clean migrate migrate-down chat-server chat
 
 help:
 	@echo "WorldZero — local dev commands"
@@ -21,6 +21,9 @@ help:
 	@echo "  make status        report whether the background server is running"
 	@echo "  make migrate       apply pending db/migrations/*.up.sql (needs WZ_POSTGRES_* — .env is loaded automatically)"
 	@echo "  make migrate-down  revert the most recently applied migration (its .down.sql)"
+	@echo "  make chat-server   run the chat gateway demo server (TCP+TLS, routes into chat) — start this first"
+	@echo "  make chat NAME=x   run an interactive chat demo client as username 'x' (gateway mode by default;"
+	@echo "                     ARGS=--no-gateway to talk straight to Postgres/Redis instead)"
 	@echo "  make test          cargo test --workspace"
 	@echo "  make test-live     also run tests gated on real infra (needs WZ_POSTGRES_*/WZ_REDIS_* — .env is loaded automatically)"
 	@echo "  make fmt           cargo fmt"
@@ -70,6 +73,16 @@ migrate:
 
 migrate-down:
 	$(CARGO) run -p common --bin migrate -- down
+
+chat-server:
+	$(CARGO) run -p chat --bin gateway_server
+
+chat:
+	@if [ -z "$(NAME)" ]; then \
+		echo "usage: make chat NAME=<username> [ARGS=--no-gateway]"; \
+		exit 2; \
+	fi
+	$(CARGO) run -p chat --bin demo -- $(NAME) $(ARGS)
 
 test:
 	$(CARGO) test --workspace
