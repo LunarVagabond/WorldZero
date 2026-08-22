@@ -142,6 +142,15 @@ pub type ZoneId = Id<ZoneMarker>;
 pub struct AccountMarker;
 pub type AccountId = Id<AccountMarker>;
 
+/// A generic simulated entity — covers players, NPCs, and items alike
+/// (docs/PROPOSAL.md, "v0 Hooks": "Generic entity model (covers players,
+/// NPCs, items)"). Not the same id as `CharacterId`: a player's `world`
+/// entity and their durable `character` record are related but distinct
+/// concerns — the entity exists only while simulated in a zone, the
+/// character record persists whether or not anyone's logged in.
+pub struct EntityMarker;
+pub type EntityId = Id<EntityMarker>;
+
 pub struct ChannelMarker;
 pub type ChannelId = Id<ChannelMarker>;
 

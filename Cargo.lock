@@ -4024,6 +4024,12 @@ dependencies = [
 [[package]]
 name = "world"
 version = "0.1.0"
+dependencies = [
+ "common",
+ "content",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "writeable"
