@@ -15,7 +15,7 @@ use tokio::sync::mpsc;
 use tokio_util::codec::Framed;
 use world::EntityKind;
 
-use crate::session_protocol::{ClientMessage, RosterEntry, ServerMessage};
+use crate::session_protocol::{ClientMessage, RosterEntry, ServerMessage, WORLD_MESSAGE_TYPE};
 use crate::world_actor::WorldHandle;
 
 pub type ServerStream =
@@ -35,6 +35,13 @@ pub struct SessionDeps {
     pub zone_id: String,
     pub world: WorldHandle,
     pub sessions: Sessions,
+    /// `message_type`s the configured plugin declared in `plugin.toml`
+    /// (empty if no plugin is configured) — checked here rather than
+    /// only in the world actor so an envelope with an unroutable
+    /// `message_type` still gets a clear per-connection error reply
+    /// instead of silently vanishing into the actor's command queue
+    /// (#95).
+    pub plugin_message_types: Vec<u16>,
 }
 
 pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Result<()> {
@@ -130,13 +137,30 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
             maybe_frame = stream.next() => {
                 let Some(frame) = maybe_frame else { break };
                 let Ok(envelope) = frame else { break };
-                match ClientMessage::from_envelope(&envelope) {
-                    Ok(ClientMessage::Move { x, y }) => {
-                        deps.world.request_move(entity_id, (x, y));
+                if envelope.message_type == WORLD_MESSAGE_TYPE {
+                    match ClientMessage::from_envelope(&envelope) {
+                        Ok(ClientMessage::Move { x, y }) => {
+                            deps.world.request_move(entity_id, (x, y));
+                        }
+                        Err(e) => {
+                            send_world(&mut sink, &ServerMessage::Error { message: e.to_string() }).await?;
+                        }
                     }
-                    Err(e) => {
-                        send_world(&mut sink, &ServerMessage::Error { message: e.to_string() }).await?;
-                    }
+                } else if deps.plugin_message_types.contains(&envelope.message_type) {
+                    deps.world.dispatch_plugin_message(
+                        envelope.message_type,
+                        entity_id,
+                        envelope.payload.to_vec(),
+                    );
+                } else {
+                    let message_type = envelope.message_type;
+                    send_world(
+                        &mut sink,
+                        &ServerMessage::Error {
+                            message: format!("unrecognized message_type {message_type}"),
+                        },
+                    )
+                    .await?;
                 }
             }
             Some(envelope) = outgoing_rx.recv() => {

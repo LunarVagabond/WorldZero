@@ -22,7 +22,12 @@ use serde::Deserialize;
 /// (`wit/plugin.wit`) — a plugin manifest declaring a different
 /// `host_api_version` is refused at load time rather than instantiated
 /// against an interface it didn't actually target.
-pub const HOST_API_VERSION: &str = "0.1.0";
+pub const HOST_API_VERSION: &str = "0.2.0";
+
+/// `message_type` values below this are core-reserved (auth, chat, world
+/// — see docs/specs/Networking_Spec.md's catalog); a plugin declaring one
+/// below the floor is refused at load time (#95).
+pub const PLUGIN_MESSAGE_TYPE_FLOOR: u16 = 1000;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct PluginManifest {
@@ -36,6 +41,15 @@ pub struct PluginDeclaration {
     /// Declared, not yet enforced — see module docs.
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// `message_type` values (docs/specs/Networking_Spec.md) this plugin
+    /// wants gateway-routed messages for, delivered via the `on-message`
+    /// hook. Each must be `>= PLUGIN_MESSAGE_TYPE_FLOOR` and appear at
+    /// most once — checked by `check_message_types` (#95). Cross-plugin
+    /// collision checking doesn't exist yet: the server only ever loads
+    /// one plugin today, so there's no second declared set to check
+    /// against (docs/specs/Networking_Spec.md notes this as deferred).
+    #[serde(default)]
+    pub message_types: Vec<u16>,
 }
 
 impl PluginManifest {
@@ -69,6 +83,36 @@ impl PluginManifest {
                     self.plugin.name, self.plugin.host_api_version
                 ),
             ));
+        }
+        self.check_message_types()
+    }
+
+    /// Refuses a manifest declaring a `message_types` entry below the
+    /// core-reserved floor, or the same value twice — both are plugin
+    /// authoring mistakes that should fail clearly at load time rather
+    /// than silently colliding with core dispatch or shadowing themselves
+    /// later (#95).
+    fn check_message_types(&self) -> Result<()> {
+        let mut seen = std::collections::HashSet::new();
+        for message_type in &self.plugin.message_types {
+            if *message_type < PLUGIN_MESSAGE_TYPE_FLOOR {
+                return Err(Error::new(
+                    "plugin-host",
+                    format!(
+                        "plugin {:?} declares message_type {message_type}, below the core-reserved floor of {PLUGIN_MESSAGE_TYPE_FLOOR}",
+                        self.plugin.name
+                    ),
+                ));
+            }
+            if !seen.insert(*message_type) {
+                return Err(Error::new(
+                    "plugin-host",
+                    format!(
+                        "plugin {:?} declares message_type {message_type} more than once",
+                        self.plugin.name
+                    ),
+                ));
+            }
         }
         Ok(())
     }
@@ -114,7 +158,7 @@ capabilities = ["economy", "combat"]
             r#"
 [plugin]
 name = "example-plugin"
-host_api_version = "0.1.0"
+host_api_version = "0.2.0"
 "#,
         )
         .unwrap();
@@ -133,5 +177,53 @@ host_api_version = "99.0.0"
         .unwrap();
         let err = manifest.check_compatible().unwrap_err();
         assert!(err.to_string().contains("99.0.0"), "{err}");
+    }
+
+    #[test]
+    fn parses_declared_message_types() {
+        let manifest = PluginManifest::from_toml(
+            r#"
+[plugin]
+name = "example-plugin"
+host_api_version = "0.2.0"
+message_types = [1000, 1001]
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(manifest.plugin.message_types, vec![1000, 1001]);
+        assert!(manifest.check_compatible().is_ok());
+    }
+
+    #[test]
+    fn message_type_below_the_floor_is_rejected() {
+        let manifest = PluginManifest::from_toml(
+            r#"
+[plugin]
+name = "example-plugin"
+host_api_version = "0.2.0"
+message_types = [200]
+"#,
+        )
+        .unwrap();
+
+        let err = manifest.check_compatible().unwrap_err();
+        assert!(err.to_string().contains("200"), "{err}");
+    }
+
+    #[test]
+    fn duplicate_message_type_is_rejected() {
+        let manifest = PluginManifest::from_toml(
+            r#"
+[plugin]
+name = "example-plugin"
+host_api_version = "0.2.0"
+message_types = [1000, 1000]
+"#,
+        )
+        .unwrap();
+
+        let err = manifest.check_compatible().unwrap_err();
+        assert!(err.to_string().contains("1000"), "{err}");
     }
 }

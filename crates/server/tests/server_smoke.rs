@@ -178,9 +178,18 @@ async fn connect_register_move_and_persist_across_reconnect() {
         config_dir.join("stats.schema.yaml"),
     )
     .unwrap();
-    std::fs::copy(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../config/plugin.example.toml"),
+    // A custom manifest rather than a copy of config/plugin.example.toml
+    // — this test needs `message_types` declared (#95) to exercise
+    // on_message routing below; the example manifest ships with an empty
+    // list, being a generic starting point rather than this test's fixture.
+    std::fs::write(
         config_dir.join("plugin.toml"),
+        r#"
+[plugin]
+name = "test-plugin"
+host_api_version = "0.2.0"
+message_types = [1000]
+"#,
     )
     .unwrap();
 
@@ -242,6 +251,28 @@ async fn connect_register_move_and_persist_across_reconnect() {
                 panic!("expected the move to be accepted, was rejected: {reason}");
             }
             _ => {}
+        }
+    }
+
+    // Plugin-routed message (#95): message_type 1000 isn't part of
+    // `server::session_protocol` at all — it only reaches the client
+    // because the configured plugin declared it and its on_message hook
+    // calls send_message back. Proves the full gateway → session →
+    // world actor → plugin → session path, not just that the manifest
+    // parses.
+    stream
+        .send(gateway::Envelope::new(1000, b"hello".to_vec()))
+        .await
+        .unwrap();
+    loop {
+        match recv_world(&mut stream).await {
+            ServerMessage::PluginMessage { body } => {
+                assert!(body.contains("1000"), "{body}");
+                assert!(body.contains("hello"), "{body}");
+                break;
+            }
+            ServerMessage::Moved { .. } => {}
+            other => panic!("expected a PluginMessage reply, got {other:?}"),
         }
     }
 

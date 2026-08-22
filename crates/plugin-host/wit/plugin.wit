@@ -9,7 +9,7 @@
 // below and/or lands as a new world, rather than silently changing what
 // `plugin` means underneath existing compiled plugins.
 
-package worldzero:plugin@0.1.0;
+package worldzero:plugin@0.2.0;
 
 /// What the host exposes for a plugin to call out to — nothing crosses
 /// this boundary that isn't listed here (docs/PROPOSAL.md, "Plugin
@@ -50,6 +50,15 @@ interface hooks {
     /// `event` (content::manifest::Trigger) names an interact-style
     /// event — `trigger-id` matches the manifest's `triggers[].id`.
     on-interact: func(trigger-id: string, actor-entity-id: string);
+
+    /// Fired when the gateway receives a message whose `message_type`
+    /// (docs/specs/Networking_Spec.md, "Message framing") matches one of
+    /// this plugin's declared `message_types` (`plugin.toml`) —
+    /// `sender-entity-id` is the connection's own entity (so the plugin
+    /// can `send-message` a reply back to it), `payload` is that
+    /// envelope's opaque, message_type-specific bytes, unparsed by the
+    /// host (#95).
+    on-message: func(message-type: u16, sender-entity-id: string, payload: list<u8>);
 }
 
 world plugin {

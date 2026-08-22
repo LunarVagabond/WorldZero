@@ -187,4 +187,19 @@ impl LoadedPlugin {
             .call_on_interact(&mut self.store, trigger_id, actor_entity_id)
             .map_err(|e| Error::new("plugin-host", format!("on_interact hook failed: {e:#}")))
     }
+
+    /// Delivers a gateway-routed message whose `message_type` matched one
+    /// of this plugin's declared `message_types` (#95) — the caller is
+    /// responsible for that match; this always calls the hook.
+    pub fn on_message(
+        &mut self,
+        message_type: u16,
+        sender_entity_id: &str,
+        payload: &[u8],
+    ) -> Result<()> {
+        self.bindings
+            .worldzero_plugin_hooks()
+            .call_on_message(&mut self.store, message_type, sender_entity_id, payload)
+            .map_err(|e| Error::new("plugin-host", format!("on_message hook failed: {e:#}")))
+    }
 }

@@ -49,6 +49,14 @@ impl Guest for Plugin {
             &format!("you interacted with {trigger_id}"),
         );
     }
+
+    fn on_message(message_type: u16, sender_entity_id: String, payload: Vec<u8>) {
+        let body = String::from_utf8_lossy(&payload);
+        let _ = worldzero::plugin::host::send_message(
+            &sender_entity_id,
+            &format!("on-message {message_type}: {body}"),
+        );
+    }
 }
 
 export!(Plugin);
