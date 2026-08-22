@@ -123,7 +123,19 @@ For major work:
 
 ## Development Interface
 
-There is no codebase yet, so there's no build/test/lint interface to document here. Once implementation starts (Phase 0 in [the Roadmap](../docs/product/Roadmap.md)), this section will document the canonical local dev commands — expect a single consistent entry point (likely a `Makefile` or `cargo xtask`, following the same "one consistent command surface" pattern regardless of which it ends up being) rather than a pile of one-off shell commands to memorize.
+The `Makefile` at the repo root is the canonical entry point for local dev commands — run `make help` for the full list. The common ones:
+
+```
+make build       # cargo build --workspace
+make test        # cargo test --workspace
+make test-live   # also run tests gated on real infra (Postgres/Redis) — needs WZ_POSTGRES_*/WZ_REDIS_* env vars; .env is loaded automatically if present
+make check       # fmt-check + lint + test — what CI runs
+make run         # run the server binary in the foreground
+make start        # run the server binary in the background, tracked via a PID file
+make stop         # stop what 'make start' started
+```
+
+Copy `.env.example` to `.env` and fill in real values to run anything that touches Postgres/Redis locally — `.env` is gitignored, never commit real credentials.
 
 ## Where To Contribute
 

@@ -19,6 +19,9 @@ target/
 logs/
 *.log
 
+# make start/stop (Makefile)
+.server.pid
+
 # Test and coverage output
 coverage/
 *.lcov
