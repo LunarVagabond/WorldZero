@@ -100,17 +100,29 @@ async fn main() {
 
     let mut zone = Zone::new(manifest, world_config);
 
-    if let (Ok(plugin_manifest_path), Ok(plugin_wasm_path)) = (
+    // Created before the plugin loads (not just before the actor starts,
+    // as before #95) — the plugin's `send_message` host call needs a
+    // `Sessions` handle from the moment it's constructed, even though
+    // it's empty (and every `send_message` call correctly errors "not
+    // connected") until a client actually connects.
+    let sessions: Sessions = Arc::new(Mutex::new(std::collections::HashMap::new()));
+
+    let plugin_runtime = if let (Ok(plugin_manifest_path), Ok(plugin_wasm_path)) = (
         std::env::var("WZ_PLUGIN_MANIFEST_PATH"),
         std::env::var("WZ_PLUGIN_WASM_PATH"),
     ) {
         let plugin_manifest_path = std::path::PathBuf::from(plugin_manifest_path);
         let plugin_wasm_path = std::path::PathBuf::from(plugin_wasm_path);
-        match plugin_startup::run_on_load(&plugin_manifest_path, &plugin_wasm_path) {
-            Ok(spawn_table_ids) => {
+        match plugin_startup::load_and_run_on_load(
+            &plugin_manifest_path,
+            &plugin_wasm_path,
+            sessions.clone(),
+        ) {
+            Ok((runtime, spawn_table_ids)) => {
                 for spawn_table_id in spawn_table_ids {
-                    spawn_npc_from_table(&mut zone, &spawn_table_id);
+                    world_actor::spawn_npc_from_table(&mut zone, &spawn_table_id);
                 }
+                Some(runtime)
             }
             Err(e) => {
                 panic!(
@@ -124,14 +136,18 @@ async fn main() {
         tracing::info!(
             "no plugin configured (set WZ_PLUGIN_MANIFEST_PATH and WZ_PLUGIN_WASM_PATH to load one)"
         );
-    }
-
-    let sessions: Sessions = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        None
+    };
+    let plugin_message_types = plugin_runtime
+        .as_ref()
+        .map(|runtime| runtime.message_types.clone())
+        .unwrap_or_default();
 
     let sessions_for_tick = sessions.clone();
     let world = world_actor::spawn_world_actor(
         zone,
         world_config.tick_interval(),
+        plugin_runtime,
         move |zone, outcomes| {
             for (entity_id, outcome) in outcomes {
                 match outcome {
@@ -178,6 +194,7 @@ async fn main() {
         zone_id,
         world,
         sessions,
+        plugin_message_types,
     });
 
     let mut incoming = Box::pin(incoming);
@@ -189,26 +206,6 @@ async fn main() {
             }
         });
     }
-}
-
-fn spawn_npc_from_table(zone: &mut Zone, spawn_table_id: &str) {
-    let Some(point) = zone
-        .manifest
-        .spawn_tables
-        .iter()
-        .find(|table| table.id == spawn_table_id)
-        .and_then(|table| table.points.first().copied())
-    else {
-        tracing::warn!(
-            spawn_table_id,
-            "plugin requested an unknown or empty spawn table"
-        );
-        return;
-    };
-
-    let entity_id = common::id::EntityId::new();
-    zone.spawn(entity_id, world::EntityKind::Npc, point);
-    tracing::info!(%entity_id, spawn_table_id, "spawned NPC from plugin on_load");
 }
 
 fn broadcast_all(sessions: &Sessions, message: ServerMessage) {

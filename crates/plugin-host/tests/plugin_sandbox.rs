@@ -28,7 +28,8 @@ fn manifest() -> PluginManifest {
         r#"
 [plugin]
 name = "test-plugin"
-host_api_version = "0.1.0"
+host_api_version = "0.2.0"
+message_types = [1000]
 "#,
     )
     .unwrap()
@@ -78,10 +79,21 @@ fn a_well_behaved_plugin_spawns_an_npc_and_responds_to_interaction() {
     plugin
         .on_interact("forest-entrance", "actor-1")
         .expect("on_interact should succeed");
+    {
+        let messages = callbacks.messages.lock().unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].0, "actor-1");
+        assert!(messages[0].1.contains("forest-entrance"));
+    }
+
+    plugin
+        .on_message(1000, "actor-1", b"hello")
+        .expect("on_message should succeed");
     let messages = callbacks.messages.lock().unwrap();
-    assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0].0, "actor-1");
-    assert!(messages[0].1.contains("forest-entrance"));
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[1].0, "actor-1");
+    assert!(messages[1].1.contains("1000"));
+    assert!(messages[1].1.contains("hello"));
 }
 
 #[test]

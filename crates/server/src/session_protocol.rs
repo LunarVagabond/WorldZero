@@ -80,6 +80,13 @@ pub enum ServerMessage {
     Error {
         message: String,
     },
+    /// A message a plugin's `send-message` host call addressed to this
+    /// connection's entity — the "make the interaction have a visible
+    /// effect" primitive (docs/specs/Plugin_API.md), delivered verbatim
+    /// as the plugin wrote it.
+    PluginMessage {
+        body: String,
+    },
 }
 
 // Both directions of this protocol define both `into_envelope` and
