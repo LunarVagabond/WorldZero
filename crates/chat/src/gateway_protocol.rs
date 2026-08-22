@@ -6,6 +6,11 @@
 //! chat traffic is low-frequency and human-typed, so readability during
 //! development wins here over wire efficiency.
 //!
+//! Identity is established *before* any of this — a connection must
+//! complete the `auth::gateway_protocol` login/registration handshake
+//! first (docs/specs/Auth_Spec.md, "Gateway handshake"); nothing here
+//! carries a username or issues an account_id.
+//!
 //! Scope: this is chat's own demo-integration protocol — a fixed, closed
 //! set of message kinds `chat` itself defines. It is not a generic
 //! "anyone can register a new command" mechanism; see
@@ -13,7 +18,7 @@
 //! extensible message-type/command registry a plugin author could hook
 //! into instead.
 
-use common::id::{AccountId, ChannelId};
+use common::id::ChannelId;
 use common::{Error, Result};
 use gateway::Envelope;
 use serde::{Deserialize, Serialize};
@@ -23,7 +28,6 @@ pub const CHAT_MESSAGE_TYPE: u16 = 100;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum ClientMessage {
-    Hello { username: String },
     Join { channel: String },
     Leave { channel: String },
     Send { channel_id: ChannelId, body: String },
@@ -32,9 +36,6 @@ pub enum ClientMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum ServerMessage {
-    Welcome {
-        account_id: AccountId,
-    },
     Joined {
         channel_id: ChannelId,
         channel: String,

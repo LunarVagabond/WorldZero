@@ -1,8 +1,7 @@
-//! Shared helpers for chat's dev-facing demo tooling (`bin/demo`,
-//! `bin/gateway_server`) — not part of chat's real API surface, just the
-//! "find-or-create a stable identity/channel by name" convenience both
-//! demo entry points need so re-running with the same name rejoins the
-//! same thing instead of creating a duplicate every time. `pub` only
+//! Shared helpers for chat's dev-facing demo tooling — not part of
+//! chat's real API surface, just the "find-or-create by name" convenience
+//! both demo entry points need so re-running with the same name rejoins
+//! the same thing instead of creating a duplicate every time. `pub` only
 //! because `src/bin/*` binaries compile as separate crates and need to
 //! reach this from outside.
 
@@ -14,6 +13,11 @@ use crate::store::ChannelStore;
 
 /// A stable demo account per username — re-running with the same name
 /// rejoins the same identity instead of creating a new one every time.
+/// Only used by `bin/demo`'s `--no-gateway` direct mode now — gateway
+/// mode authenticates for real via `auth::gateway_protocol`
+/// (docs/specs/Auth_Spec.md, "Gateway handshake"), so this bypass
+/// intentionally isn't a security boundary: no password, and `chat-demo-`
+/// prefixed so it can never collide with a real registered username.
 pub async fn find_or_create_demo_account(pool: &PgPool, username: &str) -> Result<AccountId> {
     let demo_username = format!("chat-demo-{username}");
 

@@ -12,6 +12,7 @@ async-trait = "0.1.92"
 base64 = "0.23.1"
 common = { version = "0.1.0", path = "../common" }
 deadpool-redis = { version = "0.23.0", features = ["rt_tokio_1"] }
+gateway = { version = "0.1.0", path = "../gateway" }
 password-hash = { version = "0.5", features = ["getrandom", "std"] }
 rand = "0.10.2"
 serde = { version = "1.0.229", features = ["derive"] }

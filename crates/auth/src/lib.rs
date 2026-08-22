@@ -2,6 +2,7 @@
 //!
 //! Design: docs/PROPOSAL.md ("Auth Provider Architecture") and docs/specs/Auth_Spec.md.
 
+pub mod gateway_protocol;
 pub mod password;
 pub mod postgres_store;
 pub mod provider;
