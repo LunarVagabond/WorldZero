@@ -8,24 +8,26 @@ LOG_DIR := $(RUN_DIR)/logs
 PID_FILE := $(PID_DIR)/server.pid
 LOG_FILE := $(LOG_DIR)/server.log
 
-.PHONY: help build run start stop restart status test test-live fmt fmt-check lint check clean
+.PHONY: help build run start stop restart status test test-live fmt fmt-check lint check clean migrate migrate-down
 
 help:
 	@echo "WorldZero — local dev commands"
 	@echo ""
-	@echo "  make build       cargo build --workspace"
-	@echo "  make run         run the server binary in the foreground"
-	@echo "  make start       run the server binary in the background (pid/log under $(RUN_DIR)/)"
-	@echo "  make stop        stop the background server started with 'make start'"
-	@echo "  make restart     stop, then start"
-	@echo "  make status      report whether the background server is running"
-	@echo "  make test        cargo test --workspace"
-	@echo "  make test-live   also run tests gated on real infra (needs WZ_POSTGRES_*/WZ_REDIS_* — .env is loaded automatically)"
-	@echo "  make fmt         cargo fmt"
-	@echo "  make fmt-check   cargo fmt --all -- --check"
-	@echo "  make lint        cargo clippy --workspace --all-targets -- -D warnings"
-	@echo "  make check       fmt-check + lint + test (what CI runs)"
-	@echo "  make clean       cargo clean, remove PID/log files"
+	@echo "  make build         cargo build --workspace"
+	@echo "  make run           run the server binary in the foreground"
+	@echo "  make start         run the server binary in the background (pid/log under $(RUN_DIR)/)"
+	@echo "  make stop          stop the background server started with 'make start'"
+	@echo "  make restart       stop, then start"
+	@echo "  make status        report whether the background server is running"
+	@echo "  make migrate       apply pending db/migrations/*.up.sql (needs WZ_POSTGRES_* — .env is loaded automatically)"
+	@echo "  make migrate-down  revert the most recently applied migration (its .down.sql)"
+	@echo "  make test          cargo test --workspace"
+	@echo "  make test-live     also run tests gated on real infra (needs WZ_POSTGRES_*/WZ_REDIS_* — .env is loaded automatically)"
+	@echo "  make fmt           cargo fmt"
+	@echo "  make fmt-check     cargo fmt --all -- --check"
+	@echo "  make lint          cargo clippy --workspace --all-targets -- -D warnings"
+	@echo "  make check         fmt-check + lint + test (what CI runs)"
+	@echo "  make clean         cargo clean, remove PID/log files"
 
 build:
 	$(CARGO) build --workspace
@@ -62,6 +64,12 @@ status:
 	else \
 		echo "server not running"; \
 	fi
+
+migrate:
+	$(CARGO) run -p common --bin migrate -- up
+
+migrate-down:
+	$(CARGO) run -p common --bin migrate -- down
 
 test:
 	$(CARGO) test --workspace
