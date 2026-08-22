@@ -96,3 +96,13 @@ This confirms the trait is sufficient as-is: `Credentials` absorbs the shape dif
 - `verify_credentials` expects `{ "username": "...", "password": "..." }` in the `Credentials` bag; wrong password or nonexistent username both return the same generic "invalid credentials" error (not distinguishable to a caller — don't leak which one was wrong).
 - `issue_session` delegates to the shared Redis-backed session issuer described above.
 - Storage sits behind an `AccountStore` trait (`create`/`find_by_username`) so the provider itself doesn't care where accounts live. `PostgresAccountStore` is the real implementation, backed by the `accounts` table (`db/migrations/0001_create_accounts/`) — `id UUID PRIMARY KEY`, `username TEXT UNIQUE`, `password_hash TEXT`, `created_at TIMESTAMPTZ`. `InMemoryAccountStore` exists only for tests.
+
+## Gateway handshake
+
+A dev-facing, demo-scoped wiring of this provider into a live `gateway` connection — `auth::gateway_protocol`, `message_type` 1 (docs/specs/Networking_Spec.md's catalog note), used by `chat::bin::gateway_server`/`bin::demo` (docs/specs/Chat_Spec.md, "Gateway demo integration"). This is where `chat`'s earlier "trust whatever username the client's `Hello` claims" gap (noted as not a security boundary when that integration first landed) gets closed for real.
+
+- A connection's very first envelope must be `message_type` 1: `Register { username, password }` or `Login { username, password }` — `UsernamePasswordProvider::register`/`verify_credentials` run against it exactly as described above (Argon2id hashing, generic "invalid credentials" for both wrong-password and nonexistent-username).
+- On success, the server calls `issue_session` and replies `Authenticated { account_id, username, session_token }`; the `account_id` from here on is what every other `message_type` on the connection trusts as that connection's identity — nothing downstream (chat's `Join`/`Leave`/`Send`) accepts a client-claimed identity anymore.
+- On failure, the server replies `Error { message }` and closes the connection — no retry-on-the-same-connection; the client reconnects to try again.
+- The issued `session_token` is not yet used for anything past this handshake (no reconnect-without-re-entering-a-password flow, no other service verifies it) — that's real follow-up work once more than one service needs to trust an already-authenticated connection, not solved here.
+- Enforcing "auth first, then everything else" is this integration's own connection-handling code, not a `gateway`-crate-level guarantee — `gateway` itself has no concept of message ordering or required handshakes (docs/specs/Networking_Spec.md).

@@ -1,20 +1,24 @@
 //! `cargo run -p chat --bin gateway_server` (or `make chat-server`) —
 //! standalone dev/demo server that terminates the real `gateway` TCP+TLS
-//! transport and routes decoded chat envelopes into `chat`'s
-//! `ChannelStore`/`ChatBus` (docs/specs/Chat_Spec.md, "Gateway demo
-//! integration"). Not the phase-1 combined `server` binary
-//! (crates/server) — chat isn't in that phase yet per its own roadmap
-//! note; this is a standalone entry point for exercising gateway+chat
-//! together ahead of that.
+//! transport, authenticates each connection via `auth`'s real
+//! username/password provider before trusting its identity
+//! (docs/specs/Auth_Spec.md, "Gateway handshake"), and routes decoded
+//! chat envelopes into `chat`'s `ChannelStore`/`ChatBus`
+//! (docs/specs/Chat_Spec.md, "Gateway demo integration"). Not the phase-1
+//! combined `server` binary (crates/server) — chat isn't in that phase
+//! yet per its own roadmap note; this is a standalone entry point for
+//! exercising auth+gateway+chat together ahead of that.
 //!
 //! Start this first, then point `bin/demo` clients at it (defaults to
-//! gateway mode — `cargo run -p chat --bin demo -- <username>`, or `make
-//! chat USER=<username>`). Needs WZ_POSTGRES_*/WZ_REDIS_* (`.env`).
-//! Listens on `WZ_CHAT_GATEWAY_ADDR` (default `127.0.0.1:7800`).
+//! gateway mode — `cargo run -p chat --bin demo -- <username> --password
+//! <pw> [--register]`, or `make chat NAME=<username>`). Needs
+//! WZ_POSTGRES_*/WZ_REDIS_* (`.env`). Listens on `WZ_CHAT_GATEWAY_ADDR`
+//! (default `127.0.0.1:7800`).
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
+use auth::AuthProvider;
 use chat::gateway_protocol::{ClientMessage, ServerMessage};
 use chat::{ChannelStore, ChatBus};
 use common::config::{PostgresConfig, RedisConfig};
@@ -28,9 +32,10 @@ use tokio_util::codec::Framed;
 
 const DEFAULT_ADDR: &str = "127.0.0.1:7800";
 
-/// Display name per connected account, populated from each session's
-/// `Hello` — a forwarded `Chat` message needs the sender's *typed*
-/// username, not their `chat-demo-<name>` DB username.
+/// Display name per connected account, populated once a session's auth
+/// handshake succeeds — a forwarded `Chat` message needs the sender's
+/// real (authenticated) `accounts.username`, not a re-derived lookup on
+/// every message.
 type Usernames = Arc<RwLock<HashMap<AccountId, String>>>;
 
 type ChatStream =
@@ -50,6 +55,11 @@ async fn main() {
     let redis_config = RedisConfig::from_env().expect("WZ_REDIS_* env vars set");
     let redis =
         redis_pool(&redis_config, PoolOptions::default()).expect("failed to build Redis pool");
+
+    let account_store: Arc<dyn auth::AccountStore> =
+        Arc::new(auth::PostgresAccountStore::new(pool.clone()));
+    let sessions = auth::SessionManager::new(redis.clone());
+    let auth_provider = Arc::new(auth::UsernamePasswordProvider::new(account_store, sessions));
 
     let store = Arc::new(ChannelStore::new(pool.clone()));
     let bus = Arc::new(ChatBus::new(redis, redis_config));
@@ -71,8 +81,10 @@ async fn main() {
         let store = store.clone();
         let bus = bus.clone();
         let usernames = usernames.clone();
+        let auth_provider = auth_provider.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_session(framed, pool, store, bus, usernames).await {
+            if let Err(e) = handle_session(framed, pool, store, bus, usernames, auth_provider).await
+            {
                 tracing::warn!(error = %e, "chat gateway session ended with an error");
             }
         });
@@ -85,6 +97,7 @@ async fn handle_session(
     store: Arc<ChannelStore>,
     bus: Arc<ChatBus>,
     usernames: Usernames,
+    auth_provider: Arc<auth::UsernamePasswordProvider>,
 ) -> Result<()> {
     let (mut sink, mut stream) = framed.split();
     let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded_channel::<Envelope>();
@@ -93,21 +106,47 @@ async fn handle_session(
         return Ok(());
     };
     let envelope = frame.map_err(|e| Error::wrap("chat", "connection error", e))?;
-    let ClientMessage::Hello { username } = ClientMessage::from_envelope(&envelope)? else {
-        send(
-            &mut sink,
-            &ServerMessage::Error {
-                message: "expected Hello as the first message".to_string(),
-            },
-        )
-        .await?;
-        return Ok(());
+    let auth_message = match auth::gateway_protocol::ClientMessage::from_envelope(&envelope) {
+        Ok(m) => m,
+        Err(e) => {
+            send_auth(
+                &mut sink,
+                &auth::gateway_protocol::ServerMessage::Error {
+                    message: e.to_string(),
+                },
+            )
+            .await?;
+            return Ok(());
+        }
     };
 
-    let account_id = chat::demo_support::find_or_create_demo_account(&pool, &username).await?;
-    usernames.write().unwrap().insert(account_id, username);
+    let (account_id, username, session) = match authenticate(auth_message, &auth_provider).await {
+        Ok(result) => result,
+        Err(e) => {
+            send_auth(
+                &mut sink,
+                &auth::gateway_protocol::ServerMessage::Error {
+                    message: e.to_string(),
+                },
+            )
+            .await?;
+            return Ok(());
+        }
+    };
+    usernames
+        .write()
+        .unwrap()
+        .insert(account_id, username.clone());
 
-    send(&mut sink, &ServerMessage::Welcome { account_id }).await?;
+    send_auth(
+        &mut sink,
+        &auth::gateway_protocol::ServerMessage::Authenticated {
+            account_id,
+            username,
+            session_token: session.token,
+        },
+    )
+    .await?;
 
     // No auto-join here — the client drives its own initial `Join` for
     // the default channel and waits for the `Joined` confirmation, so
@@ -129,11 +168,6 @@ async fn handle_session(
                 };
 
                 match message {
-                    ClientMessage::Hello { .. } => {
-                        send(&mut sink, &ServerMessage::Error {
-                            message: "already said hello on this connection".to_string(),
-                        }).await?;
-                    }
                     ClientMessage::Join { channel } => {
                         if joined.contains_key(&channel) {
                             send(&mut sink, &ServerMessage::Error {
@@ -245,4 +279,41 @@ async fn send(sink: &mut ChatSink, message: &ServerMessage) -> Result<()> {
     sink.send(envelope)
         .await
         .map_err(|e| Error::wrap("chat", "failed to send to client", e))
+}
+
+async fn send_auth(
+    sink: &mut ChatSink,
+    message: &auth::gateway_protocol::ServerMessage,
+) -> Result<()> {
+    let envelope = message.into_envelope()?;
+    sink.send(envelope)
+        .await
+        .map_err(|e| Error::wrap("chat", "failed to send to client", e))
+}
+
+/// Runs the client's `Register`/`Login` request against the real
+/// `auth` provider and, on success, issues a session — the account_id
+/// and username everything downstream in this connection trusts.
+async fn authenticate(
+    message: auth::gateway_protocol::ClientMessage,
+    provider: &auth::UsernamePasswordProvider,
+) -> Result<(AccountId, String, auth::Session)> {
+    use auth::gateway_protocol::ClientMessage as AuthMessage;
+
+    let (account_id, username) = match message {
+        AuthMessage::Register { username, password } => {
+            let account_id = provider.register(&username, &password).await?;
+            (account_id, username)
+        }
+        AuthMessage::Login { username, password } => {
+            let credentials = auth::Credentials::new(
+                serde_json::json!({ "username": username, "password": password }),
+            );
+            let account_id = provider.verify_credentials(&credentials).await?;
+            (account_id, username)
+        }
+    };
+
+    let session = provider.issue_session(account_id).await?;
+    Ok((account_id, username, session))
 }

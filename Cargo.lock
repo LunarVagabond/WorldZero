@@ -199,6 +199,7 @@ dependencies = [
  "base64 0.23.1",
  "common",
  "deadpool-redis",
+ "gateway",
  "password-hash",
  "rand",
  "serde",
@@ -459,6 +460,7 @@ dependencies = [
 name = "chat"
 version = "0.1.0"
 dependencies = [
+ "auth",
  "common",
  "deadpool-redis",
  "futures-util",

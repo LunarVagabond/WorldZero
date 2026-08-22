@@ -23,7 +23,7 @@ use super::commands::{self, Command};
 const SERVER_NAME: &str = "localhost";
 const DEFAULT_CHANNEL: &str = "demo";
 
-pub async fn run(username: &str, addr: &str) -> Result<()> {
+pub async fn run(username: &str, password: &str, register: bool, addr: &str) -> Result<()> {
     gateway::tcp::ensure_crypto_provider_installed();
 
     // Demo convenience: client and server share the same config dir
@@ -65,19 +65,24 @@ pub async fn run(username: &str, addr: &str) -> Result<()> {
     let framed = tokio_util::codec::Framed::new(tls, gateway::EnvelopeCodec::default());
     let (mut sink, mut stream) = framed.split();
 
-    send(
-        &mut sink,
-        &ClientMessage::Hello {
+    let auth_request = if register {
+        auth::gateway_protocol::ClientMessage::Register {
             username: username.to_string(),
-        },
-    )
-    .await?;
-    match recv(&mut stream).await? {
-        ServerMessage::Welcome { .. } => {}
-        other => {
+            password: password.to_string(),
+        }
+    } else {
+        auth::gateway_protocol::ClientMessage::Login {
+            username: username.to_string(),
+            password: password.to_string(),
+        }
+    };
+    send_auth(&mut sink, &auth_request).await?;
+    match recv_auth(&mut stream).await? {
+        auth::gateway_protocol::ServerMessage::Authenticated { .. } => {}
+        auth::gateway_protocol::ServerMessage::Error { message } => {
             return Err(Error::new(
                 "chat",
-                format!("expected Welcome, got {other:?}"),
+                format!("authentication failed: {message}"),
             ));
         }
     }
@@ -127,7 +132,6 @@ pub async fn run(username: &str, addr: &str) -> Result<()> {
                 };
                 let envelope = frame.map_err(|e| Error::wrap("chat", "connection error", e))?;
                 match ServerMessage::from_envelope(&envelope)? {
-                    ServerMessage::Welcome { .. } => {}
                     ServerMessage::Joined { channel_id, channel } => {
                         joined.insert(channel.clone(), channel_id);
                         current = Some(channel.clone());
@@ -229,7 +233,30 @@ async fn recv(
     let frame = stream
         .next()
         .await
-        .ok_or_else(|| Error::new("chat", "gateway closed the connection before Welcome"))?;
+        .ok_or_else(|| Error::new("chat", "gateway closed the connection before Joined"))?;
     let envelope = frame.map_err(|e| Error::wrap("chat", "connection error", e))?;
     ServerMessage::from_envelope(&envelope)
+}
+
+async fn send_auth(
+    sink: &mut (impl Sink<gateway::Envelope, Error = std::io::Error> + Unpin),
+    message: &auth::gateway_protocol::ClientMessage,
+) -> Result<()> {
+    let envelope = message.into_envelope()?;
+    sink.send(envelope)
+        .await
+        .map_err(|e| Error::wrap("chat", "failed to send to the gateway", e))
+}
+
+async fn recv_auth(
+    stream: &mut (impl Stream<Item = std::result::Result<gateway::Envelope, std::io::Error>> + Unpin),
+) -> Result<auth::gateway_protocol::ServerMessage> {
+    let frame = stream.next().await.ok_or_else(|| {
+        Error::new(
+            "chat",
+            "gateway closed the connection before authenticating",
+        )
+    })?;
+    let envelope = frame.map_err(|e| Error::wrap("chat", "connection error", e))?;
+    auth::gateway_protocol::ServerMessage::from_envelope(&envelope)
 }
