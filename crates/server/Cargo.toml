@@ -7,3 +7,18 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+auth = { version = "0.1.0", path = "../auth" }
+character = { version = "0.1.0", path = "../character" }
+common = { version = "0.1.0", path = "../common" }
+content = { version = "0.1.0", path = "../content" }
+futures-util = "0.3.34"
+gateway = { version = "0.1.0", path = "../gateway" }
+plugin-host = { version = "0.1.0", path = "../plugin-host" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+tokio-rustls = "0.26.4"
+tokio-util = { version = "0.7.19", features = ["codec"] }
+tracing = "0.1.44"
+uuid = "1.25.0"
+world = { version = "0.1.0", path = "../world" }

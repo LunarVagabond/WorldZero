@@ -1,0 +1,8 @@
+# Example plugin manifest — loaded by the `plugin-host` crate
+# (crates/plugin-host/src/manifest.rs), see docs/specs/Plugin_API.md.
+# Copy/rename this alongside your own compiled plugin .wasm (point
+# WZ_PLUGIN_MANIFEST_PATH / WZ_PLUGIN_WASM_PATH at them) and adjust freely.
+[plugin]
+name = "example-plugin"
+host_api_version = "0.1.0"
+capabilities = []

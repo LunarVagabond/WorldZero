@@ -2681,6 +2681,23 @@ dependencies = [
 [[package]]
 name = "server"
 version = "0.1.0"
+dependencies = [
+ "auth",
+ "character",
+ "common",
+ "content",
+ "futures-util",
+ "gateway",
+ "plugin-host",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "tracing",
+ "uuid",
+ "world",
+]
 
 [[package]]
 name = "sha1"

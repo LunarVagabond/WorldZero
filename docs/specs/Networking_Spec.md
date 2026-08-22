@@ -44,5 +44,6 @@ envelope:
 |---|---|---|---|
 | 1 | `auth` (`auth::gateway_protocol`) | JSON | Login/registration handshake a connection performs first — docs/specs/Auth_Spec.md, "Gateway handshake". |
 | 100 | `chat` (`chat::gateway_protocol`) | JSON | Chat's dev-facing gateway demo integration, gated behind the auth handshake above — docs/specs/Chat_Spec.md, "Gateway demo integration". |
+| 200 | `server` (`server::session_protocol`) | JSON | The phase-1 combined server's movement session (join a zone, move, see other entities move) — gated behind the same auth handshake. |
 
 This is a fixed, code-defined catalog, not an extensible registry — a plugin author can't currently add their own `message_type`/command without editing core. That gap is tracked as [#95](https://github.com/LunarVagabond/WorldZero/issues/95) rather than solved here; keep it in mind as more message types get added on top of this catalog so the eventual design doesn't have to fight a pile of ad hoc, core-only dispatch code.

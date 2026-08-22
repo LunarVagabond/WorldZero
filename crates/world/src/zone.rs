@@ -69,6 +69,21 @@ impl Zone {
         self.index.position_of(entity)
     }
 
+    /// Every currently-spawned entity, its kind, and its position — the
+    /// "here's who's already here" roster a newly-joining client needs
+    /// (a pre-spawned NPC otherwise has no way to become visible to a
+    /// client that joins after it spawned).
+    pub fn entities(&self) -> Vec<(EntityId, EntityKind, Point)> {
+        self.entities
+            .iter()
+            .filter_map(|(&id, &kind)| {
+                self.index
+                    .position_of(id)
+                    .map(|position| (id, kind, position))
+            })
+            .collect()
+    }
+
     /// Queues a movement request for the next `tick` — movement is never
     /// applied immediately on receipt, only as part of the fixed-rate
     /// simulation step, so every accepted move is validated against a
@@ -243,5 +258,33 @@ collision:
         assert!(zone.tick().is_empty());
         // A second tick with nothing newly queued does nothing further.
         assert!(zone.tick().is_empty());
+    }
+
+    #[test]
+    fn entities_lists_every_spawned_entity_with_its_current_position() {
+        let mut zone = zone_with_square_bounds();
+        let player = EntityId::new();
+        let npc = EntityId::new();
+        zone.spawn(player, EntityKind::Player, (1.0, 1.0));
+        zone.spawn(npc, EntityKind::Npc, (2.0, 2.0));
+
+        let mut entities = zone.entities();
+        entities.sort_by_key(|(id, ..)| *id);
+        let mut expected = vec![
+            (player, EntityKind::Player, (1.0, 1.0)),
+            (npc, EntityKind::Npc, (2.0, 2.0)),
+        ];
+        expected.sort_by_key(|(id, ..)| *id);
+        assert_eq!(entities, expected);
+    }
+
+    #[test]
+    fn entities_excludes_a_despawned_entity() {
+        let mut zone = zone_with_square_bounds();
+        let entity = EntityId::new();
+        zone.spawn(entity, EntityKind::Player, (1.0, 1.0));
+        zone.despawn(entity);
+
+        assert!(zone.entities().is_empty());
     }
 }

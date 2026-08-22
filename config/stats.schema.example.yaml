@@ -1,0 +1,20 @@
+# Example declared attribute schema — loaded by the `character` crate
+# (crates/character/src/schema.rs), see docs/specs/Data_Model_Spec.md.
+# Copy/rename this as stats.schema.yaml in the config dir your instance
+# actually uses (WZ_CONFIG_DIR, or ./config by default) and adjust freely;
+# the framework doesn't ship with any stats of its own (not even HP).
+schema_version: 1
+stats:
+  - key: hp
+    type: int
+    default: 100
+    min: 0
+    max: 100
+  - key: mana
+    type: int
+    default: 50
+    min: 0
+    max: 50
+  - key: reputation.ironclad_guild
+    type: int
+    default: 0
