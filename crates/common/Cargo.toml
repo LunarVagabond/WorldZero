@@ -7,3 +7,9 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+time = { version = "0.3.55", features = ["formatting"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["registry", "fmt", "env-filter"] }
+
+[dev-dependencies]
+time = { version = "0.3.55", features = ["parsing"] }

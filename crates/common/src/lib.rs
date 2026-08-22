@@ -1,7 +1,5 @@
 //! Cross-cutting code shared by every other crate in the workspace.
 //!
-//! No concrete logic yet — this crate is pre-implementation scaffolding.
-//!
 //! **Scope, deliberately tight — read before adding to this crate:** this exists
 //! to avoid duplicating (or worse, letting drift) the handful of things every
 //! other crate genuinely needs the same version of:
@@ -15,3 +13,9 @@
 //! It is not a general-purpose dumping ground. If something is only used by
 //! one or two crates, it belongs in one of them (or gets duplicated on
 //! purpose), not here by default.
+
+pub mod config;
+pub mod error;
+pub mod logging;
+
+pub use error::{Error, Result, ResultExt};
