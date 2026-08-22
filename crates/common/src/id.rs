@@ -142,6 +142,9 @@ pub type ZoneId = Id<ZoneMarker>;
 pub struct AccountMarker;
 pub type AccountId = Id<AccountMarker>;
 
+pub struct ChannelMarker;
+pub type ChannelId = Id<ChannelMarker>;
+
 #[cfg(test)]
 mod tests {
     use super::*;

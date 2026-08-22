@@ -7,3 +7,13 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+common = { version = "0.1.0", path = "../common" }
+deadpool-redis = { version = "0.23.0", features = ["rt_tokio_1"] }
+futures-util = "0.3.34"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+serde_yaml = "0.9.34"
+sqlx = { version = "0.9.0", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls-aws-lc-rs", "uuid"] }
+time = { version = "0.3.55", features = ["formatting", "parsing", "serde-well-known"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "io-std"] }
+uuid = "1.25.0"

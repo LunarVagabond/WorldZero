@@ -43,17 +43,21 @@ pub async fn postgres_pool(config: &PostgresConfig, options: PoolOptions) -> Res
         .map_err(|e| Error::wrap("common", "failed to connect to Postgres", e))
 }
 
-pub fn redis_pool(config: &RedisConfig, options: PoolOptions) -> Result<RedisPool> {
-    // Built from typed connection info, not a `redis://` URL string, so a
-    // password containing URL-special characters (`/`, `+`, `@`, ...) can't
-    // break parsing.
-    let connection_info = deadpool_redis::ConnectionInfo {
+/// Built from typed connection info, not a `redis://` URL string, so a
+/// password containing URL-special characters (`/`, `+`, `@`, ...) can't
+/// break parsing. Shared by [`redis_pool`] and [`redis_pubsub_connection`].
+fn redis_connection_info(config: &RedisConfig) -> deadpool_redis::ConnectionInfo {
+    deadpool_redis::ConnectionInfo {
         addr: deadpool_redis::ConnectionAddr::Tcp(config.host.clone(), config.port),
         redis: deadpool_redis::RedisConnectionInfo {
             password: config.password.clone(),
             ..Default::default()
         },
-    };
+    }
+}
+
+pub fn redis_pool(config: &RedisConfig, options: PoolOptions) -> Result<RedisPool> {
+    let connection_info = redis_connection_info(config);
 
     let redis_config = deadpool_redis::Config {
         url: None,
@@ -81,6 +85,25 @@ pub async fn redis_connection(pool: &RedisPool) -> Result<deadpool_redis::Connec
     pool.get()
         .await
         .map_err(|e| Error::wrap("common", "failed to acquire a Redis connection", e))
+}
+
+/// A dedicated (not pooled) connection suitable for a sustained pub/sub
+/// subscription. Pooled connections ([`redis_pool`]/[`redis_connection`])
+/// are multiplexed request/response connections meant to be borrowed and
+/// returned quickly — a long-lived `SUBSCRIBE` doesn't fit that model, so
+/// pub/sub always gets its own connection outside the pool.
+pub async fn redis_pubsub_connection(
+    config: &RedisConfig,
+) -> Result<deadpool_redis::redis::aio::PubSub> {
+    let client = deadpool_redis::redis::Client::open(deadpool_redis::redis::ConnectionInfo::from(
+        redis_connection_info(config),
+    ))
+    .map_err(|e| Error::wrap("common", "failed to build Redis client", e))?;
+
+    client
+        .get_async_pubsub()
+        .await
+        .map_err(|e| Error::wrap("common", "failed to open a pub/sub connection", e))
 }
 
 #[cfg(test)]
