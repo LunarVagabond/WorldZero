@@ -37,3 +37,11 @@ envelope:
 - **TCP:** the envelope is length-prefixed — a 4-byte big-endian `u32` giving the envelope's total byte length, followed by that many bytes. This is exactly what `tokio_util::codec::LengthDelimitedCodec` implements; used directly rather than hand-rolled. Handles a message split across multiple TCP packets by construction (the codec buffers until it has a complete frame) — that's the whole reason a length prefix is needed on a stream in the first place.
 - **UDP:** the envelope *is* the datagram payload — no length prefix, since a UDP datagram already has a natural boundary (`recv` returns exactly one datagram's worth of bytes, never more, never a partial one). **No message is ever reassembled across multiple UDP datagrams** — if a message wouldn't fit in one datagram, it doesn't belong on the UDP channel at all (matches the proposal's "high-frequency, loss-tolerant traffic" scope for this channel — position updates and combat ticks are small by nature).
 - Both channels use the same `message_type` numbering — a given type means the same thing regardless of which channel carried it, so a handler doesn't need to know which transport a message arrived over to interpret it.
+
+**Catalog so far** (each owned/defined by the crate that uses it, not by this spec — see that crate's own module for the actual message shapes):
+
+| `message_type` | Owner | Payload encoding | Notes |
+|---|---|---|---|
+| 100 | `chat` (`chat::gateway_protocol`) | JSON | Chat's dev-facing gateway demo integration — docs/specs/Chat_Spec.md, "Gateway demo integration". |
+
+This is a fixed, code-defined catalog, not an extensible registry — a plugin author can't currently add their own `message_type`/command without editing core. That gap is tracked as [#95](https://github.com/LunarVagabond/WorldZero/issues/95) rather than solved here; keep it in mind as more message types get added on top of this catalog so the eventual design doesn't have to fight a pile of ad hoc, core-only dispatch code.

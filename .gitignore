@@ -15,6 +15,11 @@ target/
 *.local
 *.key
 
+# gateway's self-signed TLS/DTLS cert, generated on first run
+# (docs/specs/Networking_Spec.md, "TLS (TCP channel)") — not authored,
+# doesn't belong in git the way a dev's own config/*.yaml does
+config/certs/
+
 # Logs
 logs/
 *.log

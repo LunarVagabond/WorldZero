@@ -4,6 +4,8 @@
 //! and [Decision #82](https://github.com/LunarVagabond/WorldZero/issues/82).
 //! Presence isn't implemented yet — see docs/specs/Chat_Spec.md, "Not this pass".
 
+pub mod demo_support;
+pub mod gateway_protocol;
 pub mod pubsub;
 pub mod schema;
 pub mod store;
