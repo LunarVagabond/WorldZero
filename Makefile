@@ -2,8 +2,11 @@
 export
 
 CARGO ?= cargo
-PID_FILE := .server.pid
-LOG_FILE := server.log
+RUN_DIR := _running
+PID_DIR := $(RUN_DIR)/pids
+LOG_DIR := $(RUN_DIR)/logs
+PID_FILE := $(PID_DIR)/server.pid
+LOG_FILE := $(LOG_DIR)/server.log
 
 .PHONY: help build run start stop restart status test test-live fmt fmt-check lint check clean
 
@@ -12,7 +15,7 @@ help:
 	@echo ""
 	@echo "  make build       cargo build --workspace"
 	@echo "  make run         run the server binary in the foreground"
-	@echo "  make start       run the server binary in the background (PID file: $(PID_FILE))"
+	@echo "  make start       run the server binary in the background (pid/log under $(RUN_DIR)/)"
 	@echo "  make stop        stop the background server started with 'make start'"
 	@echo "  make restart     stop, then start"
 	@echo "  make status      report whether the background server is running"
@@ -31,6 +34,7 @@ run:
 	$(CARGO) run -p server
 
 start:
+	@mkdir -p $(PID_DIR) $(LOG_DIR)
 	@if [ -f $(PID_FILE) ] && kill -0 "$$(cat $(PID_FILE))" 2>/dev/null; then \
 		echo "server already running (pid $$(cat $(PID_FILE)))"; \
 	else \
@@ -78,4 +82,4 @@ check: fmt-check lint test
 
 clean:
 	$(CARGO) clean
-	rm -f $(PID_FILE) $(LOG_FILE)
+	rm -rf $(RUN_DIR)

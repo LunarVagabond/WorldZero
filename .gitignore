@@ -19,8 +19,8 @@ target/
 logs/
 *.log
 
-# make start/stop (Makefile)
-.server.pid
+# make start/stop (Makefile) — per-service pid/log files
+_running/
 
 # Test and coverage output
 coverage/
