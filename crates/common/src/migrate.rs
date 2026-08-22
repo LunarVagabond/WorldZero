@@ -138,12 +138,18 @@ mod tests {
     }
 
     // Real Postgres, not run in CI — set WZ_POSTGRES_* and run with
-    // `-- --ignored`. Runs against the real db/migrations/ directory, so
-    // this is idempotent by construction (sqlx tracks what's applied) —
-    // safe to run repeatedly against the same dev database.
+    // `-- --ignored`. Deliberately non-destructive: `migrate_down_one`
+    // against the real db/migrations directory is exercised manually
+    // (`make migrate-down` / `make migrate`), not here — sqlx's migrator
+    // cross-checks the *entire* applied-migration history in
+    // `_sqlx_migrations` (shared per-database, not per-directory) against
+    // whatever migration source you hand it, so there's no clean way to
+    // sandbox an up/down round trip in an isolated directory without
+    // racing `character`/`auth`'s tests, which depend on this same real
+    // schema and run concurrently under `cargo test --workspace -- --ignored`.
     #[tokio::test]
     #[ignore]
-    async fn up_then_down_round_trips_cleanly() {
+    async fn migrate_up_is_idempotent_against_the_real_migrations() {
         let config = PostgresConfig::from_env().expect("WZ_POSTGRES_* env vars set");
         let pool = postgres_pool(&config, PoolOptions::default())
             .await
@@ -151,29 +157,6 @@ mod tests {
         let dir = migrations_dir();
 
         migrate_up(&pool, &dir).await.unwrap();
-
-        let exists: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'accounts')",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert!(exists, "accounts table should exist after migrate_up");
-
-        migrate_down_one(&pool, &dir).await.unwrap();
-
-        let exists_after_undo: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'accounts')",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert!(
-            !exists_after_undo,
-            "accounts table should be gone after migrate_down_one"
-        );
-
-        // Leave the database in the applied state for other tests/dev use.
         migrate_up(&pool, &dir).await.unwrap();
     }
 }
