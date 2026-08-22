@@ -1,0 +1,247 @@
+//! The single-zone simulation tick loop (docs/PROPOSAL.md, "Phased
+//! Roadmap," Phase 1: "one zone-service instance running one map") —
+//! everything else in Phase 1 (movement validation, NPC behavior, spawn
+//! tables) runs inside this loop's heartbeat.
+//!
+//! Tick rate: a fixed 20 Hz (`WorldConfig::default`, `crate::config`) —
+//! chosen and documented there, not left implicit, per #31's acceptance
+//! criteria.
+
+use std::collections::HashMap;
+
+use common::id::EntityId;
+use content::manifest::ZoneManifest;
+use tokio::time::Instant;
+
+use crate::config::WorldConfig;
+use crate::movement::{MovementRejection, validate_movement};
+use crate::spatial::{GridIndex, Point, SpatialIndex};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntityKind {
+    Player,
+    Npc,
+}
+
+/// One simulated zone: its loaded manifest, the entities currently in
+/// it, and the spatial index tracking their positions. Owns exactly one
+/// `SpatialIndex` — macro partitioning across zones is just "one `Zone`
+/// per zone-service instance," not something this type itself models
+/// (docs/PROPOSAL.md, "Spatial Index: A → Z Roadmap").
+pub struct Zone {
+    pub manifest: ZoneManifest,
+    config: WorldConfig,
+    index: Box<dyn SpatialIndex>,
+    entities: HashMap<EntityId, EntityKind>,
+    pending_moves: Vec<(EntityId, Point)>,
+}
+
+/// What actually happened to a queued movement request — surfaced to the
+/// caller (e.g. to tell a rejected client why) rather than silently dropped.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MovementOutcome {
+    Applied,
+    Rejected(MovementRejection),
+}
+
+impl Zone {
+    pub fn new(manifest: ZoneManifest, config: WorldConfig) -> Self {
+        Self {
+            index: Box::new(GridIndex::new(config.grid_cell_size_meters)),
+            manifest,
+            config,
+            entities: HashMap::new(),
+            pending_moves: Vec::new(),
+        }
+    }
+
+    pub fn spawn(&mut self, entity: EntityId, kind: EntityKind, position: Point) {
+        self.entities.insert(entity, kind);
+        self.index.insert(entity, position);
+    }
+
+    pub fn despawn(&mut self, entity: EntityId) {
+        self.entities.remove(&entity);
+        self.index.remove(entity);
+    }
+
+    pub fn position_of(&self, entity: EntityId) -> Option<Point> {
+        self.index.position_of(entity)
+    }
+
+    /// Queues a movement request for the next `tick` — movement is never
+    /// applied immediately on receipt, only as part of the fixed-rate
+    /// simulation step, so every accepted move is validated against a
+    /// consistent, known `dt`.
+    pub fn request_move(&mut self, entity: EntityId, to: Point) {
+        self.pending_moves.push((entity, to));
+    }
+
+    /// Advances the simulation by exactly one tick at the configured
+    /// fixed rate. Pure and synchronous — the async wall-clock scheduling
+    /// lives in [`Self::run`], kept separate so tick logic itself is
+    /// trivially unit-testable without a real clock.
+    pub fn tick(&mut self) -> Vec<(EntityId, MovementOutcome)> {
+        let dt = self.config.tick_interval().as_secs_f64();
+        let moves = std::mem::take(&mut self.pending_moves);
+
+        let mut outcomes = Vec::with_capacity(moves.len());
+        for (entity, to) in moves {
+            let Some(from) = self.index.position_of(entity) else {
+                // Not currently spawned in this zone (e.g. despawned
+                // between the request and this tick) — nothing to move.
+                continue;
+            };
+
+            match validate_movement(
+                &self.manifest,
+                self.index.as_ref(),
+                entity,
+                self.config.max_speed_meters_per_second,
+                dt,
+                from,
+                to,
+            ) {
+                Ok(()) => {
+                    self.index.update(entity, to);
+                    outcomes.push((entity, MovementOutcome::Applied));
+                }
+                Err(rejection) => {
+                    outcomes.push((entity, MovementOutcome::Rejected(rejection)));
+                }
+            }
+        }
+
+        outcomes
+    }
+
+    /// Runs the fixed-rate tick loop forever, calling `on_tick` once per
+    /// tick with this zone and the fixed `dt` — the call site #31
+    /// requires for the plugin host's `on_tick(zone, dt)` hook, kept as a
+    /// plain callback rather than a direct dependency on `plugin-host` so
+    /// `world` doesn't need to know that crate exists; `server` is what
+    /// wires a real plugin-host callback in here.
+    ///
+    /// A tick that runs long doesn't try to catch up with back-to-back
+    /// ticks (that would flood, not fix, an already-overloaded server) —
+    /// it logs a `WARN` (docs/specs/Observability_Spec.md's severity
+    /// policy: oncall-worthy conditions are `ERROR`, this can wait until
+    /// morning) and resyncs the schedule from "now," at the cost of a
+    /// slower *perceived* tick rate under load. `dt` handed to `on_tick`
+    /// and movement validation is always the fixed configured interval,
+    /// never the actual elapsed wall-clock time — the simulation clock
+    /// itself never drifts, only the loop's real-world cadence does.
+    pub async fn run(
+        &mut self,
+        mut on_tick: impl FnMut(&mut Zone, f64, Vec<(EntityId, MovementOutcome)>),
+    ) -> ! {
+        let interval = self.config.tick_interval();
+        let dt = interval.as_secs_f64();
+        let mut next_tick_at = Instant::now() + interval;
+
+        loop {
+            tokio::time::sleep_until(next_tick_at).await;
+
+            if Instant::now() > next_tick_at + interval {
+                tracing::warn!(
+                    tick_rate_hz = self.config.tick_rate_hz,
+                    "zone tick running behind schedule — resyncing rather than catching up"
+                );
+            }
+
+            let outcomes = self.tick();
+            on_tick(self, dt, outcomes);
+
+            next_tick_at += interval;
+            let now = Instant::now();
+            if now > next_tick_at {
+                next_tick_at = now + interval;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn zone_with_square_bounds() -> Zone {
+        let manifest = ZoneManifest::from_yaml(
+            r#"
+schema_version: 1
+id: test-zone
+display_name: "Test Zone"
+
+bounds:
+  shape: polygon
+  coordinate_system: { units: meters, origin: [0, 0] }
+  points: [[0,0], [100,0], [100,100], [0,100]]
+
+collision:
+  asset_ref: "sha256:9f2ac1b3e4d5c6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1"
+  format: navmesh_v1
+"#,
+        )
+        .unwrap();
+        Zone::new(manifest, WorldConfig::default())
+    }
+
+    #[test]
+    fn a_reasonable_queued_move_is_applied_on_tick() {
+        let mut zone = zone_with_square_bounds();
+        let entity = EntityId::new();
+        zone.spawn(entity, EntityKind::Player, (50.0, 50.0));
+
+        zone.request_move(entity, (50.1, 50.1));
+        let outcomes = zone.tick();
+
+        assert_eq!(outcomes, vec![(entity, MovementOutcome::Applied)]);
+        assert_eq!(zone.position_of(entity), Some((50.1, 50.1)));
+    }
+
+    #[test]
+    fn an_out_of_bounds_move_is_rejected_and_position_is_unchanged() {
+        // A generous speed cap so this test isolates the boundary check —
+        // the speed cap itself is covered by `movement`'s own tests.
+        let manifest = zone_with_square_bounds().manifest;
+        let mut zone = Zone::new(
+            manifest,
+            WorldConfig {
+                max_speed_meters_per_second: 10_000.0,
+                ..WorldConfig::default()
+            },
+        );
+        let entity = EntityId::new();
+        zone.spawn(entity, EntityKind::Player, (99.0, 50.0));
+
+        zone.request_move(entity, (500.0, 50.0));
+        let outcomes = zone.tick();
+
+        assert!(matches!(
+            outcomes[0],
+            (e, MovementOutcome::Rejected(MovementRejection::OutOfBounds)) if e == entity
+        ));
+        assert_eq!(zone.position_of(entity), Some((99.0, 50.0)));
+    }
+
+    #[test]
+    fn a_move_for_a_despawned_entity_is_silently_skipped() {
+        let mut zone = zone_with_square_bounds();
+        let entity = EntityId::new();
+        zone.spawn(entity, EntityKind::Player, (50.0, 50.0));
+        zone.request_move(entity, (50.1, 50.1));
+        zone.despawn(entity);
+
+        let outcomes = zone.tick();
+        assert!(outcomes.is_empty());
+    }
+
+    #[test]
+    fn tick_clears_the_pending_queue_even_with_no_entities() {
+        let mut zone = zone_with_square_bounds();
+        zone.request_move(EntityId::new(), (1.0, 1.0));
+        assert!(zone.tick().is_empty());
+        // A second tick with nothing newly queued does nothing further.
+        assert!(zone.tick().is_empty());
+    }
+}
