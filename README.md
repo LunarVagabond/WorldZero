@@ -18,7 +18,7 @@ Full docs live in [`docs/`](docs/README.md); [`docs/PROPOSAL.md`](docs/PROPOSAL.
 
 | Product | Architecture & specs | Process |
 |---|---|---|
-| [About](docs/product/About.md) · [Roadmap](docs/product/Roadmap.md) | [System Architecture](docs/architecture/System_Architecture.md) · [Decisions](docs/architecture/Decisions.md) | [Contributing](.github/CONTRIBUTING.md) |
+| [About](docs/product/About.md) · [Roadmap](docs/product/Roadmap.md) | [System Architecture](docs/architecture/System_Architecture.md) · [Decisions](https://github.com/LunarVagabond/WorldZero/issues?q=is%3Aissue+label%3Adecision) | [Contributing](.github/CONTRIBUTING.md) |
 | [Getting Started (using WorldZero)](docs/product/Getting_Started_Developers.md) | [Specs](docs/specs) — auth, realm/character policy, content manifest, networking, plugin API, data model, observability | [Getting Started (contributing)](docs/developers/Getting_Started.md) |
 
 ## Contributing

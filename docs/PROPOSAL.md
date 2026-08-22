@@ -3,7 +3,7 @@
 **Status:** Draft — living document, revised as design decisions are made
 **Last updated:** 2026-08-21
 
-**Contents:** [Executive Summary](#executive-summary) · [The Problem](#the-problem) · [The Solution](#the-solution-in-one-sentence) · [Design Principles](#design-principles-non-negotiables) · [Terminology](#core-concepts--terminology) · [Architecture](#architecture-overview) · [Crate Breakdown](#service--crate-breakdown) · [Realm & Character Policy](#realm--character-policy-model) · [World Content](#world-content-maps-npcs-and-routes) · [Networking](#networking) · [Plugin System](#plugin-system) · [Data Model Extensibility](#data-model-extensibility-declared-attribute-schemas) · [Observability](#observability--operations) · [Why Not SpacetimeDB](#why-not-spacetimedb-or-similar-all-in-one-platforms) · [Tech Stack](#technology-stack-current-thinking) · [Roadmap](#phased-roadmap) · [Non-Goals](#what-this-project-is-not-non-goals) · [Prior Art](#prior-art--positioning) · [Sustainability](#sustainability--business-model-considerations) · [Licensing](#licensing--attribution) · [Decision Log](#decision-log) · [Open Questions](#open-questions) · [Glossary](#glossary)
+**Contents:** [Executive Summary](#executive-summary) · [The Problem](#the-problem) · [The Solution](#the-solution-in-one-sentence) · [Design Principles](#design-principles-non-negotiables) · [Terminology](#core-concepts--terminology) · [Architecture](#architecture-overview) · [Crate Breakdown](#service--crate-breakdown) · [Realm & Character Policy](#realm--character-policy-model) · [World Content](#world-content-maps-npcs-and-routes) · [Networking](#networking) · [Plugin System](#plugin-system) · [Data Model Extensibility](#data-model-extensibility-declared-attribute-schemas) · [Observability](#observability--operations) · [Why Not SpacetimeDB](#why-not-spacetimedb-or-similar-all-in-one-platforms) · [Tech Stack](#technology-stack-current-thinking) · [Roadmap](#phased-roadmap) · [Non-Goals](#what-this-project-is-not-non-goals) · [Prior Art](#prior-art--positioning) · [Sustainability](#sustainability--business-model-considerations) · [Licensing](#licensing--attribution) · [Glossary](#glossary)
 
 *New here? Read [Executive Summary](#executive-summary)–[Design Principles (Non-Negotiables)](#design-principles-non-negotiables) first — that's the whole pitch in five minutes. Everything after [Core Concepts & Terminology](#core-concepts--terminology) is the technical backing for it.*
 
@@ -370,7 +370,7 @@ Revisit trigger: if SpacetimeDB's scaling/self-hosting story matures significant
 | Plugin runtime | WASM (`wasmtime`) | Sandboxing, language-agnostic plugin authoring |
 | Content format | Custom canonical manifest (JSON/TOML) + importers from Tiled/glTF | Keeps server gameplay-only; avoids becoming an asset pipeline |
 
-Rust is locked as of 2026-08-21 (see [Decision Log](#decision-log)). The crate/service boundaries above were designed to hold regardless of language, which is part of why the decision was low-risk to make early.
+Rust is locked as of 2026-08-21. The crate/service boundaries above were designed to hold regardless of language, which is part of why the decision was low-risk to make early.
 
 ---
 
@@ -469,42 +469,6 @@ Rejected: copyleft (AGPL-3.0) and source-available/BSL-style licenses. Both were
 - The project name and logo are protected as a trademark, independent of the Apache-2.0 grant on the code itself (Apache-2.0 explicitly does not grant trademark rights).
 - A "Powered by" badge/credit convention is documented and encouraged for operators, but not legally mandated — keeping the code license itself frictionless while still giving the project visible attribution in the wild.
 - Full trademark policy text is a Phase 1 documentation deliverable, not a blocker for writing code.
-
----
-
-## Decision Log
-
-A lightweight record of decisions made, alternatives considered, and why — so none of this needs to be re-litigated without new information. Append to this, don't rewrite history in it.
-
-| Date | Decision | Chosen | Alternatives considered | Why |
-|---|---|---|---|---|
-| 2026-08-21 | Core storage strategy | PostgreSQL (durable) + Redis (ephemeral) | SpacetimeDB (all-in-one) | Control/flexibility over convenience; see [Why Not SpacetimeDB (or similar all-in-one platforms)](#why-not-spacetimedb-or-similar-all-in-one-platforms) |
-| 2026-08-21 | Plugin sandboxing | WASM (`wasmtime`) | Native dlopen-style plugins | Sandboxing/safety for untrusted third-party code; see [Plugin System](#plugin-system) |
-| 2026-08-21 | Implementation language | Rust (locked) | Go, C++, Zig | WASM tooling maturity, memory safety without GC pauses, async ecosystem; see [Technology Stack (current thinking)](#technology-stack-current-thinking) |
-| 2026-08-21 | OSS license | Apache-2.0 + trademark policy (no separate NOTICE file) | MIT, AGPL-3.0, BSL/source-available | Permissive + real attribution without adoption friction; NOTICE is optional under Apache-2.0 and was dropped to keep the repo root lean — see [Licensing & Attribution](#licensing--attribution) |
-| 2026-08-21 | Auth architecture | Pluggable provider interface, self-contained default provider | Self-contained only; OAuth/SSO-first | Avoids retrofitting federation later; see [Auth Provider Architecture](#auth-provider-architecture) |
-| 2026-08-21 | Spatial index strategy | Stated A→Z roadmap behind a `SpatialIndex` trait: zone-graph + grid baseline → density-adaptive (quadtree/octree or pinned external crate) | Zone-graph-only baseline; commit to quadtree/octree immediately | Baseline is capable, not a placeholder; abstraction avoids a rewrite to reach the target state; see [Spatial Index: A → Z Roadmap](#spatial-index-a--z-roadmap) |
-| 2026-08-21 | Plugin interface technology | WASM Component Model + WIT | Hand-rolled flat C-style ABI (Extism-style) | Typed, multi-language bindings and real interface versioning instead of hand-maintained ABI compatibility; see [Interface Technology](#interface-technology) |
-| 2026-08-21 | Content manifest format | Versioned YAML per zone + content-pack bundling, content-addressed binary assets | Ad hoc per-game formats; consuming engine-native files directly | Stable public interface, CI-validatable, keeps server gameplay-only; see [Manifest Format & Example](#manifest-format--example) |
-| 2026-08-21 | Custom gameplay stats (HP/Mana/etc.) | Fixed core schema + declared attribute schema over a `JSONB` column, validated at the API boundary | Config-driven dynamic DDL (per-deployment generated tables); EAV table (`character_stat` rows) | Avoids per-deployment schema drift, keeps compile-time query safety, no stat is ever core-privileged, single-row read on the hot combat-tick path — see [Data Model Extensibility: Declared Attribute Schemas](#data-model-extensibility-declared-attribute-schemas) |
-| 2026-08-21 | Observability stack | Prometheus metrics + `tracing` structured logs + OpenTelemetry traces + minimal admin API; no bundled dashboard product | Building a bespoke dashboard/monitoring product | Boring/standard tooling operators already know; avoids scope creep into a product the framework shouldn't be; see [Observability & Operations](#observability--operations) |
-| 2026-08-21 | Primary competitive differentiator | Approachability/DX elevated to a Phase 1 exit criterion with its own concrete commitments (one-command scaffold, timed quickstart, outcome-first docs) | Competing primarily on architecture/feature completeness against Redwood/OpenCoreMMO | Both existing alternatives are already architecturally solid — the real barrier to adopting either is a developer's own "I'll just build it myself" instinct, not a missing feature; see [The Developer Experience Bar](#the-developer-experience-bar), [Prior Art & Positioning](#prior-art--positioning) |
-| 2026-08-21 | Target client scope | Native game engines only (Unity, UE5, Godot, and similar) — no browser target | Browser clients as a first-class target alongside native | Clarifies the intended audience; shapes the transport decision below |
-| 2026-08-21 | Transport protocol | Plain TCP (reliable) + plain UDP (unreliable), two ordinary sockets | QUIC (`quinn`) with WebTransport for browser reach | No target engine (Unity, UE5, Godot) has QUIC built in, so it would mean every adopter vendoring a third-party QUIC library before their client could even connect. TCP+UDP are native to all target engines with zero extra dependencies — matches Design Principle #7 (approachability) directly. See [Networking](#networking) |
-| 2026-08-21 | UDP encryption | DTLS on the UDP channel, kept alongside (not instead of) server-side authoritative validation | Unencrypted UDP relying only on server-side validation | An operator self-hosting this trusts it not to hand their players to network-level attackers — unencrypted UDP is trivially sniffable/spoofable (forged movement, replay, session hijacking); this is a security floor, not deferrable. DTLS and server-side validation solve different problems (wire tampering vs. a legitimate-but-cheating client) and both stay. See [Networking](#networking) |
-| 2026-08-21 | Log levels, format, and severity policy | Standard five levels (`TRACE`/`DEBUG`/`INFO`/`WARN`/`ERROR`) via `tracing`, fixed `<TIMESTAMP> <LEVEL> <SOURCE> <MESSAGE>` format, `ERROR` reserved as oncall-worthy for core services only (not plugins) | Ad hoc per-service log formats with no shared severity convention | Consistent, greppable logs across every service; a clear severity contract so `ERROR` means something once alerting exists — see [Observability & Operations](#observability--operations) and `docs/specs/Observability_Spec.md` |
-| 2026-08-21 | Tenth crate: `common` | A tightly-scoped shared crate for logging setup, shared error/result types, and config loading | Duplicating this code per crate; no shared crate at all | The `<TIMESTAMP> <LEVEL> <SOURCE> <MESSAGE>` logging setup alone needs one canonical implementation, not nine copies that drift — scope kept deliberately narrow so it doesn't become a junk-drawer dependency; see [Service / Crate Breakdown](#service--crate-breakdown) |
-
----
-
-## Open Questions
-
-Tracked here deliberately rather than resolved prematurely — revisit as design work proceeds. All initial questions from the first design pass are now resolved ([Decision Log](#decision-log)); these are the ones that surfaced from that work.
-
-- [ ] Reference Grafana dashboard — who owns building/maintaining it as a Phase 5 deliverable?
-- [ ] Declared attribute schema tooling — do we need a dev-facing migration/diffing helper when a game's `stats.schema.yaml` changes shape over time, or is "missing key falls back to default" sufficient indefinitely?
-- [ ] Plugin distribution/packaging mechanics (referenced in Phase 5, not yet designed in detail)
-- [ ] Read Redwood's public architecture docs before Phase 0 design lock ([Prior Art & Positioning](#prior-art--positioning)) — the closest funded competitor has likely already solved specific sharding/layering implementation details worth learning from, even where we don't adopt their approach wholesale
 
 ---
 
