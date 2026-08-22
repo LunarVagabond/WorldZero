@@ -1,5 +1,7 @@
 # WorldZero
 
+![WorldZero](docs/social_assets/WZ-InitialConcept.png)
+
 **Status:** early design phase. The Rust workspace is scaffolded (`crates/`, matching the crate breakdown below) but every crate is still an empty stub — no real logic yet. See [`docs/PROPOSAL.md`](docs/PROPOSAL.md) for the full design.
 
 Building an MMO used to require a small studio's worth of backend engineering before a single player ever saw the game: authentication, character persistence, world simulation, netcode, sharding, chat, matchmaking — all before "is this game fun" could even be tested. WorldZero is an open-source, self-hostable MMO server framework that owns that infrastructure — realms, sharding/layering, world state, netcode, persistence, cross-server character policy — behind a sandboxed plugin system, so a game developer brings their own game logic instead of building a backend from scratch.
