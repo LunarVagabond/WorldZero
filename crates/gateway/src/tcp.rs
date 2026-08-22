@@ -21,7 +21,18 @@ use tokio_util::codec::Framed;
 use crate::envelope::EnvelopeCodec;
 use crate::tls::CertMaterial;
 
+/// The workspace links more than one `rustls` crypto provider (`ring` via
+/// `rtc-dtls`, `aws-lc-rs` via `sqlx`'s `tls-rustls-aws-lc-rs` feature), so
+/// `rustls` can't auto-select one — install `ring` explicitly, matching
+/// what `rtc-dtls` itself uses internally. Idempotent; safe to call more
+/// than once (e.g. once per test).
+pub fn ensure_crypto_provider_installed() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 pub fn build_tls_acceptor(cert: &CertMaterial) -> Result<TlsAcceptor> {
+    ensure_crypto_provider_installed();
+
     let cert_chain = vec![CertificateDer::from(cert.cert_der.clone())];
     let key = PrivateKeyDer::try_from(cert.key_der.clone())
         .map_err(|e| Error::new("gateway", format!("invalid private key: {e}")))?;
