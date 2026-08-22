@@ -9,6 +9,7 @@
 //!   convention (see docs/specs/Observability_Spec.md).
 //! - Shared error/result types used across crate boundaries.
 //! - Config loading (env-var-based connection config for Postgres/Redis, etc.).
+//! - Strongly-typed ID types shared across crate/domain boundaries.
 //!
 //! It is not a general-purpose dumping ground. If something is only used by
 //! one or two crates, it belongs in one of them (or gets duplicated on
@@ -16,6 +17,7 @@
 
 pub mod config;
 pub mod error;
+pub mod id;
 pub mod logging;
 
 pub use error::{Error, Result, ResultExt};
