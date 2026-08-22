@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use character::CharacterStore;
+use chat::gateway_protocol::CHAT_MESSAGE_TYPE;
 use common::id::{AccountId, EntityId, RealmId};
 use common::{Error, Result};
 use futures_util::{SinkExt, StreamExt};
@@ -15,6 +16,7 @@ use tokio::sync::mpsc;
 use tokio_util::codec::Framed;
 use world::EntityKind;
 
+use crate::chat_session::{self, ChatDeps};
 use crate::session_protocol::{ClientMessage, RosterEntry, ServerMessage, WORLD_MESSAGE_TYPE};
 use crate::world_actor::WorldHandle;
 
@@ -42,6 +44,9 @@ pub struct SessionDeps {
     /// instead of silently vanishing into the actor's command queue
     /// (#95).
     pub plugin_message_types: Vec<u16>,
+    /// `Some` when `ServicesConfig::chat_enabled` — `None` end to end
+    /// means chat is disabled and never touched, not just no-op'd (#104).
+    pub chat: Option<ChatDeps>,
 }
 
 pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Result<()> {
@@ -78,6 +83,14 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
         },
     )
     .await?;
+
+    if let Some(chat) = &deps.chat {
+        chat.usernames
+            .write()
+            .unwrap()
+            .insert(account_id, username.clone());
+    }
+    let mut joined_channels = chat_session::JoinedChannels::new();
 
     let character = load_or_create_character(&deps, account_id, &username).await?;
     let character_id = character.id;
@@ -146,6 +159,34 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
                             send_world(&mut sink, &ServerMessage::Error { message: e.to_string() }).await?;
                         }
                     }
+                } else if envelope.message_type == CHAT_MESSAGE_TYPE {
+                    match &deps.chat {
+                        None => {
+                            send_world(&mut sink, &ServerMessage::Error {
+                                message: "chat is disabled on this server".to_string(),
+                            }).await?;
+                        }
+                        Some(chat) => {
+                            match chat::gateway_protocol::ClientMessage::from_envelope(&envelope) {
+                                Ok(message) => {
+                                    if let Some(reply) = chat_session::handle_message(
+                                        message,
+                                        account_id,
+                                        chat,
+                                        &outgoing_tx,
+                                        &mut joined_channels,
+                                    ).await {
+                                        send_chat(&mut sink, &reply).await?;
+                                    }
+                                }
+                                Err(e) => {
+                                    send_chat(&mut sink, &chat::gateway_protocol::ServerMessage::Error {
+                                        message: e.to_string(),
+                                    }).await?;
+                                }
+                            }
+                        }
+                    }
                 } else if deps.plugin_message_types.contains(&envelope.message_type) {
                     deps.world.dispatch_plugin_message(
                         envelope.message_type,
@@ -170,6 +211,8 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
             }
         }
     }
+
+    chat_session::abort_all(joined_channels);
 
     let final_position = deps.world.position_of(entity_id).await;
     deps.world.despawn(entity_id);
@@ -283,6 +326,16 @@ async fn send_world(sink: &mut ServerSink, message: &ServerMessage) -> Result<()
 async fn send_auth(
     sink: &mut ServerSink,
     message: &auth::gateway_protocol::ServerMessage,
+) -> Result<()> {
+    let envelope = message.into_envelope()?;
+    sink.send(envelope)
+        .await
+        .map_err(|e| Error::wrap("server", "failed to send to client", e))
+}
+
+async fn send_chat(
+    sink: &mut ServerSink,
+    message: &chat::gateway_protocol::ServerMessage,
 ) -> Result<()> {
     let envelope = message.into_envelope()?;
     sink.send(envelope)

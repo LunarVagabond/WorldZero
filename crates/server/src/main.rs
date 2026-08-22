@@ -1,10 +1,12 @@
 //! Combined-process runnable binary — the Phase 1 target (docs/PROPOSAL.md,
-//! "Phased Roadmap"): wires `auth`, `character`, `world`, `gateway`, and
-//! `content` into one process a self-hoster can run end to end.
-//! `realm-directory`, `chat`, `transfer`, and `plugin-host` come online
-//! more fully in later phases — `plugin-host` gets a minimal, optional
-//! slice here already (spawning one NPC on startup via a configured
-//! plugin's `on_load` hook), matching Phase 1's "minimal plugin hook."
+//! "Phased Roadmap"): wires `auth`, `character`, `world`, `gateway`,
+//! `content`, and `chat` into one process a self-hoster can run end to
+//! end. `realm-directory` and `transfer` come online in later phases —
+//! `plugin-host` gets a minimal, optional slice here already (spawning
+//! one NPC on startup via a configured plugin's `on_load` hook, plus
+//! live `on-message` routing, #95), matching Phase 1's "minimal plugin
+//! hook." `chat` is the first optional-service crate wired in, gated by
+//! `WZ_SERVICE_CHAT_ENABLED` per the #91/#92 runtime-toggle decision (#104).
 //!
 //! `cargo run -p server`. Needs, at minimum:
 //! - `WZ_POSTGRES_*` / `WZ_REDIS_*` (`.env`)
@@ -17,22 +19,27 @@
 //!
 //! Optional: `WZ_SERVER_ADDR` (default `127.0.0.1:7900`),
 //! `WZ_PLUGIN_MANIFEST_PATH` + `WZ_PLUGIN_WASM_PATH` (both required
-//! together — a plugin to run `on_load` against at startup).
+//! together — a plugin to run `on_load` against at startup),
+//! `WZ_SERVICE_CHAT_ENABLED` (default `true`).
 //!
 //! A connected client speaks `auth::gateway_protocol` first (login or
 //! register), then `server::session_protocol` (move, see other entities
-//! move) — same gateway-first-authenticate pattern as `chat`'s gateway
-//! integration (docs/specs/Auth_Spec.md, "Gateway handshake").
+//! move) and, when chat is enabled, `chat::gateway_protocol` (join/leave/
+//! send) over the same connection — same gateway-first-authenticate
+//! pattern as `chat`'s standalone gateway demo (docs/specs/Auth_Spec.md,
+//! "Gateway handshake").
 
+mod chat_session;
 mod plugin_startup;
 mod session;
 mod session_protocol;
 mod world_actor;
 
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, RwLock};
 
 use character::{AttributeSchema, CharacterStore};
-use common::config::{PostgresConfig, RedisConfig};
+use common::config::{PostgresConfig, RedisConfig, ServicesConfig};
 use common::id::RealmId;
 use common::pool::{PoolOptions, postgres_pool, redis_pool};
 use content::manifest::ZoneManifest;
@@ -69,6 +76,7 @@ async fn main() {
         redis_pool(&redis_config, PoolOptions::default()).expect("failed to build Redis pool");
 
     let world_config = world::WorldConfig::from_env().expect("invalid WZ_WORLD_* config");
+    let services = ServicesConfig::from_env().expect("invalid WZ_SERVICE_* config");
 
     let manifest_path = config_dir.join("zone.manifest.yaml");
     let manifest = ZoneManifest::from_file(&manifest_path).unwrap_or_else(|e| {
@@ -97,6 +105,22 @@ async fn main() {
     ));
     let character_store = Arc::new(CharacterStore::new(pool.clone(), schema));
     let realm_id = placeholder_realm_id();
+
+    // `None` end to end (not just an unused `ChatDeps`) when disabled —
+    // no `ChannelStore`/`ChatBus` construction, no per-connection chat
+    // dispatch, nothing (#104, per the #91/#92 runtime-toggle decision).
+    let chat_deps = if services.chat_enabled {
+        tracing::info!("chat service enabled");
+        Some(chat_session::ChatDeps {
+            pool: pool.clone(),
+            store: Arc::new(chat::ChannelStore::new(pool.clone())),
+            bus: Arc::new(chat::ChatBus::new(redis.clone(), redis_config.clone())),
+            usernames: Arc::new(RwLock::new(HashMap::new())),
+        })
+    } else {
+        tracing::info!("chat service disabled (WZ_SERVICE_CHAT_ENABLED=false)");
+        None
+    };
 
     let mut zone = Zone::new(manifest, world_config);
 
@@ -195,6 +219,7 @@ async fn main() {
         world,
         sessions,
         plugin_message_types,
+        chat: chat_deps,
     });
 
     let mut incoming = Box::pin(incoming);
