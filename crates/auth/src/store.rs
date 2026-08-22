@@ -1,10 +1,6 @@
-//! Account storage the username/password provider needs.
-//!
-//! `InMemoryAccountStore` is what actually ships right now — there is no
-//! decided Postgres `account` schema/migration tooling yet (unlike
-//! `character`, which has one: docs/specs/Data_Model_Spec.md). A
-//! Postgres-backed `AccountStore` is a natural follow-up once that schema
-//! is designed, behind this same trait.
+//! Account storage the username/password provider needs. See
+//! [`crate::postgres_store::PostgresAccountStore`] for the real-deployment
+//! implementation; `InMemoryAccountStore` here is for tests.
 
 use std::collections::HashMap;
 use std::sync::RwLock;

@@ -1,6 +1,6 @@
 //! Postgres/Redis connection pool builders, taking the config parsed in
-//! [`crate::config`]. Pool construction only — schema/migrations are out of
-//! scope here.
+//! [`crate::config`]. Pool construction only — see [`crate::migrate`] for
+//! running schema migrations against a pool.
 
 use std::time::Duration;
 
