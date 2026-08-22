@@ -1,0 +1,68 @@
+// v0 plugin interface — docs/PROPOSAL.md ("Plugin System", "v0 Hooks",
+// "v0 Host Functions") and docs/specs/Plugin_API.md ("v0 world").
+//
+// Deliberately the minimal slice #38 needs (one NPC spawn, one
+// interaction), not the full v0 hook/host-function list from the
+// proposal — see docs/specs/Plugin_API.md for what's in v0 vs. deferred.
+// A WIT "world" is the actual versioning mechanism (docs/PROPOSAL.md,
+// "Interface Technology"): a breaking change bumps the package version
+// below and/or lands as a new world, rather than silently changing what
+// `plugin` means underneath existing compiled plugins.
+
+package worldzero:plugin@0.1.0;
+
+/// What the host exposes for a plugin to call out to — nothing crosses
+/// this boundary that isn't listed here (docs/PROPOSAL.md, "Plugin
+/// System": "no direct DB access, no raw network access, no filesystem
+/// access, ever").
+interface host {
+    /// Spawns one NPC from a zone's declared spawn table
+    /// (content::manifest::SpawnTable). Returns the spawned entity's id
+    /// (a UUID, opaque to the plugin) or an error string (e.g. the
+    /// spawn table doesn't exist, or is already at max-population).
+    spawn-npc: func(spawn-table-id: string) -> result<string, string>;
+
+    /// Sends a visible message to one connected client, addressed by
+    /// entity id — the v0 "make the interaction have a visible effect"
+    /// primitive (#38's acceptance criteria).
+    send-message: func(target-entity-id: string, body: string) -> result<_, string>;
+}
+
+/// What the host calls into the plugin for — a plugin only receives the
+/// hooks it actually cares about; v0 doesn't yet have per-hook opt-out
+/// (docs/PROPOSAL.md's "Plugin Manifest & Capability Declaration" full
+/// story is deferred past this minimal slice), a plugin's `on-*` exports
+/// are simply not called if nothing in the zone ever triggers them.
+interface hooks {
+    /// Called once when the plugin is instantiated for a zone-service.
+    on-load: func();
+
+    /// Called once before the plugin is torn down.
+    on-unload: func();
+
+    /// Fired after any entity (spawned by this plugin or otherwise)
+    /// enters the zone's simulation — `entity-type` matches
+    /// content::manifest::SpawnTable's `entity_type` field for NPCs
+    /// (e.g. "npc.wolf"), or is empty for a player entity.
+    on-entity-spawn: func(entity-id: string, entity-type: string);
+
+    /// Fired when a player's entity enters a trigger volume whose
+    /// `event` (content::manifest::Trigger) names an interact-style
+    /// event — `trigger-id` matches the manifest's `triggers[].id`.
+    on-interact: func(trigger-id: string, actor-entity-id: string);
+}
+
+world plugin {
+    // Rust's std runtime for `wasm32-wasip2` needs the baseline WASI
+    // Preview 2 CLI imports (clocks, random, stdio, ...) to link/start at
+    // all — sandboxing doesn't come from omitting these, it comes from
+    // what the *host* actually grants at instantiation: no preopened
+    // directories, no sockets, nothing beyond what `WasiCtxBuilder`
+    // explicitly allows (`crate::runtime`). This is WASI Preview 2's own
+    // capability-based security model, the same one `wasmtime` itself
+    // documents as the intended sandboxing mechanism.
+    include wasi:cli/imports@0.2.12;
+
+    import host;
+    export hooks;
+}
