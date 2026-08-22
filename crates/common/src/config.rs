@@ -64,6 +64,59 @@ impl RedisConfig {
     }
 }
 
+/// Runtime enable/disable flags for services that are optional in the
+/// combined `server` process (docs/PROPOSAL.md's "Phased Roadmap" —
+/// `chat` today, more as later-phase crates come online), decided in
+/// [#91](https://github.com/LunarVagabond/WorldZero/issues/91): a config
+/// flag, not a Cargo feature, so turning a service off is an edit to
+/// config rather than a rebuild. Every field defaults to `true` — an
+/// unset flag changes nothing about existing deployments.
+///
+/// Core services (auth, character, world, gateway, content) are never
+/// part of this — only crates the roadmap documents as optional.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServicesConfig {
+    pub chat_enabled: bool,
+}
+
+impl Default for ServicesConfig {
+    fn default() -> Self {
+        Self { chat_enabled: true }
+    }
+}
+
+impl ServicesConfig {
+    /// Reads `WZ_SERVICE_CHAT_ENABLED`, optional — unset keeps the
+    /// `true` default, but a *set-and-unparsable* value is a config
+    /// error, not a silent fallback (same convention as
+    /// `world::WorldConfig::from_env`: a typo should fail loudly).
+    pub fn from_env() -> Result<Self> {
+        let mut config = Self::default();
+
+        if let Some(value) = optional_bool_env("WZ_SERVICE_CHAT_ENABLED")? {
+            config.chat_enabled = value;
+        }
+
+        Ok(config)
+    }
+}
+
+fn optional_bool_env(var: &str) -> Result<Option<bool>> {
+    match std::env::var(var) {
+        Ok(value) => match value.parse() {
+            Ok(parsed) => Ok(Some(parsed)),
+            Err(_) => Err(Error::new(
+                "common",
+                format!("{var} must be \"true\" or \"false\", got: {value:?}"),
+            )),
+        },
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            Err(Error::new("common", format!("{var} is not valid UTF-8")))
+        }
+    }
+}
+
 fn required_env(var: &'static str) -> Result<String> {
     std::env::var(var).map_err(|_| {
         Error::new(
@@ -177,6 +230,34 @@ mod tests {
         with_clean_env(REDIS_VARS, || {
             let err = RedisConfig::from_env().unwrap_err();
             assert!(err.to_string().contains("WZ_REDIS_HOST"), "{err}");
+        });
+    }
+
+    #[test]
+    fn services_default_to_enabled_with_nothing_set() {
+        with_clean_env(&["WZ_SERVICE_CHAT_ENABLED"], || {
+            assert_eq!(
+                ServicesConfig::from_env().unwrap(),
+                ServicesConfig { chat_enabled: true }
+            );
+        });
+    }
+
+    #[test]
+    fn chat_can_be_disabled_via_env() {
+        with_clean_env(&["WZ_SERVICE_CHAT_ENABLED"], || {
+            unsafe { std::env::set_var("WZ_SERVICE_CHAT_ENABLED", "false") };
+            let config = ServicesConfig::from_env().unwrap();
+            assert!(!config.chat_enabled);
+        });
+    }
+
+    #[test]
+    fn an_unparsable_service_flag_is_a_loud_error_not_a_silent_default() {
+        with_clean_env(&["WZ_SERVICE_CHAT_ENABLED"], || {
+            unsafe { std::env::set_var("WZ_SERVICE_CHAT_ENABLED", "yes-please") };
+            let err = ServicesConfig::from_env().unwrap_err();
+            assert!(err.to_string().contains("WZ_SERVICE_CHAT_ENABLED"), "{err}");
         });
     }
 
