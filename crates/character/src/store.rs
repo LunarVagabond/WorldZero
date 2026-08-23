@@ -22,11 +22,33 @@ pub struct CharacterSummary {
 pub struct CharacterStore {
     pool: PgPool,
     schema: AttributeSchema,
+    inventory_config: crate::inventory::InventoryConfig,
 }
 
 impl CharacterStore {
-    pub fn new(pool: PgPool, schema: AttributeSchema) -> Self {
-        Self { pool, schema }
+    pub fn new(
+        pool: PgPool,
+        schema: AttributeSchema,
+        inventory_config: crate::inventory::InventoryConfig,
+    ) -> Self {
+        Self {
+            pool,
+            schema,
+            inventory_config,
+        }
+    }
+
+    /// Lets `crate::inventory`'s `impl CharacterStore` block reach the
+    /// same pool this one write path (and every other `CharacterStore`
+    /// method) already uses — kept `pub(crate)`, not `pub`, since a
+    /// caller outside this crate has no legitimate reason to touch the
+    /// pool directly instead of going through a `CharacterStore` method.
+    pub(crate) fn pool(&self) -> &PgPool {
+        &self.pool
+    }
+
+    pub(crate) fn inventory_config(&self) -> &crate::inventory::InventoryConfig {
+        &self.inventory_config
     }
 
     /// Not part of the declared-schema validation story — just enough to
@@ -205,7 +227,7 @@ stats:
             .await
             .unwrap();
 
-        let store = CharacterStore::new(pool, schema());
+        let store = CharacterStore::new(pool, schema(), Default::default());
         let character_id = store
             .create(
                 account_id,
@@ -234,7 +256,7 @@ stats:
             .unwrap();
 
         (
-            CharacterStore::new(pool, schema()),
+            CharacterStore::new(pool, schema(), Default::default()),
             account_id,
             RealmId::new(),
         )

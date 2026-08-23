@@ -3,6 +3,7 @@
 //! Design: docs/PROPOSAL.md ("Data Model Extensibility: Declared Attribute
 //! Schemas") and docs/specs/Data_Model_Spec.md.
 
+pub mod inventory;
 pub mod schema;
 pub mod store;
 
