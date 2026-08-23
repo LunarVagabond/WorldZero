@@ -33,6 +33,15 @@ use crate::session_protocol::ServerMessage;
 /// client has connected, and works for real once `sessions` has entries.
 pub struct PluginCallbacks {
     pending_spawns: Arc<Mutex<Vec<String>>>,
+    /// `(entity_id, stat_key, delta)`, drained and applied through
+    /// `character::CharacterStore` by the caller — this callback only
+    /// records the request, same "can't reach `&mut Zone`/the DB from
+    /// inside a sandboxed sync call" reasoning as `pending_spawns` (see
+    /// module doc).
+    pending_stat_deltas: Arc<Mutex<Vec<(String, String, i64)>>>,
+    /// `(entity_id, x, y)`, drained and applied via
+    /// `world::Zone::request_move` by the caller.
+    pending_moves: Arc<Mutex<Vec<(String, f64, f64)>>>,
     sessions: Sessions,
 }
 
@@ -71,6 +80,28 @@ impl HostCallbacks for PluginCallbacks {
             None => Err(format!("no connected entity {target_entity_id}")),
         }
     }
+
+    fn apply_stat_delta(
+        &mut self,
+        entity_id: &str,
+        stat_key: &str,
+        delta: i64,
+    ) -> std::result::Result<(), String> {
+        self.pending_stat_deltas.lock().unwrap().push((
+            entity_id.to_string(),
+            stat_key.to_string(),
+            delta,
+        ));
+        Ok(())
+    }
+
+    fn move_entity(&mut self, entity_id: &str, x: f64, y: f64) -> std::result::Result<(), String> {
+        self.pending_moves
+            .lock()
+            .unwrap()
+            .push((entity_id.to_string(), x, y));
+        Ok(())
+    }
 }
 
 /// A plugin kept alive past startup: the live instance, which
@@ -82,7 +113,13 @@ impl HostCallbacks for PluginCallbacks {
 pub struct PluginRuntime {
     pub plugin: LoadedPlugin,
     pub message_types: Vec<u16>,
+    /// Command names (without the leading `/`) declared in `plugin.toml`
+    /// — routed to `on-chat-command` instead of published as ordinary
+    /// chat (#57).
+    pub chat_commands: Vec<String>,
     pending_spawns: Arc<Mutex<Vec<String>>>,
+    pending_stat_deltas: Arc<Mutex<Vec<(String, String, i64)>>>,
+    pending_moves: Arc<Mutex<Vec<(String, f64, f64)>>>,
 }
 
 impl PluginRuntime {
@@ -90,6 +127,18 @@ impl PluginRuntime {
     /// call order.
     pub fn drain_pending_spawns(&self) -> Vec<String> {
         std::mem::take(&mut self.pending_spawns.lock().unwrap())
+    }
+
+    /// `(entity_id, stat_key, delta)` requested via `apply-stat-delta`
+    /// since the last drain, in call order.
+    pub fn drain_pending_stat_deltas(&self) -> Vec<(String, String, i64)> {
+        std::mem::take(&mut self.pending_stat_deltas.lock().unwrap())
+    }
+
+    /// `(entity_id, x, y)` requested via `move-entity` since the last
+    /// drain, in call order.
+    pub fn drain_pending_moves(&self) -> Vec<(String, f64, f64)> {
+        std::mem::take(&mut self.pending_moves.lock().unwrap())
     }
 }
 
@@ -107,10 +156,15 @@ pub fn load_and_run_on_load(
 ) -> Result<(PluginRuntime, Vec<String>)> {
     let manifest = PluginManifest::from_file(manifest_path)?;
     let message_types = manifest.plugin.message_types.clone();
+    let chat_commands = manifest.plugin.chat_commands.clone();
     let host = PluginHost::new();
     let pending_spawns = Arc::new(Mutex::new(Vec::new()));
+    let pending_stat_deltas = Arc::new(Mutex::new(Vec::new()));
+    let pending_moves = Arc::new(Mutex::new(Vec::new()));
     let callbacks = PluginCallbacks {
         pending_spawns: pending_spawns.clone(),
+        pending_stat_deltas: pending_stat_deltas.clone(),
+        pending_moves: pending_moves.clone(),
         sessions,
     };
 
@@ -121,7 +175,10 @@ pub fn load_and_run_on_load(
     let runtime = PluginRuntime {
         plugin,
         message_types,
+        chat_commands,
         pending_spawns,
+        pending_stat_deltas,
+        pending_moves,
     };
     Ok((runtime, on_load_spawns))
 }

@@ -1,15 +1,17 @@
 // v0 plugin interface — docs/PROPOSAL.md ("Plugin System", "v0 Hooks",
 // "v0 Host Functions") and docs/specs/Plugin_API.md ("v0 world").
 //
-// Deliberately the minimal slice #38 needs (one NPC spawn, one
-// interaction), not the full v0 hook/host-function list from the
-// proposal — see docs/specs/Plugin_API.md for what's in v0 vs. deferred.
-// A WIT "world" is the actual versioning mechanism (docs/PROPOSAL.md,
-// "Interface Technology"): a breaking change bumps the package version
-// below and/or lands as a new world, rather than silently changing what
-// `plugin` means underneath existing compiled plugins.
+// #38 built the minimal slice (one NPC spawn, one interaction). #57
+// expands it with combat, NPC route/patrol, and chat-command hooks (see
+// docs/specs/Plugin_API.md, "Beyond this v0 slice" for what's still not
+// here — inventory/economy, player-session, per-plugin optional hooks,
+// gated capability groups). A WIT "world" is the actual versioning
+// mechanism (docs/PROPOSAL.md, "Interface Technology"): a breaking
+// change bumps the package version below and/or lands as a new world,
+// rather than silently changing what `plugin` means underneath existing
+// compiled plugins.
 
-package worldzero:plugin@0.2.0;
+package worldzero:plugin@0.3.0;
 
 /// What the host exposes for a plugin to call out to — nothing crosses
 /// this boundary that isn't listed here (docs/PROPOSAL.md, "Plugin
@@ -26,6 +28,27 @@ interface host {
     /// entity id — the v0 "make the interaction have a visible effect"
     /// primitive (#38's acceptance criteria).
     send-message: func(target-entity-id: string, body: string) -> result<_, string>;
+
+    /// Adjusts one declared stat (docs/specs/Data_Model_Spec.md's
+    /// `stats.schema.yaml`) by `delta` — the "reduce a plugin-specified
+    /// stat by N" primitive docs/PROPOSAL.md's "v0 Host Functions"
+    /// names. Core has no notion of HP or damage; `stat-key` is whatever
+    /// key the game's own declared schema defines, validated the same
+    /// way `character::CharacterStore::set_stat` validates any other
+    /// write (unknown key or out-of-`[min,max]` result is rejected, the
+    /// write never reaches storage). This is how a plugin actually
+    /// carries out what `on-damage-calc`/`on-death`/`on-respawn` decide.
+    apply-stat-delta: func(entity-id: string, stat-key: string, delta: s64) -> result<_, string>;
+
+    /// Queues a move for `entity-id` to `(x, y)`, applied and validated
+    /// on the zone's next tick through the exact same authoritative path
+    /// a player's own movement goes through (`world::Zone::request_move`
+    /// / `world::movement::validate_movement`) — a plugin never moves an
+    /// entity by writing its position directly. This is the primitive
+    /// `on-npc-tick` is expected to drive: the host hands the plugin its
+    /// NPC's route data every tick, the plugin decides where it should
+    /// be next and calls this to make it happen.
+    move-entity: func(entity-id: string, x: f64, y: f64) -> result<_, string>;
 }
 
 /// What the host calls into the plugin for — a plugin only receives the
@@ -59,6 +82,57 @@ interface hooks {
     /// envelope's opaque, message_type-specific bytes, unparsed by the
     /// host (#95).
     on-message: func(message-type: u16, sender-entity-id: string, payload: list<u8>);
+
+    /// Fired when something in the host wants a damage amount computed
+    /// against `stat-key` (whatever stat the caller cares about — core
+    /// has no privileged notion of HP) before it's applied. The plugin
+    /// owns the entire mitigation/armor/resistance formula and is
+    /// responsible for actually calling `apply-stat-delta` itself — this
+    /// hook alone changes nothing (docs/PROPOSAL.md, "v0 Hooks": "plugin
+    /// logic decides both, and explicitly drives the corresponding host
+    /// function... to make it happen"). No live host call site exists
+    /// yet — nothing in `world`/`gateway` currently has a concept of an
+    /// attack/damage-causing client action to call this from; see
+    /// docs/specs/Plugin_API.md.
+    on-damage-calc: func(attacker-entity-id: string, target-entity-id: string, stat-key: string, base-amount: s64);
+
+    /// Fired once the host is told an entity has died (a plugin decides
+    /// what "died" means for its own game and reports it — see
+    /// `set_entity_state`-style future host function in
+    /// docs/PROPOSAL.md's "v0 Host Functions"; no such reporting host
+    /// function is built yet, so this hook has no live call site either,
+    /// same caveat as `on-damage-calc`).
+    on-death: func(entity-id: string);
+
+    /// Fired the same way `on-death` is (or would be) — no live call
+    /// site yet, same caveat.
+    on-respawn: func(entity-id: string);
+
+    /// Called once per simulation tick for an NPC entity whose spawn
+    /// table declared a `route_id` (content::manifest::Route) — gives
+    /// the plugin the NPC's current position and its full route
+    /// (waypoints, whether it loops, its declared speed) so the plugin
+    /// can decide the NPC's next position and drive it there via
+    /// `move-entity`. The host never moves an NPC on its own
+    /// (docs/PROPOSAL.md, "World Content": "the core provides the data
+    /// structure and movement validation; behavior is a plugin
+    /// concern").
+    on-npc-tick: func(entity-id: string, x: f64, y: f64, route-waypoints: list<tuple<f64, f64>>, route-loop: bool, route-speed: f64, dt: f64);
+
+    /// Fired when a player interacts with an NPC entity specifically
+    /// (as opposed to `on-interact`'s generic trigger-volume case) —
+    /// `npc-entity-id` is the NPC, `actor-entity-id` is the interacting
+    /// player.
+    on-npc-interact: func(npc-entity-id: string, actor-entity-id: string);
+
+    /// Fired for a chat message whose leading `/command` matches one of
+    /// this plugin's declared `chat_commands` (`plugin.toml`) — `command`
+    /// is the matched name without the leading slash, `args` is
+    /// everything after it verbatim (unparsed by the host), and
+    /// `sender-entity-id` is the sending connection's own entity (so the
+    /// plugin can `send-message` a reply). A matched command is consumed
+    /// — it is not also published to `chat` as an ordinary message.
+    on-chat-command: func(command: string, args: string, sender-entity-id: string);
 }
 
 world plugin {

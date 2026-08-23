@@ -44,7 +44,7 @@ use common::id::RealmId;
 use common::pool::{PoolOptions, postgres_pool, redis_pool};
 use content::manifest::ZoneManifest;
 use futures_util::StreamExt;
-use session::{SessionDeps, Sessions};
+use session::{EntityCharacters, SessionDeps, Sessions};
 use session_protocol::ServerMessage;
 use world::{MovementOutcome, Zone};
 
@@ -130,6 +130,7 @@ async fn main() {
     // it's empty (and every `send_message` call correctly errors "not
     // connected") until a client actually connects.
     let sessions: Sessions = Arc::new(Mutex::new(std::collections::HashMap::new()));
+    let entity_characters: EntityCharacters = Arc::new(Mutex::new(HashMap::new()));
 
     let plugin_runtime = if let (Ok(plugin_manifest_path), Ok(plugin_wasm_path)) = (
         std::env::var("WZ_PLUGIN_MANIFEST_PATH"),
@@ -166,12 +167,18 @@ async fn main() {
         .as_ref()
         .map(|runtime| runtime.message_types.clone())
         .unwrap_or_default();
+    let plugin_chat_commands = plugin_runtime
+        .as_ref()
+        .map(|runtime| runtime.chat_commands.clone())
+        .unwrap_or_default();
 
     let sessions_for_tick = sessions.clone();
     let world = world_actor::spawn_world_actor(
         zone,
         world_config.tick_interval(),
         plugin_runtime,
+        character_store.clone(),
+        entity_characters.clone(),
         move |zone, outcomes| {
             for (entity_id, outcome) in outcomes {
                 match outcome {
@@ -218,7 +225,9 @@ async fn main() {
         zone_id,
         world,
         sessions,
+        entity_characters,
         plugin_message_types,
+        plugin_chat_commands,
         chat: chat_deps,
     });
 

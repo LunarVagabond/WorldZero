@@ -22,7 +22,7 @@ use serde::Deserialize;
 /// (`wit/plugin.wit`) — a plugin manifest declaring a different
 /// `host_api_version` is refused at load time rather than instantiated
 /// against an interface it didn't actually target.
-pub const HOST_API_VERSION: &str = "0.2.0";
+pub const HOST_API_VERSION: &str = "0.3.0";
 
 /// `message_type` values below this are core-reserved (auth, chat, world
 /// — see docs/specs/Networking_Spec.md's catalog); a plugin declaring one
@@ -50,6 +50,14 @@ pub struct PluginDeclaration {
     /// against (docs/specs/Networking_Spec.md notes this as deferred).
     #[serde(default)]
     pub message_types: Vec<u16>,
+    /// Chat command names (without the leading `/`) this plugin wants
+    /// routed to its `on-chat-command` hook instead of published as an
+    /// ordinary chat message (#57). Checked by `check_chat_commands` for
+    /// emptiness, a stray leading `/`, and duplicates — the same kind of
+    /// plugin-authoring mistakes `check_message_types` catches for
+    /// `message_types`.
+    #[serde(default)]
+    pub chat_commands: Vec<String>,
 }
 
 impl PluginManifest {
@@ -84,7 +92,8 @@ impl PluginManifest {
                 ),
             ));
         }
-        self.check_message_types()
+        self.check_message_types()?;
+        self.check_chat_commands()
     }
 
     /// Refuses a manifest declaring a `message_types` entry below the
@@ -109,6 +118,44 @@ impl PluginManifest {
                     "plugin-host",
                     format!(
                         "plugin {:?} declares message_type {message_type} more than once",
+                        self.plugin.name
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Refuses a manifest declaring an empty command name, a name with a
+    /// leading `/` (the slash is protocol punctuation, not part of the
+    /// name — a plugin declaring `"/roll"` almost certainly meant
+    /// `"roll"`), or the same command name twice.
+    fn check_chat_commands(&self) -> Result<()> {
+        let mut seen = std::collections::HashSet::new();
+        for command in &self.plugin.chat_commands {
+            if command.is_empty() {
+                return Err(Error::new(
+                    "plugin-host",
+                    format!(
+                        "plugin {:?} declares an empty chat_commands entry",
+                        self.plugin.name
+                    ),
+                ));
+            }
+            if let Some(stripped) = command.strip_prefix('/') {
+                return Err(Error::new(
+                    "plugin-host",
+                    format!(
+                        "plugin {:?} declares chat_commands entry {command:?} with a leading '/' — did you mean {stripped:?}?",
+                        self.plugin.name
+                    ),
+                ));
+            }
+            if !seen.insert(command.as_str()) {
+                return Err(Error::new(
+                    "plugin-host",
+                    format!(
+                        "plugin {:?} declares chat_commands entry {command:?} more than once",
                         self.plugin.name
                     ),
                 ));
@@ -158,7 +205,7 @@ capabilities = ["economy", "combat"]
             r#"
 [plugin]
 name = "example-plugin"
-host_api_version = "0.2.0"
+host_api_version = "0.3.0"
 "#,
         )
         .unwrap();
@@ -185,7 +232,7 @@ host_api_version = "99.0.0"
             r#"
 [plugin]
 name = "example-plugin"
-host_api_version = "0.2.0"
+host_api_version = "0.3.0"
 message_types = [1000, 1001]
 "#,
         )
@@ -201,7 +248,7 @@ message_types = [1000, 1001]
             r#"
 [plugin]
 name = "example-plugin"
-host_api_version = "0.2.0"
+host_api_version = "0.3.0"
 message_types = [200]
 "#,
         )
@@ -217,7 +264,7 @@ message_types = [200]
             r#"
 [plugin]
 name = "example-plugin"
-host_api_version = "0.2.0"
+host_api_version = "0.3.0"
 message_types = [1000, 1000]
 "#,
         )
@@ -225,5 +272,69 @@ message_types = [1000, 1000]
 
         let err = manifest.check_compatible().unwrap_err();
         assert!(err.to_string().contains("1000"), "{err}");
+    }
+
+    #[test]
+    fn parses_declared_chat_commands() {
+        let manifest = PluginManifest::from_toml(
+            r#"
+[plugin]
+name = "example-plugin"
+host_api_version = "0.3.0"
+chat_commands = ["roll", "whisper"]
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(manifest.plugin.chat_commands, vec!["roll", "whisper"]);
+        assert!(manifest.check_compatible().is_ok());
+    }
+
+    #[test]
+    fn empty_chat_command_is_rejected() {
+        let manifest = PluginManifest::from_toml(
+            r#"
+[plugin]
+name = "example-plugin"
+host_api_version = "0.3.0"
+chat_commands = [""]
+"#,
+        )
+        .unwrap();
+
+        let err = manifest.check_compatible().unwrap_err();
+        assert!(err.to_string().contains("empty"), "{err}");
+    }
+
+    #[test]
+    fn chat_command_with_leading_slash_is_rejected() {
+        let manifest = PluginManifest::from_toml(
+            r#"
+[plugin]
+name = "example-plugin"
+host_api_version = "0.3.0"
+chat_commands = ["/roll"]
+"#,
+        )
+        .unwrap();
+
+        let err = manifest.check_compatible().unwrap_err();
+        assert!(err.to_string().contains("/roll"), "{err}");
+    }
+
+    #[test]
+    fn duplicate_chat_command_is_rejected() {
+        let manifest = PluginManifest::from_toml(
+            r#"
+[plugin]
+name = "example-plugin"
+host_api_version = "0.3.0"
+chat_commands = ["roll", "roll"]
+"#,
+        )
+        .unwrap();
+
+        let err = manifest.check_compatible().unwrap_err();
+        assert!(err.to_string().contains("roll"), "{err}");
     }
 }

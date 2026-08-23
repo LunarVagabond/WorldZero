@@ -4,9 +4,12 @@
 # WZ_PLUGIN_MANIFEST_PATH / WZ_PLUGIN_WASM_PATH at them) and adjust freely.
 [plugin]
 name = "example-plugin"
-host_api_version = "0.2.0"
+host_api_version = "0.3.0"
 capabilities = []
 # message_type values this plugin wants gateway-routed messages for, via
 # the on-message hook. Must each be >= 1000 (0-999 is core-reserved —
 # see docs/specs/Networking_Spec.md's catalog).
 message_types = []
+# Chat command names (without the leading '/') routed to the
+# on-chat-command hook instead of published as ordinary chat.
+chat_commands = []
