@@ -1,8 +1,6 @@
 # Issue Workflow
 
-**Status:** placeholder — no content yet.
-
-Will document how issues get triaged, labeled, and claimed (see the `.github/workflows/claim-*.yml` issue-claiming automation).
+**Status:** decision issues and work-item ticket quality are documented below. Still missing: day-to-day triage/labeling mechanics and how claiming actually works in practice (see the `.github/workflows/claim-*.yml` issue-claiming automation for the enforcement side of that until this doc covers the human-facing side).
 
 ## Decision issues
 
