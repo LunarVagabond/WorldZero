@@ -100,12 +100,28 @@ impl Guest for Plugin {
     }
 
     // Live: this plugin's `plugin.toml` declares `chat_commands = ["wave"]`.
+    // Also grants a `wolf-fang` trinket — the shipped example's live
+    // demonstration of `grant-item`/`on-item-acquire` (#57/#112).
     fn on_chat_command(command: String, args: String, sender_entity_id: String) {
         let _ = worldzero::plugin::host::send_message(
             &sender_entity_id,
             &format!("{sender_entity_id} used /{command} {args} — *the wolves howl*"),
         );
+        let _ = worldzero::plugin::host::grant_item(&sender_entity_id, "wolf-fang", 1);
     }
+
+    // Live: fires once `grant-item` (below) actually lands.
+    fn on_item_acquire(entity_id: String, item_type: String, new_quantity: i64) {
+        let _ = worldzero::plugin::host::send_message(
+            &entity_id,
+            &format!("you now have {new_quantity} {item_type}"),
+        );
+    }
+
+    // No live host call site exists yet, same caveat as on_damage_calc
+    // and friends above — nothing in the client protocol has a "use an
+    // item" action yet.
+    fn on_item_use(_entity_id: String, _item_type: String) {}
 }
 
 export!(Plugin);

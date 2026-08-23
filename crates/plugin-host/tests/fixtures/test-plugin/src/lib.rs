@@ -93,10 +93,29 @@ impl Guest for Plugin {
     }
 
     fn on_chat_command(command: String, args: String, sender_entity_id: String) {
+        if command == "give" {
+            let _ = worldzero::plugin::host::grant_item(&sender_entity_id, &args, 1);
+            return;
+        }
         let _ = worldzero::plugin::host::send_message(
             &sender_entity_id,
             &format!("ran command {command} with args {args}"),
         );
+    }
+
+    fn on_item_acquire(entity_id: String, item_type: String, new_quantity: i64) {
+        let _ = worldzero::plugin::host::send_message(
+            &entity_id,
+            &format!("acquired {item_type}, now have {new_quantity}"),
+        );
+    }
+
+    // "Using" an item removes it and pays out a bit of currency — a
+    // minimal but real exercise of remove-item/modify-currency, not
+    // meant to model an actual game economy.
+    fn on_item_use(entity_id: String, item_type: String) {
+        let _ = worldzero::plugin::host::remove_item(&entity_id, &item_type, 1);
+        let _ = worldzero::plugin::host::modify_currency(&entity_id, 5);
     }
 }
 
