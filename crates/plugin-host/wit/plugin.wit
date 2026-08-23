@@ -1,17 +1,18 @@
 // v0 plugin interface — docs/PROPOSAL.md ("Plugin System", "v0 Hooks",
 // "v0 Host Functions") and docs/specs/Plugin_API.md ("v0 world").
 //
-// #38 built the minimal slice (one NPC spawn, one interaction). #57
-// expands it with combat, NPC route/patrol, and chat-command hooks (see
+// #38 built the minimal slice (one NPC spawn, one interaction). #116
+// (split from #57) added combat, NPC route/patrol, and chat-command
+// hooks. #57 (now scoped to just this) adds inventory/economy — see
 // docs/specs/Plugin_API.md, "Beyond this v0 slice" for what's still not
-// here — inventory/economy, player-session, per-plugin optional hooks,
-// gated capability groups). A WIT "world" is the actual versioning
-// mechanism (docs/PROPOSAL.md, "Interface Technology"): a breaking
-// change bumps the package version below and/or lands as a new world,
-// rather than silently changing what `plugin` means underneath existing
-// compiled plugins.
+// here — player-session, per-plugin optional hooks, gated capability
+// groups. A WIT "world" is the actual versioning mechanism
+// (docs/PROPOSAL.md, "Interface Technology"): a breaking change bumps
+// the package version below and/or lands as a new world, rather than
+// silently changing what `plugin` means underneath existing compiled
+// plugins.
 
-package worldzero:plugin@0.3.0;
+package worldzero:plugin@0.4.0;
 
 /// What the host exposes for a plugin to call out to — nothing crosses
 /// this boundary that isn't listed here (docs/PROPOSAL.md, "Plugin
@@ -49,6 +50,37 @@ interface host {
     /// NPC's route data every tick, the plugin decides where it should
     /// be next and calls this to make it happen.
     move-entity: func(entity-id: string, x: f64, y: f64) -> result<_, string>;
+
+    /// Grants `quantity` of `item-type` to `entity-id` — queued and
+    /// applied through `character::CharacterStore::grant_item` on the
+    /// zone's next drain, same "validated write, never a direct storage
+    /// write" discipline as `apply-stat-delta`
+    /// (docs/specs/Data_Model_Spec.md's `items` table, #112). `item-type`
+    /// is an opaque string the host never interprets — what an item type
+    /// *means* is entirely plugin-owned. Only resolves for player
+    /// entities today: `entity-id` must belong to a connected player, an
+    /// NPC entity id is rejected (no NPC item ownership storage exists —
+    /// items are character-owned only). A successful grant fires
+    /// `on-item-acquire` back to this plugin once applied.
+    grant-item: func(entity-id: string, item-type: string, quantity: s64) -> result<_, string>;
+
+    /// Removes `quantity` of `item-type` from `entity-id` — queued and
+    /// applied through `character::CharacterStore::remove_item`. Same
+    /// player-entity-only caveat as `grant-item`. Rejected (nothing
+    /// applied) if the character doesn't own at least `quantity` — this
+    /// happens asynchronously during the drain, so (like `apply-stat-delta`)
+    /// a plugin gets an immediate `ok` for having queued the request, not
+    /// confirmation the removal actually succeeded; check via a
+    /// subsequent hook/message if that matters to the plugin's logic.
+    remove-item: func(entity-id: string, item-type: string, quantity: s64) -> result<_, string>;
+
+    /// Adjusts `entity-id`'s currency balance by `delta` (positive or
+    /// negative) — queued and applied through
+    /// `character::CharacterStore::modify_currency`. Same player-entity-only
+    /// caveat and same "queued, not confirmed synchronously" caveat as
+    /// `remove-item`. Rejected (nothing applied) if the result would go
+    /// negative.
+    modify-currency: func(entity-id: string, delta: s64) -> result<_, string>;
 }
 
 /// What the host calls into the plugin for — a plugin only receives the
@@ -133,6 +165,21 @@ interface hooks {
     /// plugin can `send-message` a reply). A matched command is consumed
     /// — it is not also published to `chat` as an ordinary message.
     on-chat-command: func(command: string, args: string, sender-entity-id: string);
+
+    /// Fired after a `grant-item` call this plugin made is actually
+    /// applied (the drain succeeded) — `quantity` is the item type's new
+    /// total, not the delta just granted. Live: `world::world_actor`
+    /// calls this itself right after applying a queued grant, so unlike
+    /// most of this interface's hooks, a plugin can treat this as
+    /// confirmation the grant went through.
+    on-item-acquire: func(entity-id: string, item-type: string, new-quantity: s64);
+
+    /// No live host call site yet — no "use an item" client action
+    /// exists anywhere in `docs/specs/Networking_Spec.md`'s message
+    /// catalog. A plugin wanting to let a player use an item today has
+    /// to route it through its own declared `chat_commands` or
+    /// `message_types` and call `remove-item` itself.
+    on-item-use: func(entity-id: string, item-type: string);
 }
 
 world plugin {

@@ -197,7 +197,18 @@ pub fn spawn_world_actor(
                         }
                         let moves = runtime.drain_pending_moves();
                         let stat_deltas = runtime.drain_pending_stat_deltas();
-                        apply_plugin_pending_effects(&mut zone, moves, stat_deltas, &character_store, &entity_characters).await;
+                        let item_grants = runtime.drain_pending_item_grants();
+                        let item_removals = runtime.drain_pending_item_removals();
+                        let currency_deltas = runtime.drain_pending_currency_deltas();
+                        let acquired = apply_plugin_pending_effects(
+                            &mut zone, moves, stat_deltas, item_grants, item_removals,
+                            currency_deltas, &character_store, &entity_characters,
+                        ).await;
+                        for (entity_id, item_type, new_quantity) in acquired {
+                            if let Err(e) = runtime.plugin.on_item_acquire(&entity_id, &item_type, new_quantity) {
+                                tracing::warn!(entity_id, item_type, error = %e, "plugin on_item_acquire hook failed");
+                            }
+                        }
                     }
 
                     next_tick_at += tick_interval;
@@ -235,7 +246,18 @@ pub fn spawn_world_actor(
                             }
                             let moves = runtime.drain_pending_moves();
                             let stat_deltas = runtime.drain_pending_stat_deltas();
-                            apply_plugin_pending_effects(&mut zone, moves, stat_deltas, &character_store, &entity_characters).await;
+                            let item_grants = runtime.drain_pending_item_grants();
+                            let item_removals = runtime.drain_pending_item_removals();
+                            let currency_deltas = runtime.drain_pending_currency_deltas();
+                            let acquired = apply_plugin_pending_effects(
+                                &mut zone, moves, stat_deltas, item_grants, item_removals,
+                                currency_deltas, &character_store, &entity_characters,
+                            ).await;
+                            for (entity_id, item_type, new_quantity) in acquired {
+                                if let Err(e) = runtime.plugin.on_item_acquire(&entity_id, &item_type, new_quantity) {
+                                    tracing::warn!(entity_id, item_type, error = %e, "plugin on_item_acquire hook failed");
+                                }
+                            }
                         }
                         WorldCommand::ChatCommand { command, args, sender_entity_id } => {
                             let Some(runtime) = plugin.as_mut() else {
@@ -252,7 +274,18 @@ pub fn spawn_world_actor(
                             }
                             let moves = runtime.drain_pending_moves();
                             let stat_deltas = runtime.drain_pending_stat_deltas();
-                            apply_plugin_pending_effects(&mut zone, moves, stat_deltas, &character_store, &entity_characters).await;
+                            let item_grants = runtime.drain_pending_item_grants();
+                            let item_removals = runtime.drain_pending_item_removals();
+                            let currency_deltas = runtime.drain_pending_currency_deltas();
+                            let acquired = apply_plugin_pending_effects(
+                                &mut zone, moves, stat_deltas, item_grants, item_removals,
+                                currency_deltas, &character_store, &entity_characters,
+                            ).await;
+                            for (entity_id, item_type, new_quantity) in acquired {
+                                if let Err(e) = runtime.plugin.on_item_acquire(&entity_id, &item_type, new_quantity) {
+                                    tracing::warn!(entity_id, item_type, error = %e, "plugin on_item_acquire hook failed");
+                                }
+                            }
                         }
                     }
                 }
@@ -263,22 +296,48 @@ pub fn spawn_world_actor(
     WorldHandle { commands: tx }
 }
 
-/// Applies whatever `move-entity`/`apply-stat-delta` requests a plugin
-/// hook call just made — shared by every call site that invokes a hook,
-/// so a plugin's host-function calls take effect regardless of which
-/// hook made them (#57). Takes the already-drained requests (not a
+/// Resolves a plugin-supplied entity-id string to a real `EntityId` and,
+/// via `entity_characters`, the `CharacterId` it belongs to — shared by
+/// every pending-effect kind that needs character-backed storage
+/// (stats, items, currency). `None` covers both "not a valid entity id"
+/// and "no character for this entity" (an NPC — no NPC-backed storage
+/// exists yet — or an unknown/disconnected entity); the caller logs
+/// whichever it actually was.
+fn resolve_character(
+    entity_characters: &EntityCharacters,
+    entity_id: &str,
+) -> Option<common::id::CharacterId> {
+    let entity_id: EntityId = entity_id.parse().ok()?;
+    entity_characters.lock().unwrap().get(&entity_id).copied()
+}
+
+/// Applies whatever `move-entity`/`apply-stat-delta`/`grant-item`/
+/// `remove-item`/`modify-currency` requests a plugin hook call just made
+/// — shared by every call site that invokes a hook, so a plugin's
+/// host-function calls take effect regardless of which hook made them
+/// (#57/#116). Takes the already-drained requests (not a
 /// `&PluginRuntime`) deliberately: `PluginRuntime` holds the `wasmtime`
 /// `Store`, which isn't `Sync`, so a `&PluginRuntime` held across the
-/// `.await` below would make the actor's whole task future non-`Send`
+/// `.await`s below would make the actor's whole task future non-`Send`
 /// (tokio requires `Send` futures) — draining first and passing owned
-/// data keeps no plugin-runtime borrow alive across the await.
+/// data keeps no plugin-runtime borrow alive across any await.
+///
+/// Returns every item grant that actually applied, as `(entity_id,
+/// item_type, new_quantity)` — the caller uses this to fire
+/// `on-item-acquire` back into the plugin *after* this function returns
+/// (so that synchronous call never overlaps one of this function's
+/// awaits either).
+#[allow(clippy::too_many_arguments)]
 async fn apply_plugin_pending_effects(
     zone: &mut Zone,
     pending_moves: Vec<(String, f64, f64)>,
     pending_stat_deltas: Vec<(String, String, i64)>,
+    pending_item_grants: Vec<(String, String, i64)>,
+    pending_item_removals: Vec<(String, String, i64)>,
+    pending_currency_deltas: Vec<(String, i64)>,
     character_store: &CharacterStore,
     entity_characters: &EntityCharacters,
-) {
+) -> Vec<(String, String, i64)> {
     for (entity_id, x, y) in pending_moves {
         match entity_id.parse::<EntityId>() {
             Ok(entity_id) => zone.request_move(entity_id, (x, y)),
@@ -292,19 +351,11 @@ async fn apply_plugin_pending_effects(
     }
 
     for (entity_id, stat_key, delta) in pending_stat_deltas {
-        let Ok(entity_id) = entity_id.parse::<EntityId>() else {
+        let Some(character_id) = resolve_character(entity_characters, &entity_id) else {
             tracing::warn!(
                 entity_id,
-                "plugin requested a stat delta for an invalid entity id"
-            );
-            continue;
-        };
-        let character_id = entity_characters.lock().unwrap().get(&entity_id).copied();
-        let Some(character_id) = character_id else {
-            tracing::warn!(
-                %entity_id,
-                "plugin requested a stat delta for an entity with no character \
-                 (an NPC — no NPC stat storage exists yet — or an unknown entity)"
+                "plugin requested a stat delta for an invalid entity id, an NPC \
+                 (no NPC stat storage exists yet), or an unknown entity"
             );
             continue;
         };
@@ -312,9 +363,65 @@ async fn apply_plugin_pending_effects(
             .apply_stat_delta(character_id, &stat_key, delta)
             .await
         {
-            tracing::warn!(%entity_id, stat_key, error = %e, "plugin's apply-stat-delta failed");
+            tracing::warn!(entity_id, stat_key, error = %e, "plugin's apply-stat-delta failed");
         }
     }
+
+    let mut acquired = Vec::new();
+    for (entity_id, item_type, quantity) in pending_item_grants {
+        let Some(character_id) = resolve_character(entity_characters, &entity_id) else {
+            tracing::warn!(
+                entity_id,
+                item_type,
+                "plugin requested an item grant for an invalid entity id, an NPC \
+                 (items are character-owned only), or an unknown entity"
+            );
+            continue;
+        };
+        match character_store
+            .grant_item(character_id, &item_type, quantity)
+            .await
+        {
+            Ok(new_quantity) => acquired.push((entity_id, item_type, new_quantity)),
+            Err(e) => {
+                tracing::warn!(entity_id, item_type, error = %e, "plugin's grant-item failed")
+            }
+        }
+    }
+
+    for (entity_id, item_type, quantity) in pending_item_removals {
+        let Some(character_id) = resolve_character(entity_characters, &entity_id) else {
+            tracing::warn!(
+                entity_id,
+                item_type,
+                "plugin requested an item removal for an invalid entity id, an NPC \
+                 (items are character-owned only), or an unknown entity"
+            );
+            continue;
+        };
+        if let Err(e) = character_store
+            .remove_item(character_id, &item_type, quantity)
+            .await
+        {
+            tracing::warn!(entity_id, item_type, error = %e, "plugin's remove-item failed");
+        }
+    }
+
+    for (entity_id, delta) in pending_currency_deltas {
+        let Some(character_id) = resolve_character(entity_characters, &entity_id) else {
+            tracing::warn!(
+                entity_id,
+                "plugin requested a currency delta for an invalid entity id, an NPC \
+                 (currency is character-owned only), or an unknown entity"
+            );
+            continue;
+        };
+        if let Err(e) = character_store.modify_currency(character_id, delta).await {
+            tracing::warn!(entity_id, error = %e, "plugin's modify-currency failed");
+        }
+    }
+
+    acquired
 }
 
 /// Spawns one NPC from a zone manifest's declared spawn table, at that

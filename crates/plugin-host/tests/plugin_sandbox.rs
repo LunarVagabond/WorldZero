@@ -28,7 +28,7 @@ fn manifest() -> PluginManifest {
         r#"
 [plugin]
 name = "test-plugin"
-host_api_version = "0.3.0"
+host_api_version = "0.4.0"
 message_types = [1000]
 "#,
     )
@@ -41,6 +41,9 @@ struct RecordingCallbacks {
     messages: Arc<Mutex<Vec<(String, String)>>>,
     stat_deltas: Arc<Mutex<Vec<(String, String, i64)>>>,
     moves: Arc<Mutex<Vec<(String, f64, f64)>>>,
+    item_grants: Arc<Mutex<Vec<(String, String, i64)>>>,
+    item_removals: Arc<Mutex<Vec<(String, String, i64)>>>,
+    currency_deltas: Arc<Mutex<Vec<(String, i64)>>>,
 }
 
 impl HostCallbacks for RecordingCallbacks {
@@ -78,6 +81,42 @@ impl HostCallbacks for RecordingCallbacks {
             .lock()
             .unwrap()
             .push((entity_id.to_string(), x, y));
+        Ok(())
+    }
+
+    fn grant_item(
+        &mut self,
+        entity_id: &str,
+        item_type: &str,
+        quantity: i64,
+    ) -> Result<(), String> {
+        self.item_grants.lock().unwrap().push((
+            entity_id.to_string(),
+            item_type.to_string(),
+            quantity,
+        ));
+        Ok(())
+    }
+
+    fn remove_item(
+        &mut self,
+        entity_id: &str,
+        item_type: &str,
+        quantity: i64,
+    ) -> Result<(), String> {
+        self.item_removals.lock().unwrap().push((
+            entity_id.to_string(),
+            item_type.to_string(),
+            quantity,
+        ));
+        Ok(())
+    }
+
+    fn modify_currency(&mut self, entity_id: &str, delta: i64) -> Result<(), String> {
+        self.currency_deltas
+            .lock()
+            .unwrap()
+            .push((entity_id.to_string(), delta));
         Ok(())
     }
 }
@@ -162,6 +201,59 @@ fn a_plugin_computes_damage_ticks_a_route_and_handles_a_chat_command() {
     assert_eq!(messages[0].0, "actor-1");
     assert!(messages[0].1.contains("roll"));
     assert!(messages[0].1.contains("2d6"));
+}
+
+#[test]
+#[ignore]
+fn a_plugin_grants_removes_items_and_modifies_currency() {
+    let wasm_path = fixture_dir().join("target/wasm32-wasip2/release/test_plugin.wasm");
+    let callbacks = RecordingCallbacks::default();
+
+    let host = PluginHost::new();
+    let mut plugin = host
+        .load(&manifest(), &wasm_path, Box::new(callbacks.clone()))
+        .expect("failed to load the well-behaved test plugin");
+
+    plugin
+        .on_chat_command("give", "torch", "actor-1")
+        .expect("on_chat_command should succeed");
+    assert_eq!(
+        callbacks.item_grants.lock().unwrap().as_slice(),
+        [("actor-1".to_string(), "torch".to_string(), 1)]
+    );
+
+    plugin
+        .on_item_use("actor-1", "torch")
+        .expect("on_item_use should succeed");
+    assert_eq!(
+        callbacks.item_removals.lock().unwrap().as_slice(),
+        [("actor-1".to_string(), "torch".to_string(), 1)]
+    );
+    assert_eq!(
+        callbacks.currency_deltas.lock().unwrap().as_slice(),
+        [("actor-1".to_string(), 5)]
+    );
+}
+
+#[test]
+#[ignore]
+fn a_plugin_acquires_an_item() {
+    let wasm_path = fixture_dir().join("target/wasm32-wasip2/release/test_plugin.wasm");
+    let callbacks = RecordingCallbacks::default();
+
+    let host = PluginHost::new();
+    let mut plugin = host
+        .load(&manifest(), &wasm_path, Box::new(callbacks.clone()))
+        .expect("failed to load the well-behaved test plugin");
+
+    plugin
+        .on_item_acquire("actor-1", "torch", 3)
+        .expect("on_item_acquire should succeed");
+    let messages = callbacks.messages.lock().unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].0, "actor-1");
+    assert!(messages[0].1.contains("torch"));
+    assert!(messages[0].1.contains('3'));
 }
 
 #[test]

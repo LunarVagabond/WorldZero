@@ -45,6 +45,28 @@ pub trait HostCallbacks: Send + 'static {
     /// path a player's own movement goes through, never a direct
     /// position write.
     fn move_entity(&mut self, entity_id: &str, x: f64, y: f64) -> std::result::Result<(), String>;
+
+    /// Grants an item stack (`wit/plugin.wit`'s `grant-item`) — queued,
+    /// applied through `character::CharacterStore::grant_item` (#112).
+    fn grant_item(
+        &mut self,
+        entity_id: &str,
+        item_type: &str,
+        quantity: i64,
+    ) -> std::result::Result<(), String>;
+
+    /// Removes from an item stack (`wit/plugin.wit`'s `remove-item`) —
+    /// queued, applied through `character::CharacterStore::remove_item`.
+    fn remove_item(
+        &mut self,
+        entity_id: &str,
+        item_type: &str,
+        quantity: i64,
+    ) -> std::result::Result<(), String>;
+
+    /// Adjusts a currency balance (`wit/plugin.wit`'s `modify-currency`)
+    /// — queued, applied through `character::CharacterStore::modify_currency`.
+    fn modify_currency(&mut self, entity_id: &str, delta: i64) -> std::result::Result<(), String>;
 }
 
 struct PluginState {
@@ -92,6 +114,32 @@ impl HostInterface for PluginState {
         y: f64,
     ) -> std::result::Result<(), String> {
         self.callbacks.move_entity(&entity_id, x, y)
+    }
+
+    fn grant_item(
+        &mut self,
+        entity_id: String,
+        item_type: String,
+        quantity: i64,
+    ) -> std::result::Result<(), String> {
+        self.callbacks.grant_item(&entity_id, &item_type, quantity)
+    }
+
+    fn remove_item(
+        &mut self,
+        entity_id: String,
+        item_type: String,
+        quantity: i64,
+    ) -> std::result::Result<(), String> {
+        self.callbacks.remove_item(&entity_id, &item_type, quantity)
+    }
+
+    fn modify_currency(
+        &mut self,
+        entity_id: String,
+        delta: i64,
+    ) -> std::result::Result<(), String> {
+        self.callbacks.modify_currency(&entity_id, delta)
     }
 }
 
@@ -334,5 +382,30 @@ impl LoadedPlugin {
             .worldzero_plugin_hooks()
             .call_on_chat_command(&mut self.store, command, args, sender_entity_id)
             .map_err(|e| Error::new("plugin-host", format!("on_chat_command hook failed: {e:#}")))
+    }
+
+    /// Live: `world::world_actor` calls this itself right after applying
+    /// a queued `grant-item` request, so a plugin can treat this as
+    /// confirmation the grant actually went through — `new_quantity` is
+    /// the item type's new total, not the delta just granted.
+    pub fn on_item_acquire(
+        &mut self,
+        entity_id: &str,
+        item_type: &str,
+        new_quantity: i64,
+    ) -> Result<()> {
+        self.bindings
+            .worldzero_plugin_hooks()
+            .call_on_item_acquire(&mut self.store, entity_id, item_type, new_quantity)
+            .map_err(|e| Error::new("plugin-host", format!("on_item_acquire hook failed: {e:#}")))
+    }
+
+    /// No live host call site exists yet — see `wit/plugin.wit`'s
+    /// `on-item-use` doc comment.
+    pub fn on_item_use(&mut self, entity_id: &str, item_type: &str) -> Result<()> {
+        self.bindings
+            .worldzero_plugin_hooks()
+            .call_on_item_use(&mut self.store, entity_id, item_type)
+            .map_err(|e| Error::new("plugin-host", format!("on_item_use hook failed: {e:#}")))
     }
 }

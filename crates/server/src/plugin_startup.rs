@@ -42,6 +42,15 @@ pub struct PluginCallbacks {
     /// `(entity_id, x, y)`, drained and applied via
     /// `world::Zone::request_move` by the caller.
     pending_moves: Arc<Mutex<Vec<(String, f64, f64)>>>,
+    /// `(entity_id, item_type, quantity)`, drained and applied through
+    /// `character::CharacterStore::grant_item` by the caller (#57/#112).
+    pending_item_grants: Arc<Mutex<Vec<(String, String, i64)>>>,
+    /// `(entity_id, item_type, quantity)`, drained and applied through
+    /// `character::CharacterStore::remove_item` by the caller.
+    pending_item_removals: Arc<Mutex<Vec<(String, String, i64)>>>,
+    /// `(entity_id, delta)`, drained and applied through
+    /// `character::CharacterStore::modify_currency` by the caller.
+    pending_currency_deltas: Arc<Mutex<Vec<(String, i64)>>>,
     sessions: Sessions,
 }
 
@@ -102,6 +111,42 @@ impl HostCallbacks for PluginCallbacks {
             .push((entity_id.to_string(), x, y));
         Ok(())
     }
+
+    fn grant_item(
+        &mut self,
+        entity_id: &str,
+        item_type: &str,
+        quantity: i64,
+    ) -> std::result::Result<(), String> {
+        self.pending_item_grants.lock().unwrap().push((
+            entity_id.to_string(),
+            item_type.to_string(),
+            quantity,
+        ));
+        Ok(())
+    }
+
+    fn remove_item(
+        &mut self,
+        entity_id: &str,
+        item_type: &str,
+        quantity: i64,
+    ) -> std::result::Result<(), String> {
+        self.pending_item_removals.lock().unwrap().push((
+            entity_id.to_string(),
+            item_type.to_string(),
+            quantity,
+        ));
+        Ok(())
+    }
+
+    fn modify_currency(&mut self, entity_id: &str, delta: i64) -> std::result::Result<(), String> {
+        self.pending_currency_deltas
+            .lock()
+            .unwrap()
+            .push((entity_id.to_string(), delta));
+        Ok(())
+    }
 }
 
 /// A plugin kept alive past startup: the live instance, which
@@ -120,6 +165,9 @@ pub struct PluginRuntime {
     pending_spawns: Arc<Mutex<Vec<String>>>,
     pending_stat_deltas: Arc<Mutex<Vec<(String, String, i64)>>>,
     pending_moves: Arc<Mutex<Vec<(String, f64, f64)>>>,
+    pending_item_grants: Arc<Mutex<Vec<(String, String, i64)>>>,
+    pending_item_removals: Arc<Mutex<Vec<(String, String, i64)>>>,
+    pending_currency_deltas: Arc<Mutex<Vec<(String, i64)>>>,
 }
 
 impl PluginRuntime {
@@ -139,6 +187,24 @@ impl PluginRuntime {
     /// drain, in call order.
     pub fn drain_pending_moves(&self) -> Vec<(String, f64, f64)> {
         std::mem::take(&mut self.pending_moves.lock().unwrap())
+    }
+
+    /// `(entity_id, item_type, quantity)` requested via `grant-item`
+    /// since the last drain, in call order.
+    pub fn drain_pending_item_grants(&self) -> Vec<(String, String, i64)> {
+        std::mem::take(&mut self.pending_item_grants.lock().unwrap())
+    }
+
+    /// `(entity_id, item_type, quantity)` requested via `remove-item`
+    /// since the last drain, in call order.
+    pub fn drain_pending_item_removals(&self) -> Vec<(String, String, i64)> {
+        std::mem::take(&mut self.pending_item_removals.lock().unwrap())
+    }
+
+    /// `(entity_id, delta)` requested via `modify-currency` since the
+    /// last drain, in call order.
+    pub fn drain_pending_currency_deltas(&self) -> Vec<(String, i64)> {
+        std::mem::take(&mut self.pending_currency_deltas.lock().unwrap())
     }
 }
 
@@ -161,10 +227,16 @@ pub fn load_and_run_on_load(
     let pending_spawns = Arc::new(Mutex::new(Vec::new()));
     let pending_stat_deltas = Arc::new(Mutex::new(Vec::new()));
     let pending_moves = Arc::new(Mutex::new(Vec::new()));
+    let pending_item_grants = Arc::new(Mutex::new(Vec::new()));
+    let pending_item_removals = Arc::new(Mutex::new(Vec::new()));
+    let pending_currency_deltas = Arc::new(Mutex::new(Vec::new()));
     let callbacks = PluginCallbacks {
         pending_spawns: pending_spawns.clone(),
         pending_stat_deltas: pending_stat_deltas.clone(),
         pending_moves: pending_moves.clone(),
+        pending_item_grants: pending_item_grants.clone(),
+        pending_item_removals: pending_item_removals.clone(),
+        pending_currency_deltas: pending_currency_deltas.clone(),
         sessions,
     };
 
@@ -179,6 +251,9 @@ pub fn load_and_run_on_load(
         pending_spawns,
         pending_stat_deltas,
         pending_moves,
+        pending_item_grants,
+        pending_item_removals,
+        pending_currency_deltas,
     };
     Ok((runtime, on_load_spawns))
 }
