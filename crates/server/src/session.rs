@@ -68,6 +68,10 @@ pub struct SessionDeps {
     /// `Some` when `ServicesConfig::chat_enabled` — `None` end to end
     /// means chat is disabled and never touched, not just no-op'd (#104).
     pub chat: Option<ChatDeps>,
+    /// `Some` when `ServicesConfig::metrics_enabled` — `None` end to end
+    /// means metrics are disabled and `worldzero_connection_count` is
+    /// never touched, not just excluded from what gets scraped (#48).
+    pub metrics: Option<Arc<common::metrics::Metrics>>,
 }
 
 pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Result<()> {
@@ -143,6 +147,9 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
         .lock()
         .unwrap()
         .insert(entity_id, character_id);
+    if let Some(metrics) = &deps.metrics {
+        metrics.connection_count.inc();
+    }
 
     // Everything already in the zone, delivered as one `Joined` message
     // rather than `Spawned` plus a separate `EntitySpawned` per entity —
@@ -297,6 +304,9 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
     }
 
     chat_session::abort_all(joined_channels);
+    if let Some(metrics) = &deps.metrics {
+        metrics.connection_count.dec();
+    }
 
     let final_position = zone.world.position_of(entity_id).await;
     zone.world.despawn(entity_id);

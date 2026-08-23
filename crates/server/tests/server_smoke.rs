@@ -28,6 +28,7 @@ use auth::gateway_protocol::{
 };
 use futures_util::{SinkExt, StreamExt};
 use server_test_support::{ClientMessage, ServerMessage};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_rustls::TlsConnector;
 use tokio_rustls::rustls::RootCertStore;
 use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName};
@@ -605,4 +606,102 @@ async fn chat_disabled_returns_a_clear_error() {
         }
         other => panic!("expected an Error, got {other:?}"),
     }
+}
+
+/// #48: `/metrics` is a real, separate HTTP listener — a plain GET
+/// against it returns a Prometheus-exposition-format body naming every
+/// metric this build exposes, once there's been at least one connection
+/// and one tick to actually populate them.
+#[tokio::test]
+#[ignore]
+async fn metrics_endpoint_serves_prometheus_text() {
+    let config_dir = setup_config_dir("metrics");
+    let metrics_addr = "127.0.0.1:7914";
+    let _server = start_server_with_env(
+        &config_dir,
+        "127.0.0.1:7915",
+        true,
+        &[("WZ_METRICS_ADDR", metrics_addr)],
+    );
+    wait_for_port("127.0.0.1:7915").await;
+    wait_for_port(metrics_addr).await;
+
+    // One real connection so worldzero_connection_count and the
+    // per-zone gauges have something to report.
+    let mut stream = connect(&config_dir, "127.0.0.1:7915").await;
+    register_and_authenticate(
+        &mut stream,
+        &format!("metrics-{}", uuid::Uuid::now_v7()),
+        "hunter2",
+    )
+    .await;
+    assert!(matches!(
+        recv_world(&mut stream).await,
+        ServerMessage::Joined { .. }
+    ));
+    // Give the zone actor at least one tick to run and populate the
+    // per-zone gauges/histogram before scraping.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let mut metrics_stream =
+        tokio::time::timeout(STEP_TIMEOUT, tokio::net::TcpStream::connect(metrics_addr))
+            .await
+            .expect("timed out connecting to the metrics listener")
+            .unwrap();
+    metrics_stream
+        .write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .await
+        .unwrap();
+
+    let mut response = Vec::new();
+    tokio::time::timeout(STEP_TIMEOUT, metrics_stream.read_to_end(&mut response))
+        .await
+        .expect("timed out reading the metrics response")
+        .unwrap();
+    let response = String::from_utf8(response).unwrap();
+
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    assert!(
+        response.contains("worldzero_zone_tick_duration_seconds"),
+        "{response}"
+    );
+    assert!(
+        response.contains("worldzero_zone_entity_count"),
+        "{response}"
+    );
+    assert!(
+        response.contains("worldzero_zone_world_command_queue_depth"),
+        "{response}"
+    );
+    assert!(
+        response.contains("worldzero_connection_count 1"),
+        "{response}"
+    );
+}
+
+/// #48: `WZ_SERVICE_METRICS_ENABLED=false` means no `/metrics` listener
+/// binds at all — not a listener that's up but returns nothing.
+#[tokio::test]
+#[ignore]
+async fn metrics_disabled_means_no_listener_at_all() {
+    let config_dir = setup_config_dir("metrics-disabled");
+    let metrics_addr = "127.0.0.1:7916";
+    let _server = start_server_with_env(
+        &config_dir,
+        "127.0.0.1:7917",
+        true,
+        &[
+            ("WZ_METRICS_ADDR", metrics_addr),
+            ("WZ_SERVICE_METRICS_ENABLED", "false"),
+        ],
+    );
+    wait_for_port("127.0.0.1:7917").await;
+
+    // Give the process a moment to have started (and *not* bound the
+    // metrics port) before asserting the connection is refused.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        tokio::net::TcpStream::connect(metrics_addr).await.is_err(),
+        "metrics listener should not be bound when WZ_SERVICE_METRICS_ENABLED=false"
+    );
 }

@@ -27,7 +27,10 @@
 //! together — a plugin to run `on_load` against at startup; attached to
 //! only the *first* zone loaded when running multiple, see
 //! `zone_registry`'s doc comment), `WZ_SERVICE_CHAT_ENABLED` (default
-//! `true`).
+//! `true`), `WZ_SERVICE_METRICS_ENABLED` (default `true`) +
+//! `WZ_METRICS_ADDR` (default `127.0.0.1:9090` — a separate `/metrics`
+//! HTTP listener for Prometheus scraping, #48; see
+//! docs/specs/Observability_Spec.md).
 //!
 //! A connected client speaks `auth::gateway_protocol` first (login or
 //! register), then `server::session_protocol` (move, see other entities
@@ -61,6 +64,7 @@ use world::{EntityKind, MovementOutcome, Point, Zone};
 use zone_registry::{ZoneRegistry, ZoneRuntime};
 
 const DEFAULT_ADDR: &str = "127.0.0.1:7900";
+const DEFAULT_METRICS_ADDR: &str = "127.0.0.1:9090";
 
 /// Placeholder until `realm-directory` (#47) exists — one fixed, nil
 /// realm id every character in this phase-1 process belongs to. Safe as
@@ -89,6 +93,31 @@ async fn main() {
 
     let world_config = world::WorldConfig::from_env().expect("invalid WZ_WORLD_* config");
     let services = ServicesConfig::from_env().expect("invalid WZ_SERVICE_* config");
+
+    // `None` end to end (not just an unused `Metrics`) when disabled —
+    // no `/metrics` HTTP listener, and every instrumentation call site
+    // below (`world_actor`, `session`) skips its `Some(...)` branch
+    // entirely rather than updating a gauge/histogram nobody scrapes
+    // (#48, per the #91/#92 runtime-toggle decision, same discipline
+    // `chat_deps` already applies).
+    let metrics = if services.metrics_enabled {
+        tracing::info!("metrics enabled");
+        let metrics = Arc::new(common::metrics::Metrics::new());
+        let metrics_addr: std::net::SocketAddr = std::env::var("WZ_METRICS_ADDR")
+            .unwrap_or_else(|_| DEFAULT_METRICS_ADDR.to_string())
+            .parse()
+            .expect("WZ_METRICS_ADDR must be a valid socket address");
+        let metrics_for_listener = metrics.clone();
+        tokio::spawn(async move {
+            if let Err(e) = common::metrics::serve(metrics_addr, metrics_for_listener).await {
+                tracing::error!(error = %e, "metrics listener stopped");
+            }
+        });
+        Some(metrics)
+    } else {
+        tracing::info!("metrics disabled (WZ_SERVICE_METRICS_ENABLED=false)");
+        None
+    };
 
     let zone_manifests = load_zone_manifests(&config_dir);
     let default_zone_id = zone_manifests[0].id.clone();
@@ -189,6 +218,8 @@ async fn main() {
             plugin_runtime,
             character_store.clone(),
             entity_characters.clone(),
+            zone_id.clone(),
+            metrics.clone(),
             move |zone, outcomes| {
                 handle_tick_outcomes(
                     &registry_cell,
@@ -228,6 +259,7 @@ async fn main() {
         plugin_message_types,
         plugin_chat_commands,
         chat: chat_deps,
+        metrics,
     });
 
     let mut incoming = Box::pin(incoming);
