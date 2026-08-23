@@ -15,9 +15,38 @@ The framework-required columns — never a superset or subset per deployment —
 | `zone_id` | `TEXT NOT NULL` | Which zone the character is currently in, by the content manifest's zone `id` slug (docs/specs/Content_Manifest_Spec.md) — not a DB foreign key, since zones are content-defined, not database rows. |
 | `position_x`, `position_y`, `position_z` | `DOUBLE PRECISION NOT NULL DEFAULT 0` | Position, in the zone's own coordinate system. |
 | `stats` | `JSONB NOT NULL DEFAULT '{}'` | The declared-attribute-schema column — see below. |
+| `currency_balance` | `BIGINT NOT NULL DEFAULT 0 CHECK (currency_balance >= 0)` | A single currency balance (#112) — see "Currency: one balance, not a ledger table" below. |
 | `created_at`, `updated_at` | `TIMESTAMPTZ NOT NULL DEFAULT now()` | Timestamps. |
 
 No column exists for any specific stat (no `hp`, no `mana`) — that would violate "no stat is ever privileged by the core." A GIN index on `stats` makes it queryable/indexable via native JSONB operators per the proposal's rationale.
+
+## `items` table: one row per owned item-type stack
+
+```sql
+CREATE TABLE items (
+    id UUID PRIMARY KEY,
+    character_id UUID NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+    item_type TEXT NOT NULL,
+    quantity BIGINT NOT NULL CHECK (quantity > 0),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (character_id, item_type)
+);
+```
+
+Same "fixed core schema, framework never interprets the meaning" discipline as `stats` — the framework knows an `item_type` string and a `quantity` exist; what an item *type* actually does (a potion heals, a key unlocks a door) is entirely plugin-owned, never core logic. `item_type` is an opaque string the framework doesn't parse, the same pattern `content::manifest::SpawnTable`'s `entity_type` already uses (e.g. `"npc.wolf"`).
+
+**One row per `(character_id, item_type)`, not one row per physical item.** A character's 5 torches are one row with `quantity = 5`, not 5 rows — the `UNIQUE` constraint enforces this. `character::CharacterStore::grant_item` upserts (creates the stack or adds to it); `remove_item` subtracts and deletes the row outright once it reaches zero, rather than leaving a `quantity = 0` row around. Removing more than a character owns is rejected, not silently clamped to zero — same "reject before it reaches storage" discipline as an out-of-bounds stat write.
+
+**Not slot-based.** This table has no notion of inventory "slots," equipment positions, or item instances with individual properties (durability, enchantments, a unique instance id) — that's explicitly out of scope for the core (per #112's "out of scope": item *effects* stay plugin-owned) and, if a game needs per-instance item state, is exactly what the plugin-scoped data store (`docs/PROPOSAL.md`'s "Plugin-Scoped Data Store") is for, keyed by a plugin-chosen id.
+
+**Capacity is enforced but configurable.** `character::inventory::InventoryConfig::max_distinct_item_types` (default 40, override via `WZ_INVENTORY_MAX_ITEM_TYPES`) caps the number of *distinct* `item_type` stacks a character can hold — granting more of an already-owned type is never blocked by this, only a brand-new stack is. This is a soft, configurable UX limit (the classic "N inventory slots" game mechanic), not a hard architectural ceiling — same "solid default everywhere, never a wall for the dev" spirit as every other configurable bound in this crate, and consistent with `AttributeSchema`'s dev-declared per-stat bounds. Enforced with a plain read-then-write count check, not a transaction — acceptable because it's a soft limit, not a data-integrity boundary (see the module doc on `character::inventory` for the full reasoning).
+
+## Currency: one balance, not a ledger table
+
+`characters.currency_balance` is a single `BIGINT`, not a `currencies` table or a per-currency ledger — deliberately, for v0: no game requirement for multiple named currencies (gold *and* gems *and* faction tokens, each independently tracked) has driven this yet, and a single balance is the overwhelmingly common case. `character::CharacterStore::modify_currency` applies a signed delta and rejects (storage untouched) any change that would take the balance negative — the same invariant the column's own `CHECK (currency_balance >= 0)` enforces at the database level, checked in `character` first so a caller gets a clear crate error instead of a raw constraint-violation from `sqlx`.
+
+**This is additive, not a wall.** If a real game needs multiple independently-tracked currencies later, that's a new `character_currency(character_id, currency_key, balance)` table added alongside this column — not a breaking redesign of it. `currency_balance` stays as the default/primary balance either way, the same way adding a new declared stat key never requires a migration for existing `stats` data.
 
 ## `stats.schema.yaml` format
 

@@ -38,6 +38,7 @@ mod world_actor;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 
+use character::inventory::InventoryConfig;
 use character::{AttributeSchema, CharacterStore};
 use common::config::{PostgresConfig, RedisConfig, ServicesConfig};
 use common::id::RealmId;
@@ -95,6 +96,8 @@ async fn main() {
             schema_path.display()
         )
     });
+    let inventory_config =
+        InventoryConfig::from_env().expect("invalid WZ_INVENTORY_MAX_ITEM_TYPES");
 
     let account_store: Arc<dyn auth::AccountStore> =
         Arc::new(auth::PostgresAccountStore::new(pool.clone()));
@@ -103,7 +106,7 @@ async fn main() {
         account_store,
         sessions_manager,
     ));
-    let character_store = Arc::new(CharacterStore::new(pool.clone(), schema));
+    let character_store = Arc::new(CharacterStore::new(pool.clone(), schema, inventory_config));
     let realm_id = placeholder_realm_id();
 
     // `None` end to end (not just an unused `ChatDeps`) when disabled —
