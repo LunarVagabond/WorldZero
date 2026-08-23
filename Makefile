@@ -10,7 +10,7 @@ LOG_FILE := $(LOG_DIR)/server.log
 EXAMPLE_PLUGIN_DIR := examples/example-plugin
 EXAMPLE_PLUGIN_WASM := $(EXAMPLE_PLUGIN_DIR)/target/wasm32-wasip2/release/example_plugin.wasm
 
-.PHONY: help build run quickstart start stop restart status test test-live fmt fmt-check lint check clean migrate migrate-down chat-server chat
+.PHONY: help build run quickstart start stop restart status test test-live fmt fmt-check lint check clean migrate migrate-down chat-server chat docker-up docker-down docker-status docker-logs
 
 help:
 	@echo "WorldZero — local dev commands"
@@ -18,6 +18,12 @@ help:
 	@echo "  make quickstart    one command from a fresh clone to a running world — see"
 	@echo "                     docs/product/Getting_Started_Developers.md (needs WZ_POSTGRES_*/WZ_REDIS_*"
 	@echo "                     in .env pointed at a reachable Postgres/Redis; everything else is automatic)"
+	@echo "  make docker-up     start local Postgres/Redis in Docker (small teams/sandboxing only — see"
+	@echo "                     docs/product/Getting_Started_Developers.md; not used for the persistent dev"
+	@echo "                     setup, and not a substitute for a real multi-machine deployment at scale)"
+	@echo "  make docker-down   stop the docker-compose Postgres/Redis (data persists in a named volume)"
+	@echo "  make docker-status show docker-compose service status"
+	@echo "  make docker-logs   tail the docker-compose Postgres/Redis logs"
 	@echo "  make build         cargo build --workspace"
 	@echo "  make run           run the server binary in the foreground"
 	@echo "  make start         run the server binary in the background (pid/log under $(RUN_DIR)/)"
@@ -89,6 +95,20 @@ status:
 	else \
 		echo "server not running"; \
 	fi
+
+docker-up:
+	@./scripts/docker_preflight.sh
+	docker compose up -d
+	@echo "Postgres/Redis are up. Point WZ_POSTGRES_HOST/WZ_REDIS_HOST at 'localhost' in .env, then 'make quickstart' or 'make migrate'."
+
+docker-down:
+	docker compose down
+
+docker-status:
+	docker compose ps
+
+docker-logs:
+	docker compose logs -f
 
 migrate:
 	$(CARGO) run -p common --bin migrate -- up
