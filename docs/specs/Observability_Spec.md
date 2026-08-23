@@ -56,6 +56,10 @@ The point of reserving `ERROR` is operational, not stylistic: once alerting exis
 
 **Runtime toggle:** `WZ_SERVICE_METRICS_ENABLED`, default `true` — same optional-service pattern `chat` established (`common::config::ServicesConfig`, decision #91). Disabled means `Option<Arc<Metrics>>` is `None` end to end: no `/metrics` listener binds, and every instrumentation call site (`world_actor`'s tick loop, `session`'s connection tracking) skips its `Some(...)` branch entirely — not a listener left running with nothing behind it.
 
+## Log export/aggregation (decision: #120)
+
+Core ships the fixed stdout format above and nothing more — no pluggable log-sink abstraction, no bundled/blessed Loki+Grafana or DataDog integration. The format is already portable enough that any mainstream shipper (Promtail, Filebeat, DataDog Agent, Vector) can tail it without WorldZero doing anything else. What ships beyond this is docs-only — example shipper configs, "reference, not maintained product," same framing already used for the Grafana dashboard (#59/#68) — tracked separately, not in this crate.
+
 ## Tracing and the admin API
 
 Still placeholder — OpenTelemetry spans (#49) and the admin/introspection API surface (#56) are designed at a high level in the proposal but not yet at spec detail.
