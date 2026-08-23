@@ -26,6 +26,25 @@ pub trait HostCallbacks: Send + 'static {
         target_entity_id: &str,
         body: &str,
     ) -> std::result::Result<(), String>;
+
+    /// Adjusts one declared stat by `delta` (`wit/plugin.wit`'s
+    /// `apply-stat-delta`) — the actual write still goes through
+    /// whatever validates it against the game's declared attribute
+    /// schema (docs/specs/Data_Model_Spec.md); this trait method is only
+    /// the sandboxed call boundary, same division of responsibility as
+    /// `spawn_npc`/`send_message`.
+    fn apply_stat_delta(
+        &mut self,
+        entity_id: &str,
+        stat_key: &str,
+        delta: i64,
+    ) -> std::result::Result<(), String>;
+
+    /// Queues a move for `entity_id` (`wit/plugin.wit`'s `move-entity`)
+    /// — applied and validated on the zone's next tick through the same
+    /// path a player's own movement goes through, never a direct
+    /// position write.
+    fn move_entity(&mut self, entity_id: &str, x: f64, y: f64) -> std::result::Result<(), String>;
 }
 
 struct PluginState {
@@ -54,6 +73,25 @@ impl HostInterface for PluginState {
         body: String,
     ) -> std::result::Result<(), String> {
         self.callbacks.send_message(&target_entity_id, &body)
+    }
+
+    fn apply_stat_delta(
+        &mut self,
+        entity_id: String,
+        stat_key: String,
+        delta: i64,
+    ) -> std::result::Result<(), String> {
+        self.callbacks
+            .apply_stat_delta(&entity_id, &stat_key, delta)
+    }
+
+    fn move_entity(
+        &mut self,
+        entity_id: String,
+        x: f64,
+        y: f64,
+    ) -> std::result::Result<(), String> {
+        self.callbacks.move_entity(&entity_id, x, y)
     }
 }
 
@@ -201,5 +239,100 @@ impl LoadedPlugin {
             .worldzero_plugin_hooks()
             .call_on_message(&mut self.store, message_type, sender_entity_id, payload)
             .map_err(|e| Error::new("plugin-host", format!("on_message hook failed: {e:#}")))
+    }
+
+    /// No live host call site exists yet — see `wit/plugin.wit`'s
+    /// `on-damage-calc` doc comment.
+    pub fn on_damage_calc(
+        &mut self,
+        attacker_entity_id: &str,
+        target_entity_id: &str,
+        stat_key: &str,
+        base_amount: i64,
+    ) -> Result<()> {
+        self.bindings
+            .worldzero_plugin_hooks()
+            .call_on_damage_calc(
+                &mut self.store,
+                attacker_entity_id,
+                target_entity_id,
+                stat_key,
+                base_amount,
+            )
+            .map_err(|e| Error::new("plugin-host", format!("on_damage_calc hook failed: {e:#}")))
+    }
+
+    /// No live host call site exists yet — see `wit/plugin.wit`'s
+    /// `on-death` doc comment.
+    pub fn on_death(&mut self, entity_id: &str) -> Result<()> {
+        self.bindings
+            .worldzero_plugin_hooks()
+            .call_on_death(&mut self.store, entity_id)
+            .map_err(|e| Error::new("plugin-host", format!("on_death hook failed: {e:#}")))
+    }
+
+    /// No live host call site exists yet — see `wit/plugin.wit`'s
+    /// `on-respawn` doc comment.
+    pub fn on_respawn(&mut self, entity_id: &str) -> Result<()> {
+        self.bindings
+            .worldzero_plugin_hooks()
+            .call_on_respawn(&mut self.store, entity_id)
+            .map_err(|e| Error::new("plugin-host", format!("on_respawn hook failed: {e:#}")))
+    }
+
+    /// Called once per tick for an NPC entity whose spawn table declared
+    /// a route (`world::world_actor` drives this call site — the plugin
+    /// is expected to respond with `move-entity` calls, not have its NPC
+    /// moved for it).
+    #[allow(clippy::too_many_arguments)]
+    pub fn on_npc_tick(
+        &mut self,
+        entity_id: &str,
+        x: f64,
+        y: f64,
+        route_waypoints: &[(f64, f64)],
+        route_loop: bool,
+        route_speed: f64,
+        dt: f64,
+    ) -> Result<()> {
+        self.bindings
+            .worldzero_plugin_hooks()
+            .call_on_npc_tick(
+                &mut self.store,
+                entity_id,
+                x,
+                y,
+                route_waypoints,
+                route_loop,
+                route_speed,
+                dt,
+            )
+            .map_err(|e| Error::new("plugin-host", format!("on_npc_tick hook failed: {e:#}")))
+    }
+
+    /// No live host call site exists yet — a player-targets-an-NPC
+    /// client action doesn't exist in `docs/specs/Networking_Spec.md`'s
+    /// message catalog yet, only the generic trigger-volume `on-interact`.
+    pub fn on_npc_interact(&mut self, npc_entity_id: &str, actor_entity_id: &str) -> Result<()> {
+        self.bindings
+            .worldzero_plugin_hooks()
+            .call_on_npc_interact(&mut self.store, npc_entity_id, actor_entity_id)
+            .map_err(|e| Error::new("plugin-host", format!("on_npc_interact hook failed: {e:#}")))
+    }
+
+    /// Delivers a chat message whose leading `/command` matched one of
+    /// this plugin's declared `chat_commands` (`plugin.toml`) — the
+    /// caller is responsible for that match, same contract as
+    /// `on_message`.
+    pub fn on_chat_command(
+        &mut self,
+        command: &str,
+        args: &str,
+        sender_entity_id: &str,
+    ) -> Result<()> {
+        self.bindings
+            .worldzero_plugin_hooks()
+            .call_on_chat_command(&mut self.store, command, args, sender_entity_id)
+            .map_err(|e| Error::new("plugin-host", format!("on_chat_command hook failed: {e:#}")))
     }
 }

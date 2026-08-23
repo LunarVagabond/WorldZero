@@ -52,6 +52,60 @@ impl Guest for Plugin {
             &format!("plugin got message_type {message_type}: {body}"),
         );
     }
+
+    // No live host call site exists yet for any of the four hooks below
+    // (wit/plugin.wit's doc comments explain why per hook) — implemented
+    // as no-ops/minimal stand-ins here only because a WIT world's
+    // exports aren't individually optional in v0, not because this
+    // example plugin actually uses them yet.
+
+    fn on_damage_calc(
+        _attacker_entity_id: String,
+        target_entity_id: String,
+        stat_key: String,
+        base_amount: i64,
+    ) {
+        let _ = worldzero::plugin::host::apply_stat_delta(&target_entity_id, &stat_key, -base_amount);
+    }
+
+    fn on_death(_entity_id: String) {}
+
+    fn on_respawn(_entity_id: String) {}
+
+    // This one *is* live: `wolf-pack-01`'s spawn table declares
+    // `route_id: wolf-patrol-01` (config/zone.manifest.example.yaml), so
+    // the wolf spawned in `on_load` above ticks along its patrol route —
+    // just walk to the next declared waypoint each tick, looping ignored
+    // for this minimal example (a real plugin would track progress and
+    // advance through the list).
+    fn on_npc_tick(
+        entity_id: String,
+        _x: f64,
+        _y: f64,
+        route_waypoints: Vec<(f64, f64)>,
+        _route_loop: bool,
+        _route_speed: f64,
+        _dt: f64,
+    ) {
+        if let Some((wx, wy)) = route_waypoints.first() {
+            let _ = worldzero::plugin::host::move_entity(&entity_id, *wx, *wy);
+        }
+    }
+
+    fn on_npc_interact(npc_entity_id: String, actor_entity_id: String) {
+        let _ = worldzero::plugin::host::send_message(
+            &actor_entity_id,
+            &format!("you interacted with npc {npc_entity_id}"),
+        );
+    }
+
+    // Live: this plugin's `plugin.toml` declares `chat_commands = ["wave"]`.
+    fn on_chat_command(command: String, args: String, sender_entity_id: String) {
+        let _ = worldzero::plugin::host::send_message(
+            &sender_entity_id,
+            &format!("{sender_entity_id} used /{command} {args} — *the wolves howl*"),
+        );
+    }
 }
 
 export!(Plugin);

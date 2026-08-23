@@ -28,7 +28,7 @@ fn manifest() -> PluginManifest {
         r#"
 [plugin]
 name = "test-plugin"
-host_api_version = "0.2.0"
+host_api_version = "0.3.0"
 message_types = [1000]
 "#,
     )
@@ -39,6 +39,8 @@ message_types = [1000]
 struct RecordingCallbacks {
     spawned: Arc<Mutex<Vec<String>>>,
     messages: Arc<Mutex<Vec<(String, String)>>>,
+    stat_deltas: Arc<Mutex<Vec<(String, String, i64)>>>,
+    moves: Arc<Mutex<Vec<(String, f64, f64)>>>,
 }
 
 impl HostCallbacks for RecordingCallbacks {
@@ -55,6 +57,27 @@ impl HostCallbacks for RecordingCallbacks {
             .lock()
             .unwrap()
             .push((target_entity_id.to_string(), body.to_string()));
+        Ok(())
+    }
+
+    fn apply_stat_delta(
+        &mut self,
+        entity_id: &str,
+        stat_key: &str,
+        delta: i64,
+    ) -> Result<(), String> {
+        self.stat_deltas
+            .lock()
+            .unwrap()
+            .push((entity_id.to_string(), stat_key.to_string(), delta));
+        Ok(())
+    }
+
+    fn move_entity(&mut self, entity_id: &str, x: f64, y: f64) -> Result<(), String> {
+        self.moves
+            .lock()
+            .unwrap()
+            .push((entity_id.to_string(), x, y));
         Ok(())
     }
 }
@@ -94,6 +117,51 @@ fn a_well_behaved_plugin_spawns_an_npc_and_responds_to_interaction() {
     assert_eq!(messages[1].0, "actor-1");
     assert!(messages[1].1.contains("1000"));
     assert!(messages[1].1.contains("hello"));
+}
+
+#[test]
+#[ignore]
+fn a_plugin_computes_damage_ticks_a_route_and_handles_a_chat_command() {
+    let wasm_path = fixture_dir().join("target/wasm32-wasip2/release/test_plugin.wasm");
+    let callbacks = RecordingCallbacks::default();
+
+    let host = PluginHost::new();
+    let mut plugin = host
+        .load(&manifest(), &wasm_path, Box::new(callbacks.clone()))
+        .expect("failed to load the well-behaved test plugin");
+
+    plugin
+        .on_damage_calc("attacker-1", "target-1", "hp", 12)
+        .expect("on_damage_calc should succeed");
+    assert_eq!(
+        callbacks.stat_deltas.lock().unwrap().as_slice(),
+        [("target-1".to_string(), "hp".to_string(), -12)]
+    );
+
+    plugin
+        .on_npc_tick(
+            "npc-1",
+            0.0,
+            0.0,
+            &[(5.0, 5.0), (10.0, 10.0)],
+            true,
+            2.0,
+            0.05,
+        )
+        .expect("on_npc_tick should succeed");
+    assert_eq!(
+        callbacks.moves.lock().unwrap().as_slice(),
+        [("npc-1".to_string(), 5.0, 5.0)]
+    );
+
+    plugin
+        .on_chat_command("roll", "2d6", "actor-1")
+        .expect("on_chat_command should succeed");
+    let messages = callbacks.messages.lock().unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].0, "actor-1");
+    assert!(messages[0].1.contains("roll"));
+    assert!(messages[0].1.contains("2d6"));
 }
 
 #[test]

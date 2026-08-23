@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use character::CharacterStore;
 use chat::gateway_protocol::CHAT_MESSAGE_TYPE;
-use common::id::{AccountId, EntityId, RealmId};
+use common::id::{AccountId, CharacterId, EntityId, RealmId};
 use common::{Error, Result};
 use futures_util::{SinkExt, StreamExt};
 use gateway::Envelope;
@@ -30,6 +30,15 @@ type ServerSink = futures_util::stream::SplitSink<ServerStream, Envelope>;
 /// insert/remove/iterate — never held across an `.await`.
 pub type Sessions = Arc<Mutex<HashMap<EntityId, mpsc::UnboundedSender<Envelope>>>>;
 
+/// Which `character` row a connected player entity belongs to — the
+/// resolution `plugin_host`'s `apply-stat-delta` needs (a plugin only
+/// knows the opaque entity id; the actual stat write is per-character),
+/// populated alongside `Sessions` at spawn and removed at disconnect.
+/// Never has an NPC entry — NPCs have no backing character row (no NPC
+/// stat storage exists yet, see docs/specs/Plugin_API.md's "Beyond this
+/// v0 slice").
+pub type EntityCharacters = Arc<Mutex<HashMap<EntityId, CharacterId>>>;
+
 pub struct SessionDeps {
     pub auth_provider: Arc<auth::UsernamePasswordProvider>,
     pub character_store: Arc<CharacterStore>,
@@ -37,6 +46,7 @@ pub struct SessionDeps {
     pub zone_id: String,
     pub world: WorldHandle,
     pub sessions: Sessions,
+    pub entity_characters: EntityCharacters,
     /// `message_type`s the configured plugin declared in `plugin.toml`
     /// (empty if no plugin is configured) — checked here rather than
     /// only in the world actor so an envelope with an unroutable
@@ -44,6 +54,11 @@ pub struct SessionDeps {
     /// instead of silently vanishing into the actor's command queue
     /// (#95).
     pub plugin_message_types: Vec<u16>,
+    /// Chat command names (without the leading `/`) the configured
+    /// plugin declared (empty if none) — checked here, before a `Send`
+    /// ever reaches `chat_session`, so a matched command is routed to
+    /// the plugin instead of published as an ordinary chat message (#57).
+    pub plugin_chat_commands: Vec<String>,
     /// `Some` when `ServicesConfig::chat_enabled` — `None` end to end
     /// means chat is disabled and never touched, not just no-op'd (#104).
     pub chat: Option<ChatDeps>,
@@ -98,6 +113,10 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
 
     let entity_id = EntityId::new();
     deps.world.spawn(entity_id, EntityKind::Player, position);
+    deps.entity_characters
+        .lock()
+        .unwrap()
+        .insert(entity_id, character_id);
 
     // Everything already in the zone, delivered as one `Joined` message
     // rather than `Spawned` plus a separate `EntitySpawned` per entity —
@@ -167,22 +186,37 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
                             }).await?;
                         }
                         Some(chat) => {
-                            match chat::gateway_protocol::ClientMessage::from_envelope(&envelope) {
-                                Ok(message) => {
-                                    if let Some(reply) = chat_session::handle_message(
-                                        message,
-                                        account_id,
-                                        chat,
-                                        &outgoing_tx,
-                                        &mut joined_channels,
-                                    ).await {
-                                        send_chat(&mut sink, &reply).await?;
-                                    }
+                            let parsed = chat::gateway_protocol::ClientMessage::from_envelope(&envelope);
+                            let command_send = match &parsed {
+                                Ok(chat::gateway_protocol::ClientMessage::Send { body, .. }) => {
+                                    plugin_chat_command(&deps.plugin_chat_commands, body)
                                 }
-                                Err(e) => {
-                                    send_chat(&mut sink, &chat::gateway_protocol::ServerMessage::Error {
-                                        message: e.to_string(),
-                                    }).await?;
+                                _ => None,
+                            };
+                            if let Some((command, args)) = command_send {
+                                // A matched command is consumed here — never
+                                // also forwarded to
+                                // `chat_session::handle_message`/published as
+                                // an ordinary chat message (#57).
+                                deps.world.dispatch_chat_command(command, args, entity_id);
+                            } else {
+                                match parsed {
+                                    Ok(message) => {
+                                        if let Some(reply) = chat_session::handle_message(
+                                            message,
+                                            account_id,
+                                            chat,
+                                            &outgoing_tx,
+                                            &mut joined_channels,
+                                        ).await {
+                                            send_chat(&mut sink, &reply).await?;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        send_chat(&mut sink, &chat::gateway_protocol::ServerMessage::Error {
+                                            message: e.to_string(),
+                                        }).await?;
+                                    }
                                 }
                             }
                         }
@@ -217,6 +251,7 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
     let final_position = deps.world.position_of(entity_id).await;
     deps.world.despawn(entity_id);
     deps.sessions.lock().unwrap().remove(&entity_id);
+    deps.entity_characters.lock().unwrap().remove(&entity_id);
     broadcast(
         &deps.sessions,
         ServerMessage::EntityDespawned {
@@ -256,6 +291,24 @@ async fn load_or_create_character(
         zone_id: deps.zone_id.clone(),
         position: (0.0, 0.0, 0.0),
     })
+}
+
+/// Matches a chat `Send`'s `body` against `declared_commands` (a
+/// plugin's `plugin.toml` `chat_commands`, without leading slashes) —
+/// `body` must start with `/`, and everything up to the first space (or
+/// the rest of the string if there's no space) is the command name,
+/// case-sensitive. Returns the matched command name and the remaining
+/// args (trimmed of the one separating space, empty string if none).
+fn plugin_chat_command(declared_commands: &[String], body: &str) -> Option<(String, String)> {
+    let rest = body.strip_prefix('/')?;
+    let (command, args) = match rest.split_once(' ') {
+        Some((command, args)) => (command, args),
+        None => (rest, ""),
+    };
+    declared_commands
+        .iter()
+        .any(|declared| declared == command)
+        .then(|| (command.to_string(), args.to_string()))
 }
 
 async fn authenticate(
@@ -349,4 +402,39 @@ async fn send_auth_error(sink: &mut ServerSink, message: String) -> Result<()> {
         &auth::gateway_protocol::ServerMessage::Error { message },
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn declared() -> Vec<String> {
+        vec!["roll".to_string(), "whisper".to_string()]
+    }
+
+    #[test]
+    fn a_declared_command_with_args_is_matched() {
+        assert_eq!(
+            plugin_chat_command(&declared(), "/roll 2d6"),
+            Some(("roll".to_string(), "2d6".to_string()))
+        );
+    }
+
+    #[test]
+    fn a_declared_command_with_no_args_is_matched_with_empty_args() {
+        assert_eq!(
+            plugin_chat_command(&declared(), "/roll"),
+            Some(("roll".to_string(), "".to_string()))
+        );
+    }
+
+    #[test]
+    fn an_undeclared_command_is_not_matched() {
+        assert_eq!(plugin_chat_command(&declared(), "/unknown foo"), None);
+    }
+
+    #[test]
+    fn ordinary_chat_without_a_leading_slash_is_not_matched() {
+        assert_eq!(plugin_chat_command(&declared(), "hello everyone"), None);
+    }
 }

@@ -13,6 +13,8 @@ use common::id::EntityId;
 use content::manifest::ZoneManifest;
 use tokio::time::Instant;
 
+use content::manifest::Route;
+
 use crate::config::WorldConfig;
 use crate::movement::{MovementRejection, validate_movement};
 use crate::spatial::{GridIndex, Point, SpatialIndex};
@@ -33,6 +35,12 @@ pub struct Zone {
     config: WorldConfig,
     index: Box<dyn SpatialIndex>,
     entities: HashMap<EntityId, EntityKind>,
+    /// Which declared route (`content::manifest::Route::id`) an NPC
+    /// entity was spawned against, if its spawn table declared one
+    /// (#57's `on-npc-tick` — the host hands the plugin this route's
+    /// data every tick, it never drives NPC movement on its own).
+    /// Player entities are never present here.
+    npc_routes: HashMap<EntityId, String>,
     pending_moves: Vec<(EntityId, Point)>,
 }
 
@@ -51,6 +59,7 @@ impl Zone {
             manifest,
             config,
             entities: HashMap::new(),
+            npc_routes: HashMap::new(),
             pending_moves: Vec::new(),
         }
     }
@@ -60,9 +69,41 @@ impl Zone {
         self.index.insert(entity, position);
     }
 
+    /// Same as [`Self::spawn`], plus recording which declared route this
+    /// NPC should tick against — used for a spawn-table entry with a
+    /// `route_id` (`content::manifest::SpawnTable`). `route_id` must
+    /// name a route in this zone's manifest; a caller passing an unknown
+    /// id gets no route recorded (not a panic — `spawn_npc_from_table`
+    /// callers already validate spawn-table data against the loaded
+    /// manifest before this point).
+    pub fn spawn_npc_with_route(&mut self, entity: EntityId, position: Point, route_id: &str) {
+        self.spawn(entity, EntityKind::Npc, position);
+        if self.manifest.routes.iter().any(|r| r.id == route_id) {
+            self.npc_routes.insert(entity, route_id.to_string());
+        }
+    }
+
     pub fn despawn(&mut self, entity: EntityId) {
         self.entities.remove(&entity);
+        self.npc_routes.remove(&entity);
         self.index.remove(entity);
+    }
+
+    /// Every currently-spawned NPC that has a route assigned, alongside
+    /// that route's full declared data — what `on-npc-tick` (#57) is
+    /// called with once per tick. Returns owned `Route` clones (routes
+    /// are small, tick-rate-cloned data, not a hot allocation path) so a
+    /// caller can hold the result across a later `&mut self` call (e.g.
+    /// `request_move`) without fighting the borrow checker.
+    pub fn npcs_with_routes(&self) -> Vec<(EntityId, Point, Route)> {
+        self.npc_routes
+            .iter()
+            .filter_map(|(&entity, route_id)| {
+                let position = self.index.position_of(entity)?;
+                let route = self.manifest.routes.iter().find(|r| &r.id == route_id)?;
+                Some((entity, position, route.clone()))
+            })
+            .collect()
     }
 
     pub fn position_of(&self, entity: EntityId) -> Option<Point> {
@@ -199,6 +240,66 @@ collision:
         )
         .unwrap();
         Zone::new(manifest, WorldConfig::default())
+    }
+
+    fn zone_with_a_route() -> Zone {
+        let manifest = ZoneManifest::from_yaml(
+            r#"
+schema_version: 1
+id: test-zone
+display_name: "Test Zone"
+
+bounds:
+  shape: polygon
+  coordinate_system: { units: meters, origin: [0, 0] }
+  points: [[0,0], [100,0], [100,100], [0,100]]
+
+collision:
+  asset_ref: "sha256:9f2ac1b3e4d5c6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1"
+  format: navmesh_v1
+
+routes:
+  - id: patrol-01
+    waypoints: [[10,10], [20,20], [30,10]]
+    loop: true
+    speed: 2.0
+"#,
+        )
+        .unwrap();
+        Zone::new(manifest, WorldConfig::default())
+    }
+
+    #[test]
+    fn a_spawned_npc_with_a_known_route_is_returned_by_npcs_with_routes() {
+        let mut zone = zone_with_a_route();
+        let entity = EntityId::new();
+        zone.spawn_npc_with_route(entity, (10.0, 10.0), "patrol-01");
+
+        let routes = zone.npcs_with_routes();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].0, entity);
+        assert_eq!(routes[0].1, (10.0, 10.0));
+        assert_eq!(routes[0].2.id, "patrol-01");
+        assert_eq!(routes[0].2.waypoints.len(), 3);
+    }
+
+    #[test]
+    fn spawn_npc_with_an_unknown_route_id_records_no_route() {
+        let mut zone = zone_with_a_route();
+        let entity = EntityId::new();
+        zone.spawn_npc_with_route(entity, (10.0, 10.0), "does-not-exist");
+
+        assert!(zone.npcs_with_routes().is_empty());
+    }
+
+    #[test]
+    fn despawning_an_npc_removes_it_from_npcs_with_routes() {
+        let mut zone = zone_with_a_route();
+        let entity = EntityId::new();
+        zone.spawn_npc_with_route(entity, (10.0, 10.0), "patrol-01");
+        zone.despawn(entity);
+
+        assert!(zone.npcs_with_routes().is_empty());
     }
 
     #[test]

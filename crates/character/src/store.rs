@@ -128,6 +128,29 @@ impl CharacterStore {
         Ok(())
     }
 
+    /// Reads the current value (falling back to the declared default, same
+    /// as `get_stat`), adds `delta`, and writes the result back through
+    /// `set_stat` — the "reduce a plugin-specified stat by N" primitive
+    /// `docs/PROPOSAL.md`'s "v0 Host Functions" names, backing
+    /// `plugin_host`'s `apply-stat-delta`. Not transactional against a
+    /// concurrent writer (same as `get_stat`/`set_stat` individually) —
+    /// the open-realm concurrency boundary is the session lease in
+    /// `docs/specs/Realm_Character_Policy_Spec.md`, not per-write locking
+    /// on this column. Returns the resulting value.
+    pub async fn apply_stat_delta(
+        &self,
+        character_id: CharacterId,
+        key: &str,
+        delta: i64,
+    ) -> Result<i64> {
+        let current = self.get_stat(character_id, key).await?;
+        let new_value = current
+            .checked_add(delta)
+            .ok_or_else(|| Error::new("character", format!("stat delta overflowed for {key:?}")))?;
+        self.set_stat(character_id, key, new_value).await?;
+        Ok(new_value)
+    }
+
     /// Falls back to the schema's declared default when the key is absent
     /// from the stored `stats` blob.
     pub async fn get_stat(&self, character_id: CharacterId, key: &str) -> Result<i64> {
@@ -309,6 +332,31 @@ stats:
         let (store, character_id) = store_with_character().await;
         assert!(store.set_stat(character_id, "hp", 999).await.is_err());
         // Untouched — still the declared default, not a partially-applied bad value.
+        assert_eq!(store.get_stat(character_id, "hp").await.unwrap(), 100);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn apply_stat_delta_reduces_from_the_declared_default() {
+        let (store, character_id) = store_with_character().await;
+        let new_value = store
+            .apply_stat_delta(character_id, "hp", -30)
+            .await
+            .unwrap();
+        assert_eq!(new_value, 70);
+        assert_eq!(store.get_stat(character_id, "hp").await.unwrap(), 70);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn apply_stat_delta_out_of_bounds_is_rejected_and_unapplied() {
+        let (store, character_id) = store_with_character().await;
+        assert!(
+            store
+                .apply_stat_delta(character_id, "hp", -1000)
+                .await
+                .is_err()
+        );
         assert_eq!(store.get_stat(character_id, "hp").await.unwrap(), 100);
     }
 
