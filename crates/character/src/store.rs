@@ -132,6 +132,32 @@ impl CharacterStore {
         Ok(())
     }
 
+    /// Same as [`Self::update_position`], plus updating `zone_id` in the
+    /// same statement — used on disconnect once a character may have
+    /// crossed a zone link (#45) mid-session, so the persisted zone
+    /// always reflects where the character actually ended up, not just
+    /// where they started the connection.
+    pub async fn update_position_and_zone(
+        &self,
+        character_id: CharacterId,
+        position: (f64, f64, f64),
+        zone_id: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE characters SET position_x = $2, position_y = $3, position_z = $4, zone_id = $5, updated_at = now() WHERE id = $1",
+        )
+        .bind(character_id.as_uuid())
+        .bind(position.0)
+        .bind(position.1)
+        .bind(position.2)
+        .bind(zone_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| Error::wrap("character", "failed to update character position and zone", e))?;
+
+        Ok(())
+    }
+
     /// Validates against the declared schema, then writes — a rejected
     /// write never reaches the `stats` column.
     pub async fn set_stat(&self, character_id: CharacterId, key: &str, value: i64) -> Result<()> {
@@ -331,6 +357,29 @@ stats:
             .unwrap()
             .unwrap();
         assert_eq!(found.position, (12.5, -3.0, 0.0));
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn update_position_and_zone_updates_both_together() {
+        let (store, account_id, realm_id) = store_with_account().await;
+        let character_id = store
+            .create(account_id, "Aria", realm_id, "greenwood-forest")
+            .await
+            .unwrap();
+
+        store
+            .update_position_and_zone(character_id, (1.0, 2.0, 0.0), "stonebridge-village")
+            .await
+            .unwrap();
+
+        let found = store
+            .find_by_account(account_id, realm_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.position, (1.0, 2.0, 0.0));
+        assert_eq!(found.zone_id, "stonebridge-village");
     }
 
     #[tokio::test]

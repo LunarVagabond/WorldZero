@@ -72,7 +72,13 @@ pub fn validate_movement(
     Ok(())
 }
 
-fn distance(a: Point, b: Point) -> f64 {
+/// `pub(crate)`, not private — `zone::Zone::tick` needs this to
+/// speed-check a zone-transitioning move too (#45): a move that crosses
+/// a link edge skips `validate_movement`'s bounds check entirely (it's
+/// leaving this zone's bounds on purpose), but must not skip the speed
+/// cap, or claiming to cross a link edge would become a free "move any
+/// distance, instantly" exploit.
+pub(crate) fn distance(a: Point, b: Point) -> f64 {
     let dx = a.0 - b.0;
     let dy = a.1 - b.1;
     (dx * dx + dy * dy).sqrt()

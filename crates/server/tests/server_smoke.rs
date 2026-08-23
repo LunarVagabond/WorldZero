@@ -38,6 +38,7 @@ mod server_test_support;
 const ADDR: &str = "127.0.0.1:7910";
 const CHAT_ADDR: &str = "127.0.0.1:7911";
 const CHAT_DISABLED_ADDR: &str = "127.0.0.1:7912";
+const ZONE_TRANSITION_ADDR: &str = "127.0.0.1:7913";
 
 struct ServerProcess {
     child: Child,
@@ -60,6 +61,20 @@ fn start_server_with(
     config_dir: &std::path::Path,
     addr: &str,
     chat_enabled: bool,
+) -> ServerProcess {
+    start_server_with_env(config_dir, addr, chat_enabled, &[])
+}
+
+/// Same as `start_server_with`, plus arbitrary extra env vars — used by
+/// the zone-transition test (#45) to raise `WZ_WORLD_MAX_SPEED_MPS`
+/// enough for one queued move to cross a link edge hundreds of meters
+/// away in a single tick, without waiting out hundreds of real ticks at
+/// the default walking-speed cap.
+fn start_server_with_env(
+    config_dir: &std::path::Path,
+    addr: &str,
+    chat_enabled: bool,
+    extra_env: &[(&str, &str)],
 ) -> ServerProcess {
     let mut command = Command::new(env!("CARGO_BIN_EXE_server"));
     command
@@ -105,6 +120,10 @@ fn start_server_with(
         command
             .env("WZ_PLUGIN_MANIFEST_PATH", config_dir.join("plugin.toml"))
             .env("WZ_PLUGIN_WASM_PATH", plugin_wasm);
+    }
+
+    for (key, value) in extra_env {
+        command.env(key, value);
     }
 
     let child = command.spawn().expect("failed to start the server binary");
@@ -251,6 +270,38 @@ message_types = [1000]
     config_dir
 }
 
+/// Same shape as `setup_config_dir`, but a `content-pack.yaml` (two
+/// linked zones, #45) instead of a single `zone.manifest.yaml` — no
+/// plugin, this test doesn't need one.
+fn setup_content_pack_config_dir(test_name: &str) -> PathBuf {
+    let config_dir = std::env::temp_dir().join(format!(
+        "wz-server-smoke-{test_name}-{}",
+        std::process::id()
+    ));
+    let example_zones_dir = config_dir.join("example-zones");
+    std::fs::create_dir_all(&example_zones_dir).unwrap();
+
+    let repo_config_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../config");
+    std::fs::copy(
+        repo_config_dir.join("content-pack.example.yaml"),
+        config_dir.join("content-pack.yaml"),
+    )
+    .unwrap();
+    for zone_file in ["greenwood-forest.yaml", "stonebridge-village.yaml"] {
+        std::fs::copy(
+            repo_config_dir.join("example-zones").join(zone_file),
+            example_zones_dir.join(zone_file),
+        )
+        .unwrap();
+    }
+    std::fs::copy(
+        repo_config_dir.join("stats.schema.example.yaml"),
+        config_dir.join("stats.schema.yaml"),
+    )
+    .unwrap();
+    config_dir
+}
+
 #[tokio::test]
 #[ignore]
 async fn connect_register_move_and_persist_across_reconnect() {
@@ -363,6 +414,72 @@ async fn connect_register_move_and_persist_across_reconnect() {
         if let ServerMessage::Joined { x, y, .. } = recv_world(&mut stream).await {
             assert_eq!((x, y), MOVE_TO, "position should persist across reconnect");
             break;
+        }
+    }
+}
+
+/// #45: with a `content-pack.yaml` present, the combined process runs
+/// *multiple* zone-service instances — a player walking through a
+/// manifest-declared `links[]` edge crosses live, over the same TCP
+/// connection/gateway session, no reconnect. `WZ_WORLD_MAX_SPEED_MPS` is
+/// raised for this test process only so one queued move covers the
+/// ~450m from spawn to the link edge in a single tick, rather than the
+/// test waiting out hundreds of ticks at the default walking-speed cap.
+#[tokio::test]
+#[ignore]
+async fn zone_transition_crosses_a_link_without_reconnecting() {
+    let config_dir = setup_content_pack_config_dir("zone-transition");
+    let _server = start_server_with_env(
+        &config_dir,
+        ZONE_TRANSITION_ADDR,
+        true,
+        &[("WZ_WORLD_MAX_SPEED_MPS", "1000000")],
+    );
+    wait_for_port(ZONE_TRANSITION_ADDR).await;
+
+    let mut stream = connect(&config_dir, ZONE_TRANSITION_ADDR).await;
+    register_and_authenticate(
+        &mut stream,
+        &format!("zone-transition-{}", uuid::Uuid::now_v7()),
+        "hunter2",
+    )
+    .await;
+
+    // A freshly created character starts at (0, 0) in the pack's first
+    // zone — greenwood-forest (config/content-pack.example.yaml's
+    // declaration order).
+    let own_entity_id = loop {
+        if let ServerMessage::Joined { entity_id, .. } = recv_world(&mut stream).await {
+            break entity_id;
+        }
+    };
+
+    // greenwood-forest's link to stonebridge-village sits at x=500,
+    // y in [200,300] (config/example-zones/greenwood-forest.yaml) —
+    // (505, 250) is well past it, straight-line from the origin.
+    send_world(&mut stream, &ClientMessage::Move { x: 505.0, y: 250.0 }).await;
+
+    loop {
+        match recv_world(&mut stream).await {
+            ServerMessage::ZoneChanged {
+                zone_id,
+                entity_id,
+                roster,
+                ..
+            } if entity_id == own_entity_id => {
+                assert_eq!(zone_id, "stonebridge-village");
+                // Nothing else has ever spawned into stonebridge-village
+                // in this test — an empty roster confirms this is a
+                // real, fresh arrival in the other zone, not e.g. a
+                // stale/duplicated message replaying greenwood-forest's
+                // own roster.
+                assert!(roster.is_empty(), "{roster:?}");
+                break;
+            }
+            ServerMessage::Rejected { reason } => {
+                panic!("expected the cross-zone move to be accepted, was rejected: {reason}");
+            }
+            _ => {}
         }
     }
 }

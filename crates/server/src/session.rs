@@ -18,7 +18,7 @@ use world::EntityKind;
 
 use crate::chat_session::{self, ChatDeps};
 use crate::session_protocol::{ClientMessage, RosterEntry, ServerMessage, WORLD_MESSAGE_TYPE};
-use crate::world_actor::WorldHandle;
+use crate::zone_registry::ZoneRegistry;
 
 pub type ServerStream =
     Framed<tokio_rustls::server::TlsStream<tokio::net::TcpStream>, gateway::EnvelopeCodec>;
@@ -43,9 +43,15 @@ pub struct SessionDeps {
     pub auth_provider: Arc<auth::UsernamePasswordProvider>,
     pub character_store: Arc<CharacterStore>,
     pub realm_id: RealmId,
-    pub zone_id: String,
-    pub world: WorldHandle,
-    pub sessions: Sessions,
+    /// Every zone-service instance this process runs (#45) — a
+    /// connection looks up its current zone's `WorldHandle`/`Sessions`
+    /// here at join time, and again on every `ZoneChanged` handoff.
+    pub zones: Arc<ZoneRegistry>,
+    /// Which zone a brand-new character starts in, and the fallback for
+    /// an existing character whose persisted `zone_id` no longer names a
+    /// zone this content pack declares (a pack that's since dropped a
+    /// zone) — never silently drops the connection over a stale zone_id.
+    pub default_zone_id: String,
     pub entity_characters: EntityCharacters,
     /// `message_type`s the configured plugin declared in `plugin.toml`
     /// (empty if no plugin is configured) — checked here rather than
@@ -111,8 +117,28 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
     let character_id = character.id;
     let position = (character.position.0, character.position.1);
 
+    // A character's persisted `zone_id` might name a zone this content
+    // pack no longer declares (the pack changed since they last logged
+    // in) — fall back to the default rather than failing the connection
+    // over it.
+    let mut current_zone_id = if deps.zones.contains(&character.zone_id) {
+        character.zone_id.clone()
+    } else {
+        tracing::warn!(
+            character_zone_id = character.zone_id,
+            default_zone_id = deps.default_zone_id,
+            "character's persisted zone no longer exists in this content pack, using the default"
+        );
+        deps.default_zone_id.clone()
+    };
+    let mut zone = deps
+        .zones
+        .get(&current_zone_id)
+        .cloned()
+        .expect("default_zone_id must always resolve to a real zone in the registry");
+
     let entity_id = EntityId::new();
-    deps.world.spawn(entity_id, EntityKind::Player, position);
+    zone.world.spawn(entity_id, EntityKind::Player, position);
     deps.entity_characters
         .lock()
         .unwrap()
@@ -124,7 +150,7 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
     // has no way to become visible to this connection, and a single
     // message keeps the join a single write on a freshly-established
     // connection instead of several in a row.
-    let roster: Vec<RosterEntry> = deps
+    let roster: Vec<RosterEntry> = zone
         .world
         .entities_snapshot()
         .await
@@ -138,7 +164,7 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
         })
         .collect();
 
-    deps.sessions
+    zone.sessions
         .lock()
         .unwrap()
         .insert(entity_id, outgoing_tx.clone());
@@ -154,7 +180,7 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
     );
 
     broadcast_except(
-        &deps.sessions,
+        &zone.sessions,
         entity_id,
         ServerMessage::EntitySpawned {
             entity_id: entity_id.to_string(),
@@ -172,7 +198,7 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
                 if envelope.message_type == WORLD_MESSAGE_TYPE {
                     match ClientMessage::from_envelope(&envelope) {
                         Ok(ClientMessage::Move { x, y }) => {
-                            deps.world.request_move(entity_id, (x, y));
+                            zone.world.request_move(entity_id, (x, y));
                         }
                         Err(e) => {
                             send_world(&mut sink, &ServerMessage::Error { message: e.to_string() }).await?;
@@ -198,7 +224,7 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
                                 // also forwarded to
                                 // `chat_session::handle_message`/published as
                                 // an ordinary chat message (#57).
-                                deps.world.dispatch_chat_command(command, args, entity_id);
+                                zone.world.dispatch_chat_command(command, args, entity_id);
                             } else {
                                 match parsed {
                                     Ok(message) => {
@@ -222,7 +248,13 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
                         }
                     }
                 } else if deps.plugin_message_types.contains(&envelope.message_type) {
-                    deps.world.dispatch_plugin_message(
+                    // Goes to whichever zone this connection is in right
+                    // now — harmless (just an actor-side "no plugin
+                    // configured" warning) if that's not the one zone the
+                    // configured plugin is attached to (#45's
+                    // single-plugin-single-zone scope, see this module's
+                    // `SessionDeps`/`zone_registry` doc comments).
+                    zone.world.dispatch_plugin_message(
                         envelope.message_type,
                         entity_id,
                         envelope.payload.to_vec(),
@@ -239,6 +271,24 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
                 }
             }
             Some(envelope) = outgoing_rx.recv() => {
+                // A `ZoneChanged` envelope both goes out to the client
+                // (below, same as any other envelope) and tells this
+                // task to switch which zone's `WorldHandle`/`Sessions` it
+                // talks to from now on — the connection itself never
+                // drops for this (#45).
+                if envelope.message_type == WORLD_MESSAGE_TYPE
+                    && let Ok(ServerMessage::ZoneChanged { zone_id, .. }) = ServerMessage::from_envelope(&envelope)
+                {
+                    match deps.zones.get(&zone_id) {
+                        Some(new_zone) => {
+                            current_zone_id = zone_id;
+                            zone = new_zone.clone();
+                        }
+                        None => {
+                            tracing::error!(zone_id, "zone transition target vanished from the registry");
+                        }
+                    }
+                }
                 if sink.send(envelope).await.is_err() {
                     break;
                 }
@@ -248,12 +298,12 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
 
     chat_session::abort_all(joined_channels);
 
-    let final_position = deps.world.position_of(entity_id).await;
-    deps.world.despawn(entity_id);
-    deps.sessions.lock().unwrap().remove(&entity_id);
+    let final_position = zone.world.position_of(entity_id).await;
+    zone.world.despawn(entity_id);
+    zone.sessions.lock().unwrap().remove(&entity_id);
     deps.entity_characters.lock().unwrap().remove(&entity_id);
     broadcast(
-        &deps.sessions,
+        &zone.sessions,
         ServerMessage::EntityDespawned {
             entity_id: entity_id.to_string(),
         },
@@ -261,7 +311,7 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
 
     if let Some((x, y)) = final_position {
         deps.character_store
-            .update_position(character_id, (x, y, 0.0))
+            .update_position_and_zone(character_id, (x, y, 0.0), &current_zone_id)
             .await?;
     }
 
@@ -283,12 +333,12 @@ async fn load_or_create_character(
 
     let id = deps
         .character_store
-        .create(account_id, username, deps.realm_id, &deps.zone_id)
+        .create(account_id, username, deps.realm_id, &deps.default_zone_id)
         .await?;
     Ok(character::CharacterSummary {
         id,
         name: username.to_string(),
-        zone_id: deps.zone_id.clone(),
+        zone_id: deps.default_zone_id.clone(),
         position: (0.0, 0.0, 0.0),
     })
 }
@@ -336,7 +386,7 @@ async fn authenticate(
     Ok((account_id, username, session))
 }
 
-fn entity_type_label(kind: EntityKind) -> String {
+pub(crate) fn entity_type_label(kind: EntityKind) -> String {
     match kind {
         EntityKind::Player => String::new(),
         EntityKind::Npc => "npc".to_string(),

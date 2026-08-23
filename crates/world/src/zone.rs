@@ -16,6 +16,7 @@ use tokio::time::Instant;
 use content::manifest::Route;
 
 use crate::config::WorldConfig;
+use crate::links::crossed_link;
 use crate::movement::{MovementRejection, validate_movement};
 use crate::spatial::{GridIndex, Point, SpatialIndex};
 
@@ -46,10 +47,22 @@ pub struct Zone {
 
 /// What actually happened to a queued movement request — surfaced to the
 /// caller (e.g. to tell a rejected client why) rather than silently dropped.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum MovementOutcome {
     Applied,
     Rejected(MovementRejection),
+    /// The move crossed a manifest-declared `content::manifest::Link`
+    /// edge (#45) — the mover is leaving this zone for `target_zone`,
+    /// never a normal in-zone move. `Zone::tick` has already despawned
+    /// the entity from this zone by the time this outcome is returned
+    /// (same as if the caller had called `despawn` itself) — the caller
+    /// (`server::world_actor`/`server::session`) is responsible for
+    /// spawning the entity into `target_zone`'s own `Zone`/`WorldHandle`;
+    /// `world` has no notion of "the other zone" to do that itself (one
+    /// `Zone` per zone-service instance, per this crate's own doc comment).
+    ZoneTransition {
+        target_zone: String,
+    },
 }
 
 impl Zone {
@@ -148,6 +161,40 @@ impl Zone {
                 // between the request and this tick) — nothing to move.
                 continue;
             };
+
+            // Only player entities transition zones (#45) — an NPC has
+            // no connected session to hand off, and NPC movement is
+            // entirely plugin-driven within the zone it was spawned in;
+            // an NPC whose route happens to cross a link edge is left to
+            // ordinary in-bounds movement validation below, same as any
+            // other move.
+            if self.entities.get(&entity) == Some(&EntityKind::Player)
+                && let Some(link) = crossed_link(&self.manifest.links, from, to)
+            {
+                // A transition skips `validate_movement`'s bounds check
+                // on purpose (`to` is meant to fall outside this zone's
+                // polygon — that's what makes it a transition), but the
+                // speed cap still applies: without this, "the move
+                // crosses a link edge" would be a free pass to claim any
+                // distance at all, instantly.
+                let max_allowed = self.config.max_speed_meters_per_second * dt;
+                let attempted_distance = crate::movement::distance(from, to);
+                if attempted_distance > max_allowed {
+                    outcomes.push((
+                        entity,
+                        MovementOutcome::Rejected(MovementRejection::TooFast {
+                            attempted_distance,
+                            max_allowed,
+                        }),
+                    ));
+                    continue;
+                }
+
+                let target_zone = link.target_zone.clone();
+                self.despawn(entity);
+                outcomes.push((entity, MovementOutcome::ZoneTransition { target_zone }));
+                continue;
+            }
 
             match validate_movement(
                 &self.manifest,
@@ -377,6 +424,143 @@ routes:
         ];
         expected.sort_by_key(|(id, ..)| *id);
         assert_eq!(entities, expected);
+    }
+
+    #[test]
+    fn a_player_move_crossing_a_link_edge_transitions_and_despawns_locally() {
+        let manifest = ZoneManifest::from_yaml(
+            r#"
+schema_version: 1
+id: test-zone
+display_name: "Test Zone"
+
+bounds:
+  shape: polygon
+  coordinate_system: { units: meters, origin: [0, 0] }
+  points: [[0,0], [100,0], [100,100], [0,100]]
+
+collision:
+  asset_ref: "sha256:9f2ac1b3e4d5c6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1"
+  format: navmesh_v1
+
+links:
+  - target_zone: next-zone
+    edge: [[50,0], [50,100]]
+    bidirectional: true
+"#,
+        )
+        .unwrap();
+        let mut zone = Zone::new(
+            manifest,
+            WorldConfig {
+                max_speed_meters_per_second: 10_000.0,
+                ..WorldConfig::default()
+            },
+        );
+        let entity = EntityId::new();
+        zone.spawn(entity, EntityKind::Player, (49.0, 50.0));
+
+        zone.request_move(entity, (51.0, 50.0));
+        let outcomes = zone.tick();
+
+        assert_eq!(
+            outcomes,
+            vec![(
+                entity,
+                MovementOutcome::ZoneTransition {
+                    target_zone: "next-zone".to_string()
+                }
+            )]
+        );
+        assert_eq!(zone.position_of(entity), None);
+        assert!(zone.entities().is_empty());
+    }
+
+    #[test]
+    fn a_speed_hack_cannot_hide_behind_a_zone_transition() {
+        let manifest = ZoneManifest::from_yaml(
+            r#"
+schema_version: 1
+id: test-zone
+display_name: "Test Zone"
+
+bounds:
+  shape: polygon
+  coordinate_system: { units: meters, origin: [0, 0] }
+  points: [[0,0], [1000,0], [1000,1000], [0,1000]]
+
+collision:
+  asset_ref: "sha256:9f2ac1b3e4d5c6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1"
+  format: navmesh_v1
+
+links:
+  - target_zone: next-zone
+    edge: [[500,0], [500,1000]]
+    bidirectional: true
+"#,
+        )
+        .unwrap();
+        // The default speed cap (10 m/s at a 50ms tick allows ~0.5m) —
+        // this "move" crosses the link edge, but claims to cover 450m in
+        // one tick.
+        let mut zone = Zone::new(manifest, WorldConfig::default());
+        let entity = EntityId::new();
+        zone.spawn(entity, EntityKind::Player, (49.0, 50.0));
+
+        zone.request_move(entity, (500.1, 50.0));
+        let outcomes = zone.tick();
+
+        assert!(
+            matches!(
+                outcomes.as_slice(),
+                [(e, MovementOutcome::Rejected(MovementRejection::TooFast { .. }))] if *e == entity
+            ),
+            "{outcomes:?}"
+        );
+        // Rejected, not transitioned — still spawned in this zone, at
+        // its original position.
+        assert_eq!(zone.position_of(entity), Some((49.0, 50.0)));
+    }
+
+    #[test]
+    fn an_npc_move_crossing_a_link_edge_is_validated_normally_not_transitioned() {
+        let manifest = ZoneManifest::from_yaml(
+            r#"
+schema_version: 1
+id: test-zone
+display_name: "Test Zone"
+
+bounds:
+  shape: polygon
+  coordinate_system: { units: meters, origin: [0, 0] }
+  points: [[0,0], [100,0], [100,100], [0,100]]
+
+collision:
+  asset_ref: "sha256:9f2ac1b3e4d5c6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1"
+  format: navmesh_v1
+
+links:
+  - target_zone: next-zone
+    edge: [[50,0], [50,100]]
+    bidirectional: true
+"#,
+        )
+        .unwrap();
+        let mut zone = Zone::new(
+            manifest,
+            WorldConfig {
+                max_speed_meters_per_second: 10_000.0,
+                ..WorldConfig::default()
+            },
+        );
+        let entity = EntityId::new();
+        zone.spawn(entity, EntityKind::Npc, (49.0, 50.0));
+
+        zone.request_move(entity, (51.0, 50.0));
+        let outcomes = zone.tick();
+
+        assert_eq!(outcomes, vec![(entity, MovementOutcome::Applied)]);
+        assert_eq!(zone.position_of(entity), Some((51.0, 50.0)));
     }
 
     #[test]

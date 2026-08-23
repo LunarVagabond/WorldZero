@@ -10,44 +10,55 @@
 //!
 //! `cargo run -p server`. Needs, at minimum:
 //! - `WZ_POSTGRES_*` / `WZ_REDIS_*` (`.env`)
-//! - `<config_dir>/zone.manifest.yaml` (see
-//!   `config/zone.manifest.example.yaml`) — the one zone this
-//!   process runs
+//! - `<config_dir>/content-pack.yaml` (see
+//!   `config/content-pack.example.yaml`), for **multiple** zone-service
+//!   instances (#45) — a player crosses between them by walking through
+//!   a manifest-declared `links[]` edge, no client reconnect involved.
+//!   If this file isn't present, falls back to a **single** zone loaded
+//!   from `<config_dir>/zone.manifest.yaml` (see
+//!   `config/zone.manifest.example.yaml`) — the original Phase 1
+//!   single-zone behavior, unchanged.
 //! - `<config_dir>/stats.schema.yaml` (see
 //!   `config/stats.schema.example.yaml`) — the declared
 //!   character attribute schema
 //!
 //! Optional: `WZ_SERVER_ADDR` (default `127.0.0.1:7900`),
 //! `WZ_PLUGIN_MANIFEST_PATH` + `WZ_PLUGIN_WASM_PATH` (both required
-//! together — a plugin to run `on_load` against at startup),
-//! `WZ_SERVICE_CHAT_ENABLED` (default `true`).
+//! together — a plugin to run `on_load` against at startup; attached to
+//! only the *first* zone loaded when running multiple, see
+//! `zone_registry`'s doc comment), `WZ_SERVICE_CHAT_ENABLED` (default
+//! `true`).
 //!
 //! A connected client speaks `auth::gateway_protocol` first (login or
 //! register), then `server::session_protocol` (move, see other entities
-//! move) and, when chat is enabled, `chat::gateway_protocol` (join/leave/
-//! send) over the same connection — same gateway-first-authenticate
-//! pattern as `chat`'s standalone gateway demo (docs/specs/Auth_Spec.md,
-//! "Gateway handshake").
+//! move, zone transitions) and, when chat is enabled,
+//! `chat::gateway_protocol` (join/leave/send) over the same connection —
+//! same gateway-first-authenticate pattern as `chat`'s standalone
+//! gateway demo (docs/specs/Auth_Spec.md, "Gateway handshake").
 
 mod chat_session;
 mod plugin_startup;
 mod session;
 mod session_protocol;
 mod world_actor;
+mod zone_registry;
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use character::inventory::InventoryConfig;
 use character::{AttributeSchema, CharacterStore};
 use common::config::{PostgresConfig, RedisConfig, ServicesConfig};
-use common::id::RealmId;
+use common::id::{EntityId, RealmId};
 use common::pool::{PoolOptions, postgres_pool, redis_pool};
+use content::content_pack::ContentPack;
 use content::manifest::ZoneManifest;
 use futures_util::StreamExt;
 use session::{EntityCharacters, SessionDeps, Sessions};
-use session_protocol::ServerMessage;
-use world::{MovementOutcome, Zone};
+use session_protocol::{RosterEntry, ServerMessage};
+use tokio::sync::mpsc;
+use world::{EntityKind, MovementOutcome, Point, Zone};
+use zone_registry::{ZoneRegistry, ZoneRuntime};
 
 const DEFAULT_ADDR: &str = "127.0.0.1:7900";
 
@@ -79,15 +90,13 @@ async fn main() {
     let world_config = world::WorldConfig::from_env().expect("invalid WZ_WORLD_* config");
     let services = ServicesConfig::from_env().expect("invalid WZ_SERVICE_* config");
 
-    let manifest_path = config_dir.join("zone.manifest.yaml");
-    let manifest = ZoneManifest::from_file(&manifest_path).unwrap_or_else(|e| {
-        panic!(
-            "failed to load the zone manifest at {} (see config/zone.manifest.example.yaml): {e}",
-            manifest_path.display()
-        )
-    });
-    let zone_id = manifest.id.clone();
-    tracing::info!(zone_id, "loaded zone manifest");
+    let zone_manifests = load_zone_manifests(&config_dir);
+    let default_zone_id = zone_manifests[0].id.clone();
+    tracing::info!(
+        zone_count = zone_manifests.len(),
+        default_zone_id,
+        "loaded zone manifest(s)"
+    );
 
     let schema_path = config_dir.join("stats.schema.yaml");
     let schema = AttributeSchema::from_file(&schema_path).unwrap_or_else(|e| {
@@ -125,91 +134,79 @@ async fn main() {
         None
     };
 
-    let mut zone = Zone::new(manifest, world_config);
-
-    // Created before the plugin loads (not just before the actor starts,
-    // as before #95) — the plugin's `send_message` host call needs a
-    // `Sessions` handle from the moment it's constructed, even though
-    // it's empty (and every `send_message` call correctly errors "not
-    // connected") until a client actually connects.
-    let sessions: Sessions = Arc::new(Mutex::new(std::collections::HashMap::new()));
     let entity_characters: EntityCharacters = Arc::new(Mutex::new(HashMap::new()));
 
-    let plugin_runtime = if let (Ok(plugin_manifest_path), Ok(plugin_wasm_path)) = (
-        std::env::var("WZ_PLUGIN_MANIFEST_PATH"),
-        std::env::var("WZ_PLUGIN_WASM_PATH"),
-    ) {
-        let plugin_manifest_path = std::path::PathBuf::from(plugin_manifest_path);
-        let plugin_wasm_path = std::path::PathBuf::from(plugin_wasm_path);
-        match plugin_startup::load_and_run_on_load(
-            &plugin_manifest_path,
-            &plugin_wasm_path,
-            sessions.clone(),
-        ) {
-            Ok((runtime, spawn_table_ids)) => {
-                for spawn_table_id in spawn_table_ids {
-                    world_actor::spawn_npc_from_table(&mut zone, &spawn_table_id);
-                }
-                Some(runtime)
-            }
-            Err(e) => {
-                panic!(
-                    "failed to load the configured plugin ({} / {}): {e}",
-                    plugin_manifest_path.display(),
-                    plugin_wasm_path.display()
-                );
-            }
-        }
-    } else {
-        tracing::info!(
-            "no plugin configured (set WZ_PLUGIN_MANIFEST_PATH and WZ_PLUGIN_WASM_PATH to load one)"
-        );
-        None
-    };
-    let plugin_message_types = plugin_runtime
-        .as_ref()
-        .map(|runtime| runtime.message_types.clone())
-        .unwrap_or_default();
-    let plugin_chat_commands = plugin_runtime
-        .as_ref()
-        .map(|runtime| runtime.chat_commands.clone())
-        .unwrap_or_default();
+    // Every zone-service actor's `on_tick` closure is wired up below
+    // before the full `ZoneRegistry` can possibly exist (it needs every
+    // actor's `WorldHandle` first) — but a `ZoneTransition` outcome needs
+    // to reach a *different* zone's registry entry. This cell breaks
+    // that chicken-and-egg: `on_tick` reads through it lazily, at tick
+    // time, well after `.set()` below has run (in practice, before the
+    // very first tick fires for any zone — `.set()` happens synchronously
+    // right after every actor is spawned, all well under one tick
+    // interval). `handle_tick_outcomes` treats a still-empty cell as "not
+    // ready yet" and logs rather than panicking, just in case.
+    let zone_registry_cell: Arc<OnceLock<Arc<ZoneRegistry>>> = Arc::new(OnceLock::new());
 
-    let sessions_for_tick = sessions.clone();
-    let world = world_actor::spawn_world_actor(
-        zone,
-        world_config.tick_interval(),
-        plugin_runtime,
-        character_store.clone(),
-        entity_characters.clone(),
-        move |zone, outcomes| {
-            for (entity_id, outcome) in outcomes {
-                match outcome {
-                    MovementOutcome::Applied => {
-                        if let Some((x, y)) = zone.position_of(entity_id) {
-                            broadcast_all(
-                                &sessions_for_tick,
-                                ServerMessage::Moved {
-                                    entity_id: entity_id.to_string(),
-                                    x,
-                                    y,
-                                },
-                            );
-                        }
-                    }
-                    MovementOutcome::Rejected(rejection) => {
-                        send_to(
-                            &sessions_for_tick,
-                            entity_id,
-                            ServerMessage::Rejected {
-                                reason: format!("{rejection:?}"),
-                            },
-                        );
-                    }
-                }
-            }
-        },
-    );
+    let mut runtimes = HashMap::new();
+    let mut manifests = HashMap::new();
+    let mut plugin_message_types = Vec::new();
+    let mut plugin_chat_commands = Vec::new();
+
+    for (index, manifest) in zone_manifests.into_iter().enumerate() {
+        let zone_id = manifest.id.clone();
+        let mut zone = Zone::new(manifest.clone(), world_config);
+        manifests.insert(zone_id.clone(), manifest);
+
+        // Created before the plugin loads (not just before the actor
+        // starts, as before #95) — the plugin's `send_message` host call
+        // needs a `Sessions` handle from the moment it's constructed,
+        // even though it's empty (and every `send_message` call
+        // correctly errors "not connected") until a client connects.
+        let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
+
+        // The configured plugin (if any) attaches to only the *first*
+        // zone loaded — real per-zone plugin instantiation is out of
+        // scope for #45; see `zone_registry`'s doc comment for the gap
+        // this leaves against `docs/specs/Plugin_API.md`'s "instantiated
+        // for a zone-service" wording.
+        let plugin_runtime = if index == 0 {
+            load_configured_plugin(&mut zone, sessions.clone())
+        } else {
+            None
+        };
+        if let Some(runtime) = &plugin_runtime {
+            plugin_message_types = runtime.message_types.clone();
+            plugin_chat_commands = runtime.chat_commands.clone();
+        }
+
+        let registry_cell = zone_registry_cell.clone();
+        let sessions_for_tick = sessions.clone();
+        let zone_id_for_tick = zone_id.clone();
+        let world = world_actor::spawn_world_actor(
+            zone,
+            world_config.tick_interval(),
+            plugin_runtime,
+            character_store.clone(),
+            entity_characters.clone(),
+            move |zone, outcomes| {
+                handle_tick_outcomes(
+                    &registry_cell,
+                    &zone_id_for_tick,
+                    &sessions_for_tick,
+                    zone,
+                    outcomes,
+                );
+            },
+        );
+
+        runtimes.insert(zone_id, ZoneRuntime { world, sessions });
+    }
+
+    let zones = Arc::new(ZoneRegistry::new(runtimes, manifests));
+    zone_registry_cell
+        .set(zones.clone())
+        .unwrap_or_else(|_| unreachable!("zone_registry_cell is only ever set once, here"));
 
     let config_dir_for_cert = config_dir.clone();
     let cert = gateway::tcp::init_and_log_fingerprint(&config_dir_for_cert)
@@ -225,9 +222,8 @@ async fn main() {
         auth_provider,
         character_store,
         realm_id,
-        zone_id,
-        world,
-        sessions,
+        zones,
+        default_zone_id,
         entity_characters,
         plugin_message_types,
         plugin_chat_commands,
@@ -245,12 +241,227 @@ async fn main() {
     }
 }
 
+/// `<config_dir>/content-pack.yaml` if present (multiple zones, #45);
+/// otherwise falls back to the single `<config_dir>/zone.manifest.yaml`
+/// (original Phase 1 behavior) — see this module's doc comment.
+fn load_zone_manifests(config_dir: &std::path::Path) -> Vec<ZoneManifest> {
+    let pack_path = config_dir.join("content-pack.yaml");
+    if pack_path.exists() {
+        let pack = ContentPack::from_file(&pack_path).unwrap_or_else(|e| {
+            panic!(
+                "failed to load the content pack at {} (see config/content-pack.example.yaml): {e}",
+                pack_path.display()
+            )
+        });
+        assert!(
+            !pack.zones.is_empty(),
+            "content pack at {} declares zero zones",
+            pack_path.display()
+        );
+        return pack.zones;
+    }
+
+    let manifest_path = config_dir.join("zone.manifest.yaml");
+    let manifest = ZoneManifest::from_file(&manifest_path).unwrap_or_else(|e| {
+        panic!(
+            "failed to load the zone manifest at {} (see config/zone.manifest.example.yaml): {e}",
+            manifest_path.display()
+        )
+    });
+    vec![manifest]
+}
+
+/// Loads the plugin named by `WZ_PLUGIN_MANIFEST_PATH`/`WZ_PLUGIN_WASM_PATH`
+/// (both unset is the ordinary "no plugin configured" case, not an
+/// error) and seeds `zone` with any `spawn-npc` calls its `on_load` hook
+/// made. Panics on a configured-but-invalid plugin, same as before #45
+/// — a self-hoster who set these vars wants to know immediately if the
+/// plugin they pointed at doesn't load, not have it silently skipped.
+fn load_configured_plugin(
+    zone: &mut Zone,
+    sessions: Sessions,
+) -> Option<plugin_startup::PluginRuntime> {
+    let (Ok(plugin_manifest_path), Ok(plugin_wasm_path)) = (
+        std::env::var("WZ_PLUGIN_MANIFEST_PATH"),
+        std::env::var("WZ_PLUGIN_WASM_PATH"),
+    ) else {
+        tracing::info!(
+            "no plugin configured (set WZ_PLUGIN_MANIFEST_PATH and WZ_PLUGIN_WASM_PATH to load one)"
+        );
+        return None;
+    };
+    let plugin_manifest_path = std::path::PathBuf::from(plugin_manifest_path);
+    let plugin_wasm_path = std::path::PathBuf::from(plugin_wasm_path);
+
+    match plugin_startup::load_and_run_on_load(&plugin_manifest_path, &plugin_wasm_path, sessions) {
+        Ok((runtime, spawn_table_ids)) => {
+            for spawn_table_id in spawn_table_ids {
+                world_actor::spawn_npc_from_table(zone, &spawn_table_id);
+            }
+            Some(runtime)
+        }
+        Err(e) => panic!(
+            "failed to load the configured plugin ({} / {}): {e}",
+            plugin_manifest_path.display(),
+            plugin_wasm_path.display()
+        ),
+    }
+}
+
+/// Reacts to one zone's tick outcomes — ordinary `Applied`/`Rejected`
+/// broadcasts stay exactly as before #45; `ZoneTransition` hands the
+/// entity off to a different zone (`complete_zone_transition`, spawned
+/// as its own task since that needs an async round trip this
+/// synchronous callback can't make itself).
+fn handle_tick_outcomes(
+    zone_registry_cell: &Arc<OnceLock<Arc<ZoneRegistry>>>,
+    source_zone_id: &str,
+    source_sessions: &Sessions,
+    zone: &Zone,
+    outcomes: Vec<(EntityId, MovementOutcome)>,
+) {
+    for (entity_id, outcome) in outcomes {
+        match outcome {
+            MovementOutcome::Applied => {
+                if let Some((x, y)) = zone.position_of(entity_id) {
+                    broadcast_all(
+                        source_sessions,
+                        ServerMessage::Moved {
+                            entity_id: entity_id.to_string(),
+                            x,
+                            y,
+                        },
+                    );
+                }
+            }
+            MovementOutcome::Rejected(rejection) => {
+                send_to(
+                    source_sessions,
+                    entity_id,
+                    ServerMessage::Rejected {
+                        reason: format!("{rejection:?}"),
+                    },
+                );
+            }
+            MovementOutcome::ZoneTransition { target_zone } => {
+                let Some(sender) = source_sessions.lock().unwrap().remove(&entity_id) else {
+                    // The connection was already gone by the time this
+                    // tick ran (e.g. disconnected the same tick it
+                    // crossed) — nothing to hand off.
+                    continue;
+                };
+                broadcast_except(
+                    source_sessions,
+                    entity_id,
+                    ServerMessage::EntityDespawned {
+                        entity_id: entity_id.to_string(),
+                    },
+                );
+
+                let Some(zones) = zone_registry_cell.get().cloned() else {
+                    tracing::error!(
+                        target_zone,
+                        "zone transition fired before the zone registry was ready — \
+                         dropping this entity's world presence until they reconnect"
+                    );
+                    continue;
+                };
+                let source_zone_id = source_zone_id.to_string();
+                tokio::spawn(async move {
+                    complete_zone_transition(zones, source_zone_id, target_zone, entity_id, sender)
+                        .await;
+                });
+            }
+        }
+    }
+}
+
+/// Finishes a zone handoff started by `handle_tick_outcomes` above: spawns
+/// the entity into `target_zone_id`'s own `Zone`/`WorldHandle` at an
+/// entry point resolved from that zone's own manifest links
+/// (`ZoneRegistry::entry_point`), registers it in that zone's `Sessions`,
+/// and sends the connection a `ZoneChanged` message carrying its new
+/// roster — `server::session::handle_session` is what actually switches
+/// which zone the connection's *own* task talks to from here on, reading
+/// that same message back out of its outgoing channel.
+async fn complete_zone_transition(
+    zones: Arc<ZoneRegistry>,
+    source_zone_id: String,
+    target_zone_id: String,
+    entity_id: EntityId,
+    sender: mpsc::UnboundedSender<gateway::Envelope>,
+) {
+    let Some(target) = zones.get(&target_zone_id) else {
+        tracing::error!(
+            target_zone_id,
+            "zone transition target isn't a zone this process runs — \
+             the entity has no world presence until they reconnect"
+        );
+        return;
+    };
+
+    let entry: Point = zones.entry_point(&source_zone_id, &target_zone_id);
+    target.world.spawn(entity_id, EntityKind::Player, entry);
+    target
+        .sessions
+        .lock()
+        .unwrap()
+        .insert(entity_id, sender.clone());
+
+    let roster: Vec<RosterEntry> = target
+        .world
+        .entities_snapshot()
+        .await
+        .into_iter()
+        .filter(|(id, ..)| *id != entity_id)
+        .map(|(id, kind, position)| RosterEntry {
+            entity_id: id.to_string(),
+            entity_type: session::entity_type_label(kind),
+            x: position.0,
+            y: position.1,
+        })
+        .collect();
+
+    broadcast_except(
+        &target.sessions,
+        entity_id,
+        ServerMessage::EntitySpawned {
+            entity_id: entity_id.to_string(),
+            entity_type: session::entity_type_label(EntityKind::Player),
+            x: entry.0,
+            y: entry.1,
+        },
+    );
+
+    let message = ServerMessage::ZoneChanged {
+        zone_id: target_zone_id,
+        entity_id: entity_id.to_string(),
+        x: entry.0,
+        y: entry.1,
+        roster,
+    };
+    if let Ok(envelope) = message.into_envelope() {
+        let _ = sender.send(envelope);
+    }
+}
+
 fn broadcast_all(sessions: &Sessions, message: ServerMessage) {
     let Ok(envelope) = message.into_envelope() else {
         return;
     };
     for sender in sessions.lock().unwrap().values() {
         let _ = sender.send(envelope.clone());
+    }
+}
+
+fn broadcast_except(sessions: &Sessions, exclude: EntityId, message: ServerMessage) {
+    let Ok(envelope) = message.into_envelope() else {
+        return;
+    };
+    for (id, sender) in sessions.lock().unwrap().iter() {
+        if *id != exclude {
+            let _ = sender.send(envelope.clone());
+        }
     }
 }
 
