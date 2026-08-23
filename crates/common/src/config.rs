@@ -77,24 +77,38 @@ impl RedisConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ServicesConfig {
     pub chat_enabled: bool,
+    /// Same optional-service pattern as `chat_enabled` (#48) — default
+    /// enabled, `WZ_SERVICE_METRICS_ENABLED=false` disables it. Disabled
+    /// means no `/metrics` HTTP listener and no metrics instrumentation
+    /// run at all, not a listener left up serving nothing — same
+    /// "`None` end to end, not just an unused struct" discipline
+    /// `server::main` already applies to `chat`'s `ChatDeps`.
+    pub metrics_enabled: bool,
 }
 
 impl Default for ServicesConfig {
     fn default() -> Self {
-        Self { chat_enabled: true }
+        Self {
+            chat_enabled: true,
+            metrics_enabled: true,
+        }
     }
 }
 
 impl ServicesConfig {
-    /// Reads `WZ_SERVICE_CHAT_ENABLED`, optional — unset keeps the
-    /// `true` default, but a *set-and-unparsable* value is a config
-    /// error, not a silent fallback (same convention as
-    /// `world::WorldConfig::from_env`: a typo should fail loudly).
+    /// Reads `WZ_SERVICE_CHAT_ENABLED`/`WZ_SERVICE_METRICS_ENABLED`,
+    /// both optional — unset keeps the `true` default, but a
+    /// *set-and-unparsable* value is a config error, not a silent
+    /// fallback (same convention as `world::WorldConfig::from_env`: a
+    /// typo should fail loudly).
     pub fn from_env() -> Result<Self> {
         let mut config = Self::default();
 
         if let Some(value) = optional_bool_env("WZ_SERVICE_CHAT_ENABLED")? {
             config.chat_enabled = value;
+        }
+        if let Some(value) = optional_bool_env("WZ_SERVICE_METRICS_ENABLED")? {
+            config.metrics_enabled = value;
         }
 
         Ok(config)
@@ -235,12 +249,18 @@ mod tests {
 
     #[test]
     fn services_default_to_enabled_with_nothing_set() {
-        with_clean_env(&["WZ_SERVICE_CHAT_ENABLED"], || {
-            assert_eq!(
-                ServicesConfig::from_env().unwrap(),
-                ServicesConfig { chat_enabled: true }
-            );
-        });
+        with_clean_env(
+            &["WZ_SERVICE_CHAT_ENABLED", "WZ_SERVICE_METRICS_ENABLED"],
+            || {
+                assert_eq!(
+                    ServicesConfig::from_env().unwrap(),
+                    ServicesConfig {
+                        chat_enabled: true,
+                        metrics_enabled: true,
+                    }
+                );
+            },
+        );
     }
 
     #[test]
@@ -249,6 +269,15 @@ mod tests {
             unsafe { std::env::set_var("WZ_SERVICE_CHAT_ENABLED", "false") };
             let config = ServicesConfig::from_env().unwrap();
             assert!(!config.chat_enabled);
+        });
+    }
+
+    #[test]
+    fn metrics_can_be_disabled_via_env() {
+        with_clean_env(&["WZ_SERVICE_METRICS_ENABLED"], || {
+            unsafe { std::env::set_var("WZ_SERVICE_METRICS_ENABLED", "false") };
+            let config = ServicesConfig::from_env().unwrap();
+            assert!(!config.metrics_enabled);
         });
     }
 

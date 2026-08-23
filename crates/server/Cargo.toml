@@ -15,10 +15,11 @@ content = { version = "0.1.0", path = "../content" }
 futures-util = "0.3.34"
 gateway = { version = "0.1.0", path = "../gateway" }
 plugin-host = { version = "0.1.0", path = "../plugin-host" }
+prometheus = "0.14.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sqlx = { version = "0.9.0", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls-aws-lc-rs", "uuid"] }
-tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "io-util"] }
 tokio-rustls = "0.26.4"
 tokio-util = { version = "0.7.19", features = ["codec"] }
 tracing = "0.1.44"

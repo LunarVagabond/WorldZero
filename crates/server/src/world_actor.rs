@@ -10,6 +10,8 @@
 
 use character::CharacterStore;
 use common::id::EntityId;
+use common::metrics::Metrics;
+use prometheus::IntGauge;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 use world::{EntityKind, MovementOutcome, Point, Zone};
@@ -62,11 +64,28 @@ enum WorldCommand {
 #[derive(Clone)]
 pub struct WorldHandle {
     commands: mpsc::UnboundedSender<WorldCommand>,
+    /// `worldzero_zone_world_command_queue_depth` (#48) for this zone —
+    /// `None` end to end when metrics are disabled
+    /// (`ServicesConfig::metrics_enabled`), not a gauge that's tracked
+    /// but never served. Incremented here, on send; decremented once per
+    /// command actually dequeued, in the actor loop below.
+    queue_depth: Option<IntGauge>,
 }
 
 impl WorldHandle {
+    /// Every `WorldCommand` send goes through here — the one place that
+    /// increments `queue_depth`, so no dispatch method below can forget
+    /// to (#48).
+    fn send(&self, command: WorldCommand) -> bool {
+        let sent = self.commands.send(command).is_ok();
+        if sent && let Some(gauge) = &self.queue_depth {
+            gauge.inc();
+        }
+        sent
+    }
+
     pub fn spawn(&self, entity: EntityId, kind: EntityKind, position: Point) {
-        let _ = self.commands.send(WorldCommand::Spawn {
+        self.send(WorldCommand::Spawn {
             entity,
             kind,
             position,
@@ -74,11 +93,11 @@ impl WorldHandle {
     }
 
     pub fn despawn(&self, entity: EntityId) {
-        let _ = self.commands.send(WorldCommand::Despawn { entity });
+        self.send(WorldCommand::Despawn { entity });
     }
 
     pub fn request_move(&self, entity: EntityId, to: Point) {
-        let _ = self.commands.send(WorldCommand::RequestMove { entity, to });
+        self.send(WorldCommand::RequestMove { entity, to });
     }
 
     /// `None` both when the entity isn't spawned and when the actor task
@@ -86,14 +105,10 @@ impl WorldHandle {
     /// treats both the same way (nothing to persist).
     pub async fn position_of(&self, entity: EntityId) -> Option<Point> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        if self
-            .commands
-            .send(WorldCommand::PositionOf {
-                entity,
-                reply: reply_tx,
-            })
-            .is_err()
-        {
+        if !self.send(WorldCommand::PositionOf {
+            entity,
+            reply: reply_tx,
+        }) {
             return None;
         }
         reply_rx.await.ok().flatten()
@@ -102,11 +117,7 @@ impl WorldHandle {
     /// Empty (not an error) if the actor task is gone.
     pub async fn entities_snapshot(&self) -> Vec<(EntityId, EntityKind, Point)> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        if self
-            .commands
-            .send(WorldCommand::EntitiesSnapshot { reply: reply_tx })
-            .is_err()
-        {
+        if !self.send(WorldCommand::EntitiesSnapshot { reply: reply_tx }) {
             return Vec::new();
         }
         reply_rx.await.unwrap_or_default()
@@ -121,7 +132,7 @@ impl WorldHandle {
         sender_entity_id: EntityId,
         payload: Vec<u8>,
     ) {
-        let _ = self.commands.send(WorldCommand::PluginMessage {
+        self.send(WorldCommand::PluginMessage {
             message_type,
             sender_entity_id,
             payload,
@@ -132,7 +143,7 @@ impl WorldHandle {
     /// caller (`session`) has already matched `command` against the
     /// plugin's declared `chat_commands` before calling this.
     pub fn dispatch_chat_command(&self, command: String, args: String, sender_entity_id: EntityId) {
-        let _ = self.commands.send(WorldCommand::ChatCommand {
+        self.send(WorldCommand::ChatCommand {
             command,
             args,
             sender_entity_id,
@@ -152,16 +163,27 @@ impl WorldHandle {
 /// in `plugin.toml`; anything else is logged and dropped rather than
 /// treated as an error, since an unroutable message type is a client or
 /// config mistake, not something that should disrupt the actor.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_world_actor(
     mut zone: Zone,
     tick_interval: std::time::Duration,
     mut plugin: Option<PluginRuntime>,
     character_store: std::sync::Arc<CharacterStore>,
     entity_characters: EntityCharacters,
+    zone_id: String,
+    metrics: Option<std::sync::Arc<Metrics>>,
     on_tick: impl Fn(&Zone, Vec<(EntityId, MovementOutcome)>) + Send + 'static,
 ) -> WorldHandle {
     let (tx, mut rx) = mpsc::unbounded_channel::<WorldCommand>();
     let dt = tick_interval.as_secs_f64();
+
+    // Resolved once against this zone's `zone_id` label (#48), not
+    // per-tick/per-command — `None` end to end when metrics are
+    // disabled, matching `ServicesConfig::metrics_enabled`.
+    let tick_duration = metrics.as_ref().map(|m| m.tick_duration_for_zone(&zone_id));
+    let entity_count = metrics.as_ref().map(|m| m.entity_count_for_zone(&zone_id));
+    let queue_depth = metrics.as_ref().map(|m| m.queue_depth_for_zone(&zone_id));
+    let handle_queue_depth = queue_depth.clone();
 
     tokio::spawn(async move {
         let mut next_tick_at = Instant::now() + tick_interval;
@@ -173,7 +195,14 @@ pub fn spawn_world_actor(
                         tracing::warn!("world actor tick running behind schedule — resyncing rather than catching up");
                     }
 
+                    let tick_started_at = Instant::now();
                     let outcomes = zone.tick();
+                    if let Some(histogram) = &tick_duration {
+                        histogram.observe(tick_started_at.elapsed().as_secs_f64());
+                    }
+                    if let Some(gauge) = &entity_count {
+                        gauge.set(zone.entities().len() as i64);
+                    }
                     on_tick(&zone, outcomes);
 
                     if let Some(runtime) = plugin.as_mut() {
@@ -218,6 +247,9 @@ pub fn spawn_world_actor(
                     }
                 }
                 Some(command) = rx.recv() => {
+                    if let Some(gauge) = &queue_depth {
+                        gauge.dec();
+                    }
                     match command {
                         WorldCommand::Spawn { entity, kind, position } => zone.spawn(entity, kind, position),
                         WorldCommand::Despawn { entity } => zone.despawn(entity),
@@ -293,7 +325,10 @@ pub fn spawn_world_actor(
         }
     });
 
-    WorldHandle { commands: tx }
+    WorldHandle {
+        commands: tx,
+        queue_depth: handle_queue_depth,
+    }
 }
 
 /// Resolves a plugin-supplied entity-id string to a real `EntityId` and,
