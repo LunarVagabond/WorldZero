@@ -1,0 +1,41 @@
+# Half of the example content pack (config/content-pack.example.yaml,
+# #45) — same content as config/zone.manifest.example.yaml, plus a link
+# to stonebridge-village along its eastern edge (x=500) so the two zones
+# actually demonstrate a live cross-zone handoff.
+schema_version: 1
+id: greenwood-forest
+display_name: "Greenwood Forest"
+
+bounds:
+  shape: polygon
+  coordinate_system: { units: meters, origin: [0, 0] }
+  points: [[0,0], [500,0], [500,500], [0,500]]
+
+collision:
+  asset_ref: "sha256:9f2ac1b3e4d5c6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1"
+  format: navmesh_v1
+
+links:
+  - target_zone: stonebridge-village
+    edge: [[500,200], [500,300]]
+    bidirectional: true
+
+spawn_tables:
+  - id: wolf-pack-01
+    entity_type: npc.wolf
+    points: [[120,80], [140,95]]
+    max_population: 6
+    respawn_seconds: 45
+    route_id: wolf-patrol-01
+
+routes:
+  - id: wolf-patrol-01
+    waypoints: [[110,70],[150,70],[150,110],[110,110]]
+    loop: true
+    speed: 1.4
+
+triggers:
+  - id: forest-entrance
+    shape: { type: circle, center: [10,10], radius: 5 }
+    event: on_trigger_enter
+    one_shot: false

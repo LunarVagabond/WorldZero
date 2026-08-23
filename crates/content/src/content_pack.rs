@@ -169,6 +169,22 @@ zones:
         assert_eq!(pack.zones.len(), 2);
     }
 
+    /// The actual shipped example (#45, `server::main`'s multi-zone
+    /// fallback path) — loads for real, not just a synthetic fixture, so
+    /// a typo in the example itself fails CI instead of only surfacing
+    /// the first time someone tries `make quickstart` with it.
+    #[test]
+    fn the_shipped_example_content_pack_loads() {
+        let pack_path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/content-pack.example.yaml");
+        let pack = ContentPack::from_file(&pack_path).unwrap();
+
+        assert_eq!(pack.zones.len(), 2);
+        let ids: Vec<&str> = pack.zones.iter().map(|z| z.id.as_str()).collect();
+        assert!(ids.contains(&"greenwood-forest"));
+        assert!(ids.contains(&"stonebridge-village"));
+    }
+
     #[test]
     fn dangling_link_target_fails_pack_validation() {
         let dir = tempdir();

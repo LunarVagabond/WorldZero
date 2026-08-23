@@ -1,0 +1,22 @@
+# Half of the example content pack (config/content-pack.example.yaml,
+# #45) — a small second zone linked back to greenwood-forest along its
+# western edge (x=0), reciprocating that zone's link so
+# `ZoneRegistry::entry_point` has a matching doorway to arrive at in
+# both directions.
+schema_version: 1
+id: stonebridge-village
+display_name: "Stonebridge Village"
+
+bounds:
+  shape: polygon
+  coordinate_system: { units: meters, origin: [0, 0] }
+  points: [[0,0], [200,0], [200,200], [0,200]]
+
+collision:
+  asset_ref: "sha256:9f2ac1b3e4d5c6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1"
+  format: navmesh_v1
+
+links:
+  - target_zone: greenwood-forest
+    edge: [[0,80], [0,120]]
+    bidirectional: true

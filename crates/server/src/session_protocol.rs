@@ -63,6 +63,21 @@ pub enum ServerMessage {
     EntityDespawned {
         entity_id: String,
     },
+    /// Sent to a connection whose entity just crossed a manifest-declared
+    /// zone link (#45) — same shape as `Joined`, but for an in-place
+    /// zone handoff rather than the initial connect: the new `zone_id`,
+    /// the entity's arrival position in that zone's local coordinate
+    /// system, and that zone's current roster (this connection has no
+    /// other way to learn who's already there). The connection never
+    /// disconnects/reconnects for this — the same TCP session, gateway
+    /// handshake, and `entity_id` carry straight through.
+    ZoneChanged {
+        zone_id: String,
+        entity_id: String,
+        x: f64,
+        y: f64,
+        roster: Vec<RosterEntry>,
+    },
     /// An accepted movement update — broadcast to every connected client,
     /// not just the mover, so everyone's view of the zone stays current
     /// (phase 1 has no interest management yet, see
