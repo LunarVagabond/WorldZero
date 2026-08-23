@@ -20,6 +20,13 @@ target/
 # doesn't belong in git the way a dev's own config/*.yaml does
 config/certs/
 
+# A dev's own real config, copied/customized from the tracked
+# config/*.example.* templates (by hand, or by `make quickstart`, #43) —
+# never the templates themselves.
+config/zone.manifest.yaml
+config/stats.schema.yaml
+config/plugin.toml
+
 # Logs
 logs/
 *.log
