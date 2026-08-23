@@ -7,7 +7,18 @@ Corresponds to [The Developer Experience Bar](../PROPOSAL.md#the-developer-exper
 - Rust, pinned via [`rust-toolchain.toml`](../../rust-toolchain.toml) — `rustup` picks this up automatically once you're in the repo.
 - A reachable Postgres and Redis. Copy [`.env.example`](../../.env.example) to `.env` and fill in `WZ_POSTGRES_*`/`WZ_REDIS_*`. This is the one piece of required configuration — everything else below is automatic.
 
-That's it. No docker-compose ships with this repo today; point `.env` at whatever Postgres/Redis you already have running (local install, a container you started yourself, a remote dev instance).
+That's it. Point `.env` at whatever Postgres/Redis you already have running (local install, a container you started yourself, a remote dev instance) — or, if you don't have one yet, `make docker-up` below will start one for you.
+
+### Don't have a Postgres/Redis yet? `make docker-up`
+
+[`docker-compose.yml`](../../docker-compose.yml) starts local Postgres/Redis containers for you. This is a convenience for small teams and for sandboxing/testing, not the production story — this repo does not default to Docker in dev, and a real deployment (this project's own included) may need Postgres/Redis split across several machines for scale, which this compose file doesn't attempt.
+
+```sh
+cp .env.example .env   # then fill in WZ_POSTGRES_USER/WZ_POSTGRES_PASSWORD/WZ_POSTGRES_DATABASE
+make docker-up
+```
+
+`make docker-up` runs a preflight check first ([`scripts/docker_preflight.sh`](../../scripts/docker_preflight.sh)): if `.env` is missing, or missing required values, it tells you exactly what's needed and stops before touching Docker, instead of failing later with an opaque connection error. Once the containers are up, set `WZ_POSTGRES_HOST`/`WZ_REDIS_HOST` to `localhost` in `.env` — everything else below (`make quickstart`, `make migrate`, `cargo run -p server`) then works the same as against any other Postgres/Redis. `make docker-down` stops the containers (data persists in a named volume); `make docker-status`/`make docker-logs` for the rest.
 
 ## One command
 

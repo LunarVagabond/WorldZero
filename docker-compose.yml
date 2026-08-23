@@ -1,0 +1,51 @@
+# Local Postgres/Redis for small teams and sandboxing/testing — not the
+# production story (docs/PROPOSAL.md's storage section, and this project's
+# own dev deployment, both assume Postgres/Redis may need to be split
+# across several machines for scale; this repo does not default to Docker
+# in dev for that reason). `server` itself still runs on the host via
+# `cargo run`/`make quickstart` — there is no app container here.
+#
+# Reads the same WZ_POSTGRES_*/WZ_REDIS_* vars from `.env` that
+# `common::config` expects at runtime (docker compose loads `.env` from the
+# project directory automatically) — `make docker-up` runs a preflight
+# check for those first, see `scripts/docker_preflight.sh`.
+#
+# Both services publish to `localhost`, so once they're up, point
+# WZ_POSTGRES_HOST/WZ_REDIS_HOST at `localhost` in `.env` for
+# `cargo run -p server` / `make quickstart` to reach them.
+
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${WZ_POSTGRES_USER}
+      POSTGRES_PASSWORD: ${WZ_POSTGRES_PASSWORD}
+      POSTGRES_DB: ${WZ_POSTGRES_DATABASE}
+    ports:
+      - "${WZ_POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - wz_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${WZ_POSTGRES_USER}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7
+    restart: unless-stopped
+    command: ["redis-server", "--requirepass", "${WZ_REDIS_PASSWORD:-}"]
+    ports:
+      - "${WZ_REDIS_PORT:-6379}:6379"
+    volumes:
+      - wz_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  wz_postgres_data:
+  wz_redis_data:
