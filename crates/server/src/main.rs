@@ -30,9 +30,12 @@
 //! `true`), `WZ_SERVICE_METRICS_ENABLED` (default `true`) +
 //! `WZ_METRICS_ADDR` (default `127.0.0.1:9090` — a separate `/metrics`
 //! HTTP listener for Prometheus scraping, #48; see
-//! docs/specs/Observability_Spec.md), `WZ_LAYER_POPULATION_THRESHOLD`
-//! (default `200` — connected sessions per zone layer before #50 spins
-//! up a new one; see `zone_registry`'s doc comment).
+//! docs/specs/Observability_Spec.md), `WZ_LAYER_ENABLED` (default
+//! `true` — #50's dynamic layering; `false` pins every zone to exactly
+//! one layer forever) + `WZ_LAYER_POPULATION_THRESHOLD` (default `200`
+//! — connected sessions per zone layer before a new one spins up, only
+//! consulted while layering is enabled; see `zone_registry`'s doc
+//! comment).
 //!
 //! A connected client speaks `auth::gateway_protocol` first (login or
 //! register), then `server::session_protocol` (move, see other entities
@@ -245,6 +248,13 @@ async fn main() {
         runtimes.insert(zone_id, ZoneRuntime { world, sessions });
     }
 
+    let layering_enabled: bool = std::env::var("WZ_LAYER_ENABLED")
+        .ok()
+        .map(|v| {
+            v.parse()
+                .expect("WZ_LAYER_ENABLED must be \"true\" or \"false\"")
+        })
+        .unwrap_or(true);
     let layer_population_threshold: usize = std::env::var("WZ_LAYER_POPULATION_THRESHOLD")
         .ok()
         .map(|v| {
@@ -297,6 +307,7 @@ async fn main() {
     let zones = Arc::new(ZoneRegistry::new(
         runtimes,
         manifests,
+        layering_enabled,
         layer_population_threshold,
         layer_spawner,
     ));

@@ -41,6 +41,7 @@ const CHAT_ADDR: &str = "127.0.0.1:7911";
 const CHAT_DISABLED_ADDR: &str = "127.0.0.1:7912";
 const ZONE_TRANSITION_ADDR: &str = "127.0.0.1:7913";
 const LAYER_ADDR: &str = "127.0.0.1:7918";
+const LAYER_DISABLED_ADDR: &str = "127.0.0.1:7919";
 
 struct ServerProcess {
     child: Child,
@@ -543,6 +544,60 @@ async fn a_low_population_threshold_isolates_two_joining_connections_onto_separa
     // first connection's entity — an empty roster here is only possible
     // because the population threshold forced a second, separate layer.
     assert!(second_roster.is_empty(), "{second_roster:?}");
+}
+
+/// #50: `WZ_LAYER_ENABLED=false` must override even a threshold of `1` —
+/// a deployment that opts out of layering entirely should never see a
+/// second layer, full stop. Same shape as the test above, but this time
+/// the second connection's roster must *include* the first (same layer),
+/// where the enabled case above proved the opposite.
+#[tokio::test]
+#[ignore]
+async fn layering_disabled_keeps_connections_on_the_same_layer_regardless_of_threshold() {
+    let config_dir = setup_content_pack_config_dir("layer-disabled");
+    let _server = start_server_with_env(
+        &config_dir,
+        LAYER_DISABLED_ADDR,
+        false,
+        &[
+            ("WZ_LAYER_ENABLED", "false"),
+            ("WZ_LAYER_POPULATION_THRESHOLD", "1"),
+        ],
+    );
+    wait_for_port(LAYER_DISABLED_ADDR).await;
+
+    let mut first = connect(&config_dir, LAYER_DISABLED_ADDR).await;
+    register_and_authenticate(
+        &mut first,
+        &format!("layer-disabled-a-{}", uuid::Uuid::now_v7()),
+        "hunter2",
+    )
+    .await;
+    let first_entity_id = loop {
+        if let ServerMessage::Joined { entity_id, .. } = recv_world(&mut first).await {
+            break entity_id;
+        }
+    };
+
+    let mut second = connect(&config_dir, LAYER_DISABLED_ADDR).await;
+    register_and_authenticate(
+        &mut second,
+        &format!("layer-disabled-b-{}", uuid::Uuid::now_v7()),
+        "hunter2",
+    )
+    .await;
+    let second_roster = loop {
+        if let ServerMessage::Joined { roster, .. } = recv_world(&mut second).await {
+            break roster;
+        }
+    };
+
+    assert!(
+        second_roster
+            .iter()
+            .any(|entry| entry.entity_id == first_entity_id),
+        "expected the first connection's entity in the roster (same layer), got {second_roster:?}"
+    );
 }
 
 /// #104: chat wired into the combined `server` process (not just the

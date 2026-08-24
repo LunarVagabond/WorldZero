@@ -37,10 +37,18 @@
 //! Real population balancing across zone-link transitions too is left
 //! for later, not silently glossed over.
 //!
-//! **Trigger for spinning up a new layer:** a zone's existing layers are
-//! all at or above `layer_population_threshold` connected sessions
-//! (`WZ_LAYER_POPULATION_THRESHOLD`, see `main.rs`) — checked at every
-//! [`ZoneRegistry::assign_layer`] call, not on a timer.
+//! **Enabled by default, per-deployment configurable:** `WZ_LAYER_ENABLED`
+//! (default `true`, see `main.rs`) turns layering off entirely for a
+//! deployment that doesn't want it — every zone then stays at exactly
+//! one layer forever, no matter its population.
+//!
+//! **Trigger for spinning up a new layer**, when enabled: a zone's
+//! existing layers are all at or above `layer_population_threshold`
+//! connected sessions (`WZ_LAYER_POPULATION_THRESHOLD`, default `200`,
+//! see `main.rs`) — checked at every [`ZoneRegistry::assign_layer`]
+//! call, not on a timer. Deployments differ wildly here (a small
+//! community server might want 10 per layer, a big one 1000+), which is
+//! exactly why this is a runtime env var and not a hardcoded constant.
 //!
 //! The plugin-host slice (#37/#38, extended by #57/#116) stays
 //! single-instance for this same reason as before: today's
@@ -90,6 +98,15 @@ pub struct ZoneRegistry {
     /// only happens at startup, per this module's doc comment.
     runtimes: RwLock<HashMap<String, Vec<ZoneRuntime>>>,
     manifests: HashMap<String, ZoneManifest>,
+    /// `WZ_LAYER_ENABLED` (default `true`, see `main.rs`) — a deployment
+    /// that doesn't want layering at all (small player counts, or a game
+    /// that relies on every player in a zone being able to see every
+    /// other) sets this `false` rather than fighting the threshold with
+    /// an arbitrarily huge number. When `false`, [`Self::assign_layer`]
+    /// always returns layer 0 and `layer_population_threshold`/
+    /// `layer_spawner` are never consulted — a zone never grows past one
+    /// layer, full stop.
+    layering_enabled: bool,
     layer_population_threshold: usize,
     layer_spawner: LayerSpawner,
 }
@@ -98,6 +115,7 @@ impl ZoneRegistry {
     pub fn new(
         runtimes: HashMap<String, ZoneRuntime>,
         manifests: HashMap<String, ZoneManifest>,
+        layering_enabled: bool,
         layer_population_threshold: usize,
         layer_spawner: LayerSpawner,
     ) -> Self {
@@ -108,6 +126,7 @@ impl ZoneRegistry {
         Self {
             runtimes: RwLock::new(runtimes),
             manifests,
+            layering_enabled,
             layer_population_threshold,
             layer_spawner,
         }
@@ -129,7 +148,9 @@ impl ZoneRegistry {
     /// least-populated existing layer, if it's under
     /// `layer_population_threshold`; otherwise spins up a brand-new layer
     /// via [`LayerSpawner`] and assigns to that instead. `None` only if
-    /// `zone_id` isn't a zone this registry knows about at all.
+    /// `zone_id` isn't a zone this registry knows about at all. Always
+    /// layer 0 if `layering_enabled` is `false` — see the field's doc
+    /// comment.
     ///
     /// Holds the write lock for the whole call (check *and* possible
     /// spawn) rather than checking then re-locking to spawn — two
@@ -137,6 +158,10 @@ impl ZoneRegistry {
     /// otherwise both decide to spin up a new layer instead of one of
     /// them landing on the other's brand-new one.
     pub fn assign_layer(&self, zone_id: &str) -> Option<ZoneRuntime> {
+        if !self.layering_enabled {
+            return self.get(zone_id);
+        }
+
         let mut runtimes = self.runtimes.write().unwrap();
         let layers = runtimes.get_mut(zone_id)?;
 
@@ -271,6 +296,7 @@ collision:
         ZoneRegistry::new(
             HashMap::new(),
             manifests,
+            true,
             usize::MAX,
             Box::new(|_, _| panic!("layer_spawner should not be called in these tests")),
         )
