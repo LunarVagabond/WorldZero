@@ -153,10 +153,13 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
         );
         deps.default_zone_id.clone()
     };
+    // Population-balanced layer assignment (#50) happens once, here, at
+    // initial join — see `zone_registry`'s doc comment for why a later
+    // zone-link transition or mid-connection `ZoneChanged` (below) always
+    // lands on layer 0 instead rather than going through this too.
     let mut zone = deps
         .zones
-        .get(&current_zone_id)
-        .cloned()
+        .assign_layer(&current_zone_id)
         .expect("default_zone_id must always resolve to a real zone in the registry");
 
     let entity_id = EntityId::new();
@@ -309,7 +312,7 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
                     match deps.zones.get(&zone_id) {
                         Some(new_zone) => {
                             current_zone_id = zone_id;
-                            zone = new_zone.clone();
+                            zone = new_zone;
                         }
                         None => {
                             tracing::error!(zone_id, "zone transition target vanished from the registry");

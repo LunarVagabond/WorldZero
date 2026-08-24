@@ -40,6 +40,7 @@ const ADDR: &str = "127.0.0.1:7910";
 const CHAT_ADDR: &str = "127.0.0.1:7911";
 const CHAT_DISABLED_ADDR: &str = "127.0.0.1:7912";
 const ZONE_TRANSITION_ADDR: &str = "127.0.0.1:7913";
+const LAYER_ADDR: &str = "127.0.0.1:7918";
 
 struct ServerProcess {
     child: Child,
@@ -492,6 +493,56 @@ async fn zone_transition_crosses_a_link_without_reconnecting() {
             _ => {}
         }
     }
+}
+
+/// #50: with `WZ_LAYER_POPULATION_THRESHOLD=1`, a second connection into
+/// an already-occupied zone must spin up a fresh layer rather than share
+/// the first connection's — proven the same way the zone-transition test
+/// above proves a fresh arrival: an empty roster. If both connections
+/// had landed on the same layer, the second one's `Joined` roster would
+/// include the first.
+#[tokio::test]
+#[ignore]
+async fn a_low_population_threshold_isolates_two_joining_connections_onto_separate_layers() {
+    let config_dir = setup_content_pack_config_dir("layer-isolation");
+    let _server = start_server_with_env(
+        &config_dir,
+        LAYER_ADDR,
+        false,
+        &[("WZ_LAYER_POPULATION_THRESHOLD", "1")],
+    );
+    wait_for_port(LAYER_ADDR).await;
+
+    let mut first = connect(&config_dir, LAYER_ADDR).await;
+    register_and_authenticate(
+        &mut first,
+        &format!("layer-isolation-a-{}", uuid::Uuid::now_v7()),
+        "hunter2",
+    )
+    .await;
+    let first_roster = loop {
+        if let ServerMessage::Joined { roster, .. } = recv_world(&mut first).await {
+            break roster;
+        }
+    };
+    assert!(first_roster.is_empty(), "{first_roster:?}");
+
+    let mut second = connect(&config_dir, LAYER_ADDR).await;
+    register_and_authenticate(
+        &mut second,
+        &format!("layer-isolation-b-{}", uuid::Uuid::now_v7()),
+        "hunter2",
+    )
+    .await;
+    let second_roster = loop {
+        if let ServerMessage::Joined { roster, .. } = recv_world(&mut second).await {
+            break roster;
+        }
+    };
+    // With the default (much higher) threshold this would contain the
+    // first connection's entity — an empty roster here is only possible
+    // because the population threshold forced a second, separate layer.
+    assert!(second_roster.is_empty(), "{second_roster:?}");
 }
 
 /// #104: chat wired into the combined `server` process (not just the

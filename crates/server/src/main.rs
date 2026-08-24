@@ -30,7 +30,9 @@
 //! `true`), `WZ_SERVICE_METRICS_ENABLED` (default `true`) +
 //! `WZ_METRICS_ADDR` (default `127.0.0.1:9090` — a separate `/metrics`
 //! HTTP listener for Prometheus scraping, #48; see
-//! docs/specs/Observability_Spec.md).
+//! docs/specs/Observability_Spec.md), `WZ_LAYER_POPULATION_THRESHOLD`
+//! (default `200` — connected sessions per zone layer before #50 spins
+//! up a new one; see `zone_registry`'s doc comment).
 //!
 //! A connected client speaks `auth::gateway_protocol` first (login or
 //! register), then `server::session_protocol` (move, see other entities
@@ -65,6 +67,12 @@ use zone_registry::{ZoneRegistry, ZoneRuntime};
 
 const DEFAULT_ADDR: &str = "127.0.0.1:7900";
 const DEFAULT_METRICS_ADDR: &str = "127.0.0.1:9090";
+/// #50's layer-spin-up trigger, in connected sessions per layer — see
+/// `zone_registry`'s doc comment for what actually happens at this
+/// point. Generous on purpose: real per-deployment tuning is expected
+/// via `WZ_LAYER_POPULATION_THRESHOLD`, this is just a default that
+/// doesn't layer-split a small/testing deployment for no reason.
+const DEFAULT_LAYER_POPULATION_THRESHOLD: usize = 200;
 
 /// Placeholder until `realm-directory` (#47) exists — one fixed, nil
 /// realm id every character in this phase-1 process belongs to. Safe as
@@ -237,7 +245,61 @@ async fn main() {
         runtimes.insert(zone_id, ZoneRuntime { world, sessions });
     }
 
-    let zones = Arc::new(ZoneRegistry::new(runtimes, manifests));
+    let layer_population_threshold: usize = std::env::var("WZ_LAYER_POPULATION_THRESHOLD")
+        .ok()
+        .map(|v| {
+            v.parse()
+                .expect("WZ_LAYER_POPULATION_THRESHOLD must be a positive integer")
+        })
+        .unwrap_or(DEFAULT_LAYER_POPULATION_THRESHOLD);
+
+    // Builds an additional layer for an already-running zone, on demand
+    // (#50) — never called at startup, only from `ZoneRegistry::assign_layer`
+    // once a zone's existing layers are all at or above
+    // `layer_population_threshold`. Deliberately never attaches a plugin
+    // (see `zone_registry`'s doc comment on why that stays layer-0-only)
+    // and never touches `plugin_message_types`/`plugin_chat_commands` —
+    // those are fixed at startup from the *first* zone's layer 0 alone.
+    let layer_spawner_world_config = world_config;
+    let layer_spawner_character_store = character_store.clone();
+    let layer_spawner_entity_characters = entity_characters.clone();
+    let layer_spawner_metrics = metrics.clone();
+    let layer_spawner_registry_cell = zone_registry_cell.clone();
+    let layer_spawner: zone_registry::LayerSpawner = Box::new(move |zone_id, manifest| {
+        let zone = Zone::new(manifest.clone(), layer_spawner_world_config);
+        let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
+
+        let registry_cell = layer_spawner_registry_cell.clone();
+        let sessions_for_tick = sessions.clone();
+        let zone_id_for_tick = zone_id.to_string();
+        let world = world_actor::spawn_world_actor(
+            zone,
+            layer_spawner_world_config.tick_interval(),
+            None,
+            layer_spawner_character_store.clone(),
+            layer_spawner_entity_characters.clone(),
+            zone_id.to_string(),
+            layer_spawner_metrics.clone(),
+            move |zone, outcomes| {
+                handle_tick_outcomes(
+                    &registry_cell,
+                    &zone_id_for_tick,
+                    &sessions_for_tick,
+                    zone,
+                    outcomes,
+                );
+            },
+        );
+
+        ZoneRuntime { world, sessions }
+    });
+
+    let zones = Arc::new(ZoneRegistry::new(
+        runtimes,
+        manifests,
+        layer_population_threshold,
+        layer_spawner,
+    ));
     zone_registry_cell
         .set(zones.clone())
         .unwrap_or_else(|_| unreachable!("zone_registry_cell is only ever set once, here"));
