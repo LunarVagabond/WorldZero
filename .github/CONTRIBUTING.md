@@ -16,6 +16,8 @@ If no, refine or drop the proposal.
 
 For a design question or a sanity check before opening an issue, use GitHub Discussions — it keeps the conversation searchable for the next person who has the same question.
 
+If you're building a real game on WorldZero and hit something it doesn't support yet, that's exactly the kind of report this project wants — open an issue or a Discussion rather than working around it quietly or forking. A gap found by someone actually shipping a game is worth more than one guessed at in the abstract, and closing it is squarely in scope, not scope creep.
+
 ## If A Convention Gets In The Way
 
 The branching model, commit format, and process rules below are a starting point, not a settled standard — assembled from what's worked elsewhere, not handed down from experience running this specific project. Follow them as written. But if one is genuinely getting in the way of a contribution, doesn't fit a situation, or just seems off, raise it first — a GitHub Discussion — before working around it. Same goes for friction in the tools, the codebase, or the workflow generally: surfacing it is always welcome. The goal is to talk it through and adjust the rule if it's wrong, not to greenlight quietly deviating from it.

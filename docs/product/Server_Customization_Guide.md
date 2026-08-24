@@ -10,6 +10,8 @@ This is the guide for turning `make quickstart`'s default game into *your* game 
 
 A full reference table of everything in this guide is at the bottom if you just want to skim.
 
+**Checking your setup as you go.** `server` logs a real `INFO`-level line for the config that actually took effect, not just what you set: `worldzero server listening` (with the bound address, confirming [Step 4](#step-4--networking-gateway)'s `WZ_SERVER_ADDR`), plus `chat service enabled`/`disabled` and `metrics enabled`/`disabled` for [Step 6](#step-6--optional-services-chat-metrics)'s toggles. If metrics are on, `curl localhost:9090/metrics` (or wherever `WZ_METRICS_ADDR` points) is a quick liveness check. There's no equivalent startup log for a loaded stats schema or an attached plugin today — the first real signal for those is a client interaction actually working (a character loading with your declared stats, a plugin's `on-load` NPC appearing).
+
 ---
 
 ## Step 0 — Infrastructure (`common`)
@@ -112,6 +114,10 @@ The shipped default is `UsernamePasswordProvider` — self-contained accounts, z
 
 By default, `gateway` generates a self-signed TLS certificate under `<config_dir>/certs/` the first time it runs, and reuses it on every subsequent run — nothing to configure for local development.
 
+| Var | Default | Purpose |
+|---|---|---|
+| `WZ_SERVER_ADDR` | `127.0.0.1:7900` | The bind address `gateway` listens on — change this to expose the server beyond localhost (e.g. `0.0.0.0:7900`). |
+
 For a real certificate:
 
 | Var | Purpose |
@@ -145,6 +151,16 @@ Wire it in:
 | `WZ_PLUGIN_MANIFEST_PATH` + `WZ_PLUGIN_WASM_PATH` | Both required together. Today attaches to only the *first* zone loaded — real per-zone plugin instantiation is a known gap, not yet built (see `server::zone_registry`'s own doc comment). |
 
 `on-load` (spawn NPCs at startup) and `on-message` are live today; `on-interact`/`on-tick` hooks exist in the host API but aren't wired into a real trigger-volume/tick path yet — see [`docs/specs/Plugin_API.md`](../specs/Plugin_API.md)'s "Beyond this v0 slice." [`examples/example-plugin`](../../examples/example-plugin) is a real, minimal, copyable starting point — start there, not from scratch.
+
+**Persistent plugin state (`plugin-state-get`/`plugin-state-set`, #149).** Quest flags, NPC memory, per-guild economy counters — anything your plugin needs to remember belongs here, not in a stat (Step 1 is for character stats the core validates against a schema; this is an opaque blob entirely yours). No config of its own — it's two host functions your plugin calls directly, scoped by a `plugin-state-scope` variant:
+
+| Scope | Durable? | Use it for |
+|---|---|---|
+| `character(id)` | Yes (Postgres), hydrated at session join | Per-character plugin data — quest progress, unlocked recipes. |
+| `zone(id)` | Yes (Postgres), hydrated at zone-actor startup | Per-zone plugin data — a boss's defeated state, a world event's phase. |
+| `entity(id)` | No — in-memory only, gone on restart | Short-lived per-entity scratch state — an NPC's current patrol target. |
+
+Reads never hit the database live from inside the call (same cache-hydrated-in-advance constraint as `caller-role`); writes land in the cache immediately and, for the two durable scopes, queue for the next tick's drain. Full mechanism: [`docs/specs/Plugin_API.md`](../specs/Plugin_API.md#the-plugin-scoped-data-store-plugin-state-getplugin-state-set-149).
 
 ---
 

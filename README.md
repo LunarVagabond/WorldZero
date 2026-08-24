@@ -2,13 +2,15 @@
 
 ![WorldZero](docs/social_assets/WZ-InitialConcept.png)
 
-**Status:** early design phase. The Rust workspace is scaffolded (`crates/`, matching the crate breakdown below) but every crate is still an empty stub — no real logic yet. See [`docs/PROPOSAL.md`](docs/PROPOSAL.md) for the full design.
+**Status:** early implementation. `auth`, `character`, `world`, `gateway`, `content`, `chat`, `plugin-host`, and `realm-directory` all have real, tested logic, and `server` is a runnable combined process; `transfer` is still an empty stub. See [`docs/PROPOSAL.md`](docs/PROPOSAL.md) for the full design and [`docs/product/Getting_Started_Developers.md`](docs/product/Getting_Started_Developers.md) to run it yourself.
 
 Building an MMO used to require a small studio's worth of backend engineering before a single player ever saw the game: authentication, character persistence, world simulation, netcode, sharding, chat, matchmaking — all before "is this game fun" could even be tested. WorldZero is an open-source, self-hostable MMO server framework that owns that infrastructure — realms, sharding/layering, world state, netcode, persistence, cross-server character policy — behind a sandboxed plugin system, so a game developer brings their own game logic instead of building a backend from scratch.
 
 ## Why WorldZero
 
 The bar isn't "a skilled team could use this" — a few existing projects already clear that bar. The bar is a developer's gut reaction in the first few minutes: *"thank goodness I don't have to build this part, I just need to do XYZ,"* not *"I could just do this myself."* That second reaction is the real thing WorldZero is competing against, more than any specific missing feature elsewhere. See [The Developer Experience Bar](docs/PROPOSAL.md#the-developer-experience-bar) for what that means concretely, and [Prior Art & Positioning](docs/PROPOSAL.md#prior-art--positioning) for the honest look at what else exists.
+
+MMOs used to show up regularly; now a small team spends years reinventing backend plumbing before they find out if their game is even fun, and most never get that far. WorldZero exists so that stops being the reason the genre has gone quiet — it's a piece of shared infrastructure meant to be built on, argued with, and extended by whoever needs it, not a finished product handed down. If it doesn't fit your game yet, that's a gap to close together, not a wall. See [About](docs/product/About.md) for the fuller version of why this project exists.
 
 **WorldZero is:** OSS (Apache-2.0), self-hostable, MMO-genre-specific (realms/shards/layers/character policy as first-class concepts), engine- and client-agnostic, and extensible through a sandboxed WASM plugin system.
 
