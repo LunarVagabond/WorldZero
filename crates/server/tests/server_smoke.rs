@@ -1,10 +1,12 @@
 //! End-to-end smoke test against the real, compiled `server` binary
 //! (#39's acceptance criteria) — not run by default (needs real
 //! Postgres/Redis and, for the plugin-spawned-NPC part, the
-//! `plugin-host` test fixture built for `wasm32-wasip2`). Run with:
+//! `plugin-host` test fixtures built for `wasm32-wasip2`). Run with:
 //!
 //! ```sh
 //! cd crates/plugin-host/tests/fixtures/test-plugin
+//! cargo build --target wasm32-wasip2 --release
+//! cd ../second-plugin
 //! cargo build --target wasm32-wasip2 --release
 //! cd ../../../../..
 //! set -a; source .env; set +a
@@ -16,7 +18,10 @@
 //! moves, sees the move broadcast back, disconnects, then reconnects and
 //! finds its character exactly where it left off — proving movement
 //! validation, the plugin hook wiring, and cross-session position
-//! persistence all work together over the real gateway transport.
+//! persistence all work together over the real gateway transport. Also
+//! covers real multi-plugin support (#152, `two_independent_plugins...`
+//! below) — two distinct compiled `.wasm` fixtures loaded into the same
+//! process at once.
 
 use std::path::PathBuf;
 use std::process::{Child, Command};
@@ -44,6 +49,7 @@ const LAYER_ADDR: &str = "127.0.0.1:7918";
 const LAYER_DISABLED_ADDR: &str = "127.0.0.1:7919";
 const PLAYER_SESSION_ADDR: &str = "127.0.0.1:7920";
 const COMBAT_ADDR: &str = "127.0.0.1:7921";
+const MULTI_PLUGIN_ADDR: &str = "127.0.0.1:7922";
 
 struct ServerProcess {
     child: Child,
@@ -118,24 +124,14 @@ fn start_server_with_env(
         command.env("WZ_REDIS_PASSWORD", password);
     }
 
-    let plugin_wasm = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
-        "../plugin-host/tests/fixtures/test-plugin/target/wasm32-wasip2/release/test_plugin.wasm",
-    );
-    let plugin_manifest_path = config_dir.join("plugin.toml");
-    // Gated on *this test's own* config dir actually declaring a
-    // plugin.toml, not just on the wasm fixture existing somewhere on
-    // disk — `setup_content_pack_config_dir`'s tests (e.g. the
-    // zone-transition test) deliberately have no plugin.toml, and
-    // wiring WZ_PLUGIN_MANIFEST_PATH at them anyway made the spawned
-    // server panic trying to read a file that was never written. Only
-    // possible once the wasm fixture is actually built (previously never
-    // true in CI, so this path was never exercised there before).
-    if plugin_wasm.exists() && plugin_manifest_path.exists() {
-        command
-            .env("WZ_PLUGIN_MANIFEST_PATH", plugin_manifest_path)
-            .env("WZ_PLUGIN_WASM_PATH", plugin_wasm);
-    }
-
+    // #152: plugins are discovered from `<config_dir>/plugins/<name>/`,
+    // not a single `WZ_PLUGIN_MANIFEST_PATH`/`WZ_PLUGIN_WASM_PATH` pair
+    // anymore — `setup_config_dir` below writes the manifest and copies
+    // the compiled wasm fixture into that layout for tests that want a
+    // plugin; `setup_content_pack_config_dir`'s tests (e.g. the
+    // zone-transition test) deliberately have no `plugins/` dir at all,
+    // and `discover_plugins` treats that as the ordinary "no plugins
+    // configured" case, not an error.
     for (key, value) in extra_env {
         command.env(key, value);
     }
@@ -271,17 +267,122 @@ fn setup_config_dir(test_name: &str) -> PathBuf {
         config_dir.join("stats.schema.yaml"),
     )
     .unwrap();
+    // `<config_dir>/plugins/test-plugin/{plugin.toml,test_plugin.wasm}`
+    // (#152's discovery convention) — only written if the compiled wasm
+    // fixture actually exists, same "gracefully run with no plugin
+    // attached" behavior `start_server_with_env` used to gate on before
+    // #152 (building the fixture first is an extra manual step, not
+    // something `cargo test` does on its own — see this file's own doc
+    // comment).
+    let plugin_wasm = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+        "../plugin-host/tests/fixtures/test-plugin/target/wasm32-wasip2/release/test_plugin.wasm",
+    );
+    if plugin_wasm.exists() {
+        let plugin_dir = config_dir.join("plugins").join("test-plugin");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::copy(&plugin_wasm, plugin_dir.join("test_plugin.wasm")).unwrap();
+        std::fs::write(
+            plugin_dir.join("plugin.toml"),
+            r#"
+[plugin]
+name = "test-plugin"
+host_api_version = "0.8.0"
+capabilities = ["spawning", "movement", "combat", "economy", "messaging"]
+message_types = [1000]
+hooks = [
+    "on-zone-loaded",
+    "on-player-join-zone",
+    "on-player-leave-zone",
+    "on-interact",
+    "on-damage-calc",
+    "on-death",
+    "on-respawn",
+    "on-npc-tick",
+    "on-npc-interact",
+    "on-item-use",
+    "on-item-acquire",
+]
+"#,
+        )
+        .unwrap();
+    }
+    config_dir
+}
+
+/// Same shape as `setup_config_dir`, but loads *both* `test-plugin` and
+/// `second-plugin` (#152) — two distinct, independently-authored compiled
+/// `.wasm` fixtures, both loaded process-wide (there's no per-zone
+/// scoping to opt into) and declaring non-colliding
+/// `message_types`/`chat_commands` (1000/`give` vs 1001/`second-wave`).
+/// Panics loudly (not silently
+/// skips) if either fixture wasn't built — unlike `setup_config_dir`,
+/// this test is specifically about multi-plugin behavior, so a missing
+/// fixture should fail clearly rather than silently degrade to
+/// single-plugin or no-plugin.
+fn setup_multi_plugin_config_dir(test_name: &str) -> PathBuf {
+    let config_dir = std::env::temp_dir().join(format!(
+        "wz-server-smoke-{test_name}-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::copy(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../config/zone.manifest.example.yaml"),
+        config_dir.join("zone.manifest.yaml"),
+    )
+    .unwrap();
+    std::fs::copy(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../config/stats.schema.example.yaml"),
+        config_dir.join("stats.schema.yaml"),
+    )
+    .unwrap();
+
+    let fixtures_dir =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../plugin-host/tests/fixtures");
+    let test_plugin_wasm =
+        fixtures_dir.join("test-plugin/target/wasm32-wasip2/release/test_plugin.wasm");
+    let second_plugin_wasm =
+        fixtures_dir.join("second-plugin/target/wasm32-wasip2/release/second_plugin.wasm");
+    assert!(
+        test_plugin_wasm.exists() && second_plugin_wasm.exists(),
+        "both test-plugin and second-plugin must be built for wasm32-wasip2 first — see this file's own doc comment"
+    );
+
+    let test_plugin_dir = config_dir.join("plugins").join("test-plugin");
+    std::fs::create_dir_all(&test_plugin_dir).unwrap();
+    std::fs::copy(&test_plugin_wasm, test_plugin_dir.join("test_plugin.wasm")).unwrap();
     std::fs::write(
-        config_dir.join("plugin.toml"),
+        test_plugin_dir.join("plugin.toml"),
         r#"
 [plugin]
 name = "test-plugin"
-host_api_version = "0.7.0"
+host_api_version = "0.8.0"
 capabilities = ["spawning", "movement", "combat", "economy", "messaging"]
 message_types = [1000]
+hooks = ["on-zone-loaded", "on-player-join-zone"]
 "#,
     )
     .unwrap();
+
+    let second_plugin_dir = config_dir.join("plugins").join("second-plugin");
+    std::fs::create_dir_all(&second_plugin_dir).unwrap();
+    std::fs::copy(
+        &second_plugin_wasm,
+        second_plugin_dir.join("second_plugin.wasm"),
+    )
+    .unwrap();
+    std::fs::write(
+        second_plugin_dir.join("plugin.toml"),
+        r#"
+[plugin]
+name = "second-plugin"
+host_api_version = "0.8.0"
+capabilities = ["messaging"]
+message_types = [1001]
+hooks = ["on-player-join-zone"]
+"#,
+    )
+    .unwrap();
+
     config_dir
 }
 
@@ -701,6 +802,99 @@ async fn combat_item_use_npc_interact_and_death_respawn_hooks_fire_for_real() {
             }
             ServerMessage::Moved { .. } | ServerMessage::EntitySpawned { .. } => {}
             other => panic!("expected on-respawn's confirmation, got {other:?}"),
+        }
+    }
+}
+
+/// #152: real multi-plugin support — `test-plugin` and `second-plugin`,
+/// two distinct compiled `.wasm` fixtures, loaded into the same `server`
+/// process at once via `WZ_PLUGINS_DIR`'s directory discovery. Proves:
+/// (1) a shared lifecycle hook (`on-player-join-zone`) fans out to both,
+/// independently — the host never picks a winner; (2) each plugin's own
+/// declared `message_types` (1000 vs 1001) routes to that plugin alone,
+/// never both, despite neither collision-checking having any way to know
+/// that from message content; (3) `second-plugin`'s manifest declares
+/// only `hooks = ["on-player-join-zone"]` — it never declares
+/// `on-zone-loaded`, so no NPC of its own ever gets attributed to it
+/// (the wolf-pack NPC in the roster is `test-plugin`'s doing alone, same
+/// as every other single-plugin test in this file).
+#[tokio::test]
+#[ignore]
+async fn two_independent_plugins_fan_out_a_shared_hook_and_keep_message_types_separate() {
+    let config_dir = setup_multi_plugin_config_dir("multi-plugin");
+
+    let _server = start_server(&config_dir, MULTI_PLUGIN_ADDR);
+    wait_for_port(MULTI_PLUGIN_ADDR).await;
+
+    let mut stream = connect(&config_dir, MULTI_PLUGIN_ADDR).await;
+    register_and_authenticate(
+        &mut stream,
+        &format!("multi-plugin-{}", uuid::Uuid::now_v7()),
+        "hunter2",
+    )
+    .await;
+    let own_entity_id = loop {
+        if let ServerMessage::Joined { entity_id, .. } = recv_world(&mut stream).await {
+            break entity_id;
+        }
+    };
+
+    // Both plugins' own on-player-join-zone greeting should arrive,
+    // independently, in some order — collect until both are seen.
+    let (mut saw_test_plugin, mut saw_second_plugin) = (false, false);
+    while !(saw_test_plugin && saw_second_plugin) {
+        match recv_world(&mut stream).await {
+            ServerMessage::PluginMessage { body } => {
+                // Check the second-plugin greeting first: "second-plugin
+                // also welcomes ..." contains "welcome" as a substring
+                // ("welcomes"), so checking the test-plugin's plain
+                // "welcome, ..." pattern first would swallow both
+                // messages into `saw_test_plugin` and this loop would
+                // wait forever for a `saw_second_plugin` that already
+                // arrived.
+                if body.contains("second-plugin also welcomes") && body.contains(&own_entity_id) {
+                    saw_second_plugin = true;
+                } else if body.contains("welcome") && body.contains(&own_entity_id) {
+                    saw_test_plugin = true;
+                } else {
+                    panic!("unexpected plugin message: {body}");
+                }
+            }
+            ServerMessage::Moved { .. } | ServerMessage::EntitySpawned { .. } => {}
+            other => panic!("expected a join greeting from one of the two plugins, got {other:?}"),
+        }
+    }
+
+    // message_type 1000 belongs to test-plugin alone.
+    stream
+        .send(gateway::Envelope::new(1000, b"hello".to_vec()))
+        .await
+        .unwrap();
+    loop {
+        match recv_world(&mut stream).await {
+            ServerMessage::PluginMessage { body } => {
+                assert!(body.contains("on-message 1000: hello"), "{body}");
+                assert!(!body.contains("second-plugin"), "{body}");
+                break;
+            }
+            ServerMessage::Moved { .. } | ServerMessage::EntitySpawned { .. } => {}
+            other => panic!("expected test-plugin's on-message reply, got {other:?}"),
+        }
+    }
+
+    // message_type 1001 belongs to second-plugin alone.
+    stream
+        .send(gateway::Envelope::new(1001, b"hi".to_vec()))
+        .await
+        .unwrap();
+    loop {
+        match recv_world(&mut stream).await {
+            ServerMessage::PluginMessage { body } => {
+                assert!(body.contains("second-plugin on-message 1001: hi"), "{body}");
+                break;
+            }
+            ServerMessage::Moved { .. } | ServerMessage::EntitySpawned { .. } => {}
+            other => panic!("expected second-plugin's on-message reply, got {other:?}"),
         }
     }
 }

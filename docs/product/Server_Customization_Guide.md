@@ -10,7 +10,7 @@ This is the guide for turning `make quickstart`'s default game into *your* game 
 
 A full reference table of everything in this guide is at the bottom if you just want to skim.
 
-**Checking your setup as you go.** `server` logs a real `INFO`-level line for the config that actually took effect, not just what you set: `worldzero server listening` (with the bound address, confirming [Step 4](#step-4--networking-gateway)'s `WZ_SERVER_ADDR`), plus `chat service enabled`/`disabled` and `metrics enabled`/`disabled` for [Step 6](#step-6--optional-services-chat-metrics)'s toggles. If metrics are on, `curl localhost:9090/metrics` (or wherever `WZ_METRICS_ADDR` points) is a quick liveness check. There's no equivalent startup log for a loaded stats schema or an attached plugin today — the first real signal for those is a client interaction actually working (a character loading with your declared stats, a plugin's `on-load` NPC appearing).
+**Checking your setup as you go.** `server` logs a real `INFO`-level line for the config that actually took effect, not just what you set: `worldzero server listening` (with the bound address, confirming [Step 4](#step-4--networking-gateway)'s `WZ_SERVER_ADDR`), plus `chat service enabled`/`disabled` and `metrics enabled`/`disabled` for [Step 6](#step-6--optional-services-chat-metrics)'s toggles. If metrics are on, `curl localhost:9090/metrics` (or wherever `WZ_METRICS_ADDR` points) is a quick liveness check. There's no equivalent startup log for a loaded stats schema today, but `server` does log `discovered plugin(s)` with a count at startup for plugins — beyond that, the first real signal is a client interaction actually working (a character loading with your declared stats, a plugin's `on-zone-loaded` NPC appearing).
 
 ---
 
@@ -135,23 +135,25 @@ A plugin is a `wasmtime`-sandboxed WASM component plus a manifest, [`config/plug
 ```toml
 [plugin]
 name = "example-plugin"
-host_api_version = "0.7.0"
+host_api_version = "0.8.0"
 capabilities = []
 message_types = []
 chat_commands = []
+hooks = []
 ```
 
 - `capabilities`: gates which host functions your plugin may call (`docs/specs/Plugin_API.md`'s "Capability gating") — `spawning` (`spawn-npc`), `movement` (`move-entity`), `combat` (`apply-stat-delta`/`report-death`/`report-respawn`), `economy` (`grant-item`/`remove-item`/`modify-currency`), `messaging` (`send-message`). **The default is strict**: an empty list grants none of these — `caller-role`/`plugin-state-get`/`plugin-state-set` are the only host functions always available regardless of what's declared. List only what your plugin actually needs; this is the real mechanism for running a less-trusted, third-party-authored plugin alongside your own trusted one.
-- `message_types`: which gateway-routed message type IDs get delivered to your plugin's `on-message` hook. **Must each be ≥ 1000** — 0–999 is core-reserved (see [`docs/specs/Networking_Spec.md`](../specs/Networking_Spec.md)'s message catalog).
-- `chat_commands`: command names (no leading `/`) routed to `on-chat-command` instead of published as ordinary chat.
+- `message_types`: which gateway-routed message type IDs get delivered to your plugin's `on-message` hook. **Must each be ≥ 1000** — 0–999 is core-reserved (see [`docs/specs/Networking_Spec.md`](../specs/Networking_Spec.md)'s message catalog). Checked for collisions across every loaded plugin, not just within your own manifest (#152).
+- `chat_commands`: command names (no leading `/`) routed to `on-chat-command` instead of published as ordinary chat. Same cross-plugin collision check as `message_types`.
+- `hooks`: which of the other hooks (everything except `on-message`/`on-chat-command`, which route on the two fields above instead) you actually want the host to call — `[]` by default, meaning none (#152). See [`docs/specs/Plugin_API.md`](../specs/Plugin_API.md#pluginhooks-func-hooks) for the full list.
 
 Wire it in:
 
 | Var | Purpose |
 |---|---|
-| `WZ_PLUGIN_MANIFEST_PATH` + `WZ_PLUGIN_WASM_PATH` | Both required together. Today attaches to only the *first* zone loaded — real per-zone plugin instantiation is a known gap, not yet built (see `server::zone_registry`'s own doc comment). |
+| `WZ_PLUGINS_DIR` | Default `<config_dir>/plugins`. Every `<name>/{plugin.toml,*.wasm}` subdirectory found there is auto-discovered and loaded at startup — more than one plugin loads just by having more than one subdirectory (#152). A plugin loads exactly once for the whole process, not once per zone; every zone-specific hook takes a `zone-id` argument instead of the plugin being attached to one zone. |
 
-`on-load`, `on-message`, `on-interact`, `on-chat-command`, `on-player-join-zone`/`on-player-leave-zone`, `on-npc-tick`, `on-item-acquire`, and (as of #154) `on-damage-calc`/`on-item-use`/`on-npc-interact`/`on-death`/`on-respawn` are all live today — only the zone-wide `on-tick` hook still has no real call site, see [`docs/specs/Plugin_API.md`](../specs/Plugin_API.md)'s "Beyond this v0 slice." [`examples/example-plugin`](../../examples/example-plugin) is a real, minimal, copyable starting point — start there, not from scratch.
+`on-zone-loaded`, `on-message`, `on-interact`, `on-chat-command`, `on-player-join-zone`/`on-player-leave-zone`, `on-npc-tick`, `on-item-acquire`, and (as of #154) `on-damage-calc`/`on-item-use`/`on-npc-interact`/`on-death`/`on-respawn` are all live today — only the zone-wide `on-tick` hook still has no real call site, see [`docs/specs/Plugin_API.md`](../specs/Plugin_API.md)'s "Beyond this v0 slice." [`examples/example-plugin`](../../examples/example-plugin) is a real, minimal, copyable starting point — start there, not from scratch.
 
 **Persistent plugin state (`plugin-state-get`/`plugin-state-set`, #149).** Quest flags, NPC memory, per-guild economy counters — anything your plugin needs to remember belongs here, not in a stat (Step 1 is for character stats the core validates against a schema; this is an opaque blob entirely yours). No config of its own — it's two host functions your plugin calls directly, scoped by a `plugin-state-scope` variant:
 
@@ -217,9 +219,9 @@ make realm ARGS="assign-zone <realm-id> greenwood-forest"
 | `world` | `WZ_WORLD_TICK_RATE_HZ`, `WZ_WORLD_GRID_CELL_SIZE_METERS`, `WZ_WORLD_MAX_SPEED_MPS` | — | `WorldConfig` |
 | `auth` | (shared Postgres/Redis only) | — | `UsernamePasswordProvider`, `AccountStore`/`AccountRoleStore` |
 | `gateway` | `WZ_TLS_CERT_PATH`, `WZ_TLS_KEY_PATH` | — | `CertMaterial` |
-| `plugin-host` | `WZ_PLUGIN_MANIFEST_PATH`, `WZ_PLUGIN_WASM_PATH` | `plugin.toml` | `PluginManifest` |
+| `plugin-host` | — | `plugin.toml` | `PluginManifest` |
 | `chat` | (toggle lives in `common`) | — | `ChannelStore`, `ChatBus` |
-| `server` | `WZ_SERVER_ADDR`, `WZ_METRICS_ADDR`, `WZ_LAYER_ENABLED`, `WZ_LAYER_POPULATION_THRESHOLD` | — | — |
+| `server` | `WZ_SERVER_ADDR`, `WZ_METRICS_ADDR`, `WZ_LAYER_ENABLED`, `WZ_LAYER_POPULATION_THRESHOLD`, `WZ_PLUGINS_DIR` | — | — |
 | `realm-directory` | none (not wired into `server` yet) | — | `RealmStore`, `LoginPolicy`, `RealmPresence` |
 | `transfer` | none (not wired into `server` yet) | — | `TransferExecutor`, `TransferGateStore`, `TransferAuditLog` |
 

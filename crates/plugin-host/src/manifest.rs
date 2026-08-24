@@ -6,11 +6,14 @@
 //! `capabilities` (#153) is real enforcement now, not just a parsed
 //! field — see `KNOWN_CAPABILITIES` below for the defined set and
 //! `runtime::CapabilityGatedCallbacks` for how a declared capability
-//! actually gates the host functions it covers. Per-plugin optional
-//! hooks (the other half of the proposal's richer manifest story) are
-//! still not built — the fixed `plugin` WIT world (#38) has every plugin
-//! export all fifteen hooks unconditionally (a WIT world's exports
-//! aren't individually optional in v0).
+//! actually gates the host functions it covers. `hooks` (#152) is the
+//! multi-plugin story: a plugin is loaded exactly **once per process**
+//! now, not once per zone-service — the WIT world still exports every
+//! hook unconditionally (exports aren't individually optional in the
+//! Component Model), but `hooks` declares which of them the host should
+//! actually *call*, and every zone-specific hook now takes an explicit
+//! `zone-id` parameter (see `wit/plugin.wit`'s `hooks` interface doc
+//! comment) rather than a plugin being scoped to a zone at all.
 
 use std::path::Path;
 
@@ -21,7 +24,7 @@ use serde::Deserialize;
 /// (`wit/plugin.wit`) — a plugin manifest declaring a different
 /// `host_api_version` is refused at load time rather than instantiated
 /// against an interface it didn't actually target.
-pub const HOST_API_VERSION: &str = "0.7.0";
+pub const HOST_API_VERSION: &str = "0.8.0";
 
 /// `message_type` values below this are core-reserved (auth, chat, world
 /// — see docs/specs/Networking_Spec.md's catalog); a plugin declaring one
@@ -59,6 +62,32 @@ pub const KNOWN_CAPABILITIES: &[&str] = &[
     CAPABILITY_MESSAGING,
 ];
 
+/// Every hook name `wit/plugin.wit`'s `hooks` interface exports, kebab-case
+/// exactly as the WIT source spells them — the only valid values for a
+/// manifest's `hooks` list (#152). Kept as a plain list here (not derived
+/// from the generated bindings) since `plugin-host`'s own crate doesn't
+/// depend on a compiled component at build time; if this ever drifts from
+/// `wit/plugin.wit`, `PluginHost::load`'s own compatibility check catches
+/// the more serious case (a genuinely stale `host_api_version`) first.
+pub const KNOWN_HOOKS: &[&str] = &[
+    "on-load",
+    "on-unload",
+    "on-zone-loaded",
+    "on-entity-spawn",
+    "on-player-join-zone",
+    "on-player-leave-zone",
+    "on-interact",
+    "on-message",
+    "on-damage-calc",
+    "on-death",
+    "on-respawn",
+    "on-npc-tick",
+    "on-npc-interact",
+    "on-chat-command",
+    "on-item-acquire",
+    "on-item-use",
+];
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct PluginManifest {
     pub plugin: PluginDeclaration,
@@ -82,10 +111,9 @@ pub struct PluginDeclaration {
     /// `message_type` values (docs/specs/Networking_Spec.md) this plugin
     /// wants gateway-routed messages for, delivered via the `on-message`
     /// hook. Each must be `>= PLUGIN_MESSAGE_TYPE_FLOOR` and appear at
-    /// most once — checked by `check_message_types` (#95). Cross-plugin
-    /// collision checking doesn't exist yet: the server only ever loads
-    /// one plugin today, so there's no second declared set to check
-    /// against (docs/specs/Networking_Spec.md notes this as deferred).
+    /// most once within this manifest — checked by `check_message_types`
+    /// (#95); checked against every *other* loaded plugin's own
+    /// `message_types` by `check_no_collisions` below (#152).
     #[serde(default)]
     pub message_types: Vec<u16>,
     /// Chat command names (without the leading `/`) this plugin wants
@@ -96,6 +124,22 @@ pub struct PluginDeclaration {
     /// `message_types`.
     #[serde(default)]
     pub chat_commands: Vec<String>,
+    /// Which hooks (`KNOWN_HOOKS` above) the host should actually call
+    /// for this plugin (#152) — `server`'s dispatch skips any hook not
+    /// listed here, so a plugin that only cares about a few hooks
+    /// doesn't get invoked (and doesn't need to react meaningfully) for
+    /// the rest, even though the WIT world still requires it export
+    /// every one of them. `on-message`/`on-chat-command` are the one
+    /// exception: declaring `message_types`/`chat_commands` already
+    /// states the plugin's interest, so those two route on that basis
+    /// alone and don't also need to appear here. There is deliberately no
+    /// zone-scoping field: a plugin loads once, process-wide, and every
+    /// zone-specific hook takes an explicit `zone-id` parameter — a
+    /// plugin that only cares about certain zones checks it itself
+    /// inside the hook body (`wit/plugin.wit`'s `hooks` interface doc
+    /// comment).
+    #[serde(default)]
+    pub hooks: Vec<String>,
 }
 
 impl PluginManifest {
@@ -132,7 +176,35 @@ impl PluginManifest {
         }
         self.check_message_types()?;
         self.check_chat_commands()?;
-        self.check_capabilities()
+        self.check_capabilities()?;
+        self.check_hooks()
+    }
+
+    /// Refuses a manifest declaring a hook name outside `KNOWN_HOOKS`, or
+    /// the same one twice — same discipline as `check_capabilities` (#152).
+    fn check_hooks(&self) -> Result<()> {
+        let mut seen = std::collections::HashSet::new();
+        for hook in &self.plugin.hooks {
+            if !KNOWN_HOOKS.contains(&hook.as_str()) {
+                return Err(Error::new(
+                    "plugin-host",
+                    format!(
+                        "plugin {:?} declares unknown hook {hook:?} — known hooks: {KNOWN_HOOKS:?}",
+                        self.plugin.name
+                    ),
+                ));
+            }
+            if !seen.insert(hook.as_str()) {
+                return Err(Error::new(
+                    "plugin-host",
+                    format!(
+                        "plugin {:?} declares hook {hook:?} more than once",
+                        self.plugin.name
+                    ),
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Refuses a manifest declaring a capability name outside
@@ -233,6 +305,46 @@ impl PluginManifest {
     }
 }
 
+/// Refuses a `message_type` or `chat_command` declared by more than one
+/// manifest in `manifests` — checked once, across every plugin discovered
+/// for a single `server` process, before any of them are ever instantiated
+/// (#152). Unlike a lifecycle hook (fan-out is fine — see
+/// `wit/plugin.wit`'s hooks doc comment), a `message_type` names one
+/// specific wire format to whatever client sent it, and a `chat_command`
+/// names one specific `/command`; two plugins both claiming the same one
+/// for *different* meanings is a genuine ambiguity the dev must resolve
+/// (rename/reassign one), never something the host silently picks a
+/// winner for.
+pub fn check_no_collisions(manifests: &[PluginManifest]) -> Result<()> {
+    let mut message_types: std::collections::HashMap<u16, &str> = std::collections::HashMap::new();
+    let mut chat_commands: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+
+    for manifest in manifests {
+        let name = manifest.plugin.name.as_str();
+        for message_type in &manifest.plugin.message_types {
+            if let Some(owner) = message_types.insert(*message_type, name) {
+                return Err(Error::new(
+                    "plugin-host",
+                    format!(
+                        "plugins {owner:?} and {name:?} both declare message_type {message_type} — rename/reassign one"
+                    ),
+                ));
+            }
+        }
+        for command in &manifest.plugin.chat_commands {
+            if let Some(owner) = chat_commands.insert(command.as_str(), name) {
+                return Err(Error::new(
+                    "plugin-host",
+                    format!(
+                        "plugins {owner:?} and {name:?} both declare chat_command {command:?} — rename/reassign one"
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,7 +385,7 @@ capabilities = ["economy", "combat"]
             r#"
 [plugin]
 name = "example-plugin"
-host_api_version = "0.7.0"
+host_api_version = "0.8.0"
 "#,
         )
         .unwrap();
@@ -300,7 +412,7 @@ host_api_version = "99.0.0"
             r#"
 [plugin]
 name = "example-plugin"
-host_api_version = "0.7.0"
+host_api_version = "0.8.0"
 message_types = [1000, 1001]
 "#,
         )
@@ -316,7 +428,7 @@ message_types = [1000, 1001]
             r#"
 [plugin]
 name = "example-plugin"
-host_api_version = "0.7.0"
+host_api_version = "0.8.0"
 message_types = [200]
 "#,
         )
@@ -332,7 +444,7 @@ message_types = [200]
             r#"
 [plugin]
 name = "example-plugin"
-host_api_version = "0.7.0"
+host_api_version = "0.8.0"
 message_types = [1000, 1000]
 "#,
         )
@@ -348,7 +460,7 @@ message_types = [1000, 1000]
             r#"
 [plugin]
 name = "example-plugin"
-host_api_version = "0.7.0"
+host_api_version = "0.8.0"
 chat_commands = ["roll", "whisper"]
 "#,
         )
@@ -364,7 +476,7 @@ chat_commands = ["roll", "whisper"]
             r#"
 [plugin]
 name = "example-plugin"
-host_api_version = "0.7.0"
+host_api_version = "0.8.0"
 chat_commands = [""]
 "#,
         )
@@ -380,7 +492,7 @@ chat_commands = [""]
             r#"
 [plugin]
 name = "example-plugin"
-host_api_version = "0.7.0"
+host_api_version = "0.8.0"
 chat_commands = ["/roll"]
 "#,
         )
@@ -396,7 +508,7 @@ chat_commands = ["/roll"]
             r#"
 [plugin]
 name = "example-plugin"
-host_api_version = "0.7.0"
+host_api_version = "0.8.0"
 chat_commands = ["roll", "roll"]
 "#,
         )
@@ -412,7 +524,7 @@ chat_commands = ["roll", "roll"]
             r#"
 [plugin]
 name = "example-plugin"
-host_api_version = "0.7.0"
+host_api_version = "0.8.0"
 capabilities = ["spawning", "movement", "combat", "economy"]
 "#,
         )
@@ -427,7 +539,7 @@ capabilities = ["spawning", "movement", "combat", "economy"]
             r#"
 [plugin]
 name = "example-plugin"
-host_api_version = "0.7.0"
+host_api_version = "0.8.0"
 capabilities = ["telekinesis"]
 "#,
         )
@@ -443,7 +555,7 @@ capabilities = ["telekinesis"]
             r#"
 [plugin]
 name = "example-plugin"
-host_api_version = "0.7.0"
+host_api_version = "0.8.0"
 capabilities = ["economy", "economy"]
 "#,
         )
@@ -459,12 +571,121 @@ capabilities = ["economy", "economy"]
             r#"
 [plugin]
 name = "example-plugin"
-host_api_version = "0.7.0"
+host_api_version = "0.8.0"
 "#,
         )
         .unwrap();
 
         assert!(manifest.plugin.capabilities.is_empty());
         assert!(manifest.check_compatible().is_ok());
+    }
+
+    #[test]
+    fn known_hooks_are_accepted() {
+        let manifest = PluginManifest::from_toml(
+            r#"
+[plugin]
+name = "example-plugin"
+host_api_version = "0.8.0"
+hooks = ["on-load", "on-chat-command"]
+"#,
+        )
+        .unwrap();
+
+        assert!(manifest.check_compatible().is_ok());
+    }
+
+    #[test]
+    fn an_unknown_hook_is_rejected() {
+        let manifest = PluginManifest::from_toml(
+            r#"
+[plugin]
+name = "example-plugin"
+host_api_version = "0.8.0"
+hooks = ["on-teleport"]
+"#,
+        )
+        .unwrap();
+
+        let err = manifest.check_compatible().unwrap_err();
+        assert!(err.to_string().contains("on-teleport"), "{err}");
+    }
+
+    #[test]
+    fn a_duplicate_hook_is_rejected() {
+        let manifest = PluginManifest::from_toml(
+            r#"
+[plugin]
+name = "example-plugin"
+host_api_version = "0.8.0"
+hooks = ["on-load", "on-load"]
+"#,
+        )
+        .unwrap();
+
+        let err = manifest.check_compatible().unwrap_err();
+        assert!(err.to_string().contains("on-load"), "{err}");
+    }
+
+    #[test]
+    fn no_declared_hooks_is_the_default() {
+        let manifest = PluginManifest::from_toml(
+            r#"
+[plugin]
+name = "example-plugin"
+host_api_version = "0.8.0"
+"#,
+        )
+        .unwrap();
+
+        assert!(manifest.plugin.hooks.is_empty());
+    }
+
+    fn manifest_named(name: &str, message_types: &[u16], chat_commands: &[&str]) -> PluginManifest {
+        let message_types = message_types
+            .iter()
+            .map(|m| m.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let chat_commands = chat_commands
+            .iter()
+            .map(|c| format!("{c:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        PluginManifest::from_toml(&format!(
+            r#"
+[plugin]
+name = {name:?}
+host_api_version = "0.8.0"
+message_types = [{message_types}]
+chat_commands = [{chat_commands}]
+"#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn no_collisions_across_distinct_manifests_is_fine() {
+        let a = manifest_named("plugin-a", &[1000], &["roll"]);
+        let b = manifest_named("plugin-b", &[1001], &["give"]);
+        assert!(check_no_collisions(&[a, b]).is_ok());
+    }
+
+    #[test]
+    fn a_shared_message_type_is_a_collision() {
+        let a = manifest_named("plugin-a", &[1000], &[]);
+        let b = manifest_named("plugin-b", &[1000], &[]);
+        let err = check_no_collisions(&[a, b]).unwrap_err();
+        assert!(err.to_string().contains("plugin-a"), "{err}");
+        assert!(err.to_string().contains("plugin-b"), "{err}");
+        assert!(err.to_string().contains("1000"), "{err}");
+    }
+
+    #[test]
+    fn a_shared_chat_command_is_a_collision() {
+        let a = manifest_named("plugin-a", &[], &["give"]);
+        let b = manifest_named("plugin-b", &[], &["give"]);
+        let err = check_no_collisions(&[a, b]).unwrap_err();
+        assert!(err.to_string().contains("give"), "{err}");
     }
 }

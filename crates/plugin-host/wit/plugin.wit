@@ -13,15 +13,21 @@
 // `report-respawn` host functions — the plugin-owned trigger for
 // `on-death`/`on-respawn` (core still has no notion of what "died"
 // means; a plugin reports it once it decides, and the host fires the
-// hook back) — see docs/specs/Plugin_API.md, "Beyond this v0 slice" for
-// what still isn't here — per-plugin optional hooks, gated capability
-// groups. A WIT "world" is the actual versioning mechanism
+// hook back). #153 adds real capability gating
+// (`plugin_host::manifest::KNOWN_CAPABILITIES`). #152 moves to **one
+// plugin instance per process** rather than one per zone-service — every
+// event hook that fires for something zone-specific now takes an
+// explicit `zone-id` parameter, and `on-zone-loaded(zone-id)` replaces
+// the old "on-load fires once per zone" implicit scoping — see the
+// `hooks` interface's own doc comment below for the full reasoning. See
+// docs/specs/Plugin_API.md, "Beyond this v0 slice" for what still isn't
+// here. A WIT "world" is the actual versioning mechanism
 // (docs/PROPOSAL.md, "Interface Technology"): a breaking change bumps
 // the package version below and/or lands as a new world, rather than
 // silently changing what `plugin` means underneath existing compiled
 // plugins.
 
-package worldzero:plugin@0.7.0;
+package worldzero:plugin@0.8.0;
 
 /// What the host exposes for a plugin to call out to — nothing crosses
 /// this boundary that isn't listed here (docs/PROPOSAL.md, "Plugin
@@ -157,50 +163,70 @@ interface host {
 
 /// What the host calls into the plugin for — a plugin only receives the
 /// hooks it actually cares about; v0 doesn't yet have per-hook opt-out
-/// (docs/PROPOSAL.md's "Plugin Manifest & Capability Declaration" full
-/// story is deferred past this minimal slice), a plugin's `on-*` exports
-/// are simply not called if nothing in the zone ever triggers them.
+/// at the WIT level (docs/PROPOSAL.md's "Plugin Manifest & Capability
+/// Declaration" full story is deferred past this minimal slice) — a
+/// plugin's `hooks` declaration in `plugin.toml` is what actually gates
+/// whether the host calls it (#152), not this interface itself.
+///
+/// **One plugin instance, process-wide (#152).** A plugin is loaded
+/// exactly once per `server` process, not once per zone — `server` runs
+/// one zone-service task per zone, and every one of them dispatches into
+/// this same shared instance. `zone-id` is therefore an explicit
+/// parameter on every hook below that fires for a specific event, not
+/// something a plugin can infer from "which instance is this" (there's
+/// only one). A plugin that only cares about specific zones checks
+/// `zone-id` itself inside its own hook bodies — the host never filters
+/// events by zone on a plugin's behalf.
 interface hooks {
-    /// Called once when the plugin is instantiated for a zone-service.
+    /// Called once, at process startup, when the plugin is first loaded
+    /// — before any zone-service exists yet. For genuinely global setup
+    /// only (initializing the plugin's own bookkeeping); anything that
+    /// needs to act on a specific zone (e.g. spawning that zone's NPCs)
+    /// belongs in `on-zone-loaded` below, not here.
     on-load: func();
 
-    /// Called once before the plugin is torn down.
+    /// Called once before the plugin is torn down (process shutdown).
     on-unload: func();
 
+    /// Called once per zone-service, as that zone starts up — the
+    /// per-zone counterpart to `on-load` (#152). This is where a plugin
+    /// does zone-specific initialization (e.g. `spawn-npc` calls for
+    /// that zone's own spawn tables) using `zone-id` to decide what, if
+    /// anything, to do for this particular zone.
+    on-zone-loaded: func(zone-id: string);
+
     /// Fired after any entity (spawned by this plugin or otherwise)
-    /// enters the zone's simulation — `entity-type` matches
+    /// enters `zone-id`'s simulation — `entity-type` matches
     /// content::manifest::SpawnTable's `entity_type` field for NPCs
     /// (e.g. "npc.wolf"), or is empty for a player entity.
-    on-entity-spawn: func(entity-id: string, entity-type: string);
+    on-entity-spawn: func(zone-id: string, entity-id: string, entity-type: string);
 
-    /// Fired once a player's connection has fully joined a zone — after
-    /// roster delivery, so a `send-message` call made from inside this
-    /// hook reaches a client that's actually ready to receive it
+    /// Fired once a player's connection has fully joined `zone-id` —
+    /// after roster delivery, so a `send-message` call made from inside
+    /// this hook reaches a client that's actually ready to receive it
     /// (docs/PROPOSAL.md's "Player session" hook group,
-    /// `on_player_join_zone`). Fires for every zone a player is ever in,
-    /// regardless of which zone(s) the loaded plugin is itself attached
-    /// to (#45's single-plugin-single-zone scope doesn't restrict which
-    /// events reach it) — a zone-service with no plugin configured never
-    /// calls this at all, it isn't queued or lost.
-    on-player-join-zone: func(entity-id: string);
+    /// `on_player_join_zone`). Fires for every zone a player is ever in
+    /// — a plugin checks `zone-id` itself if it only cares about some.
+    on-player-join-zone: func(zone-id: string, entity-id: string);
 
-    /// Fired on a player's clean disconnect — the counterpart to
-    /// `on-player-join-zone` (`on_player_leave_zone`), same entity id.
-    on-player-leave-zone: func(entity-id: string);
+    /// Fired on a player's clean disconnect from `zone-id` — the
+    /// counterpart to `on-player-join-zone` (`on_player_leave_zone`),
+    /// same entity id.
+    on-player-leave-zone: func(zone-id: string, entity-id: string);
 
-    /// Fired when a player's entity enters a trigger volume whose
-    /// `event` (content::manifest::Trigger) names an interact-style
+    /// Fired when a player's entity enters a trigger volume in `zone-id`
+    /// whose `event` (content::manifest::Trigger) names an interact-style
     /// event — `trigger-id` matches the manifest's `triggers[].id`.
-    on-interact: func(trigger-id: string, actor-entity-id: string);
+    on-interact: func(zone-id: string, trigger-id: string, actor-entity-id: string);
 
     /// Fired when the gateway receives a message whose `message_type`
     /// (docs/specs/Networking_Spec.md, "Message framing") matches one of
     /// this plugin's declared `message_types` (`plugin.toml`) —
-    /// `sender-entity-id` is the connection's own entity (so the plugin
-    /// can `send-message` a reply back to it), `payload` is that
-    /// envelope's opaque, message_type-specific bytes, unparsed by the
-    /// host (#95).
-    on-message: func(message-type: u16, sender-entity-id: string, payload: list<u8>);
+    /// `zone-id` is the sending connection's current zone, `sender-entity-id`
+    /// is the connection's own entity (so the plugin can `send-message` a
+    /// reply back to it), `payload` is that envelope's opaque,
+    /// message_type-specific bytes, unparsed by the host (#95).
+    on-message: func(zone-id: string, message-type: u16, sender-entity-id: string, payload: list<u8>);
 
     /// Fired when something in the host wants a damage amount computed
     /// against `stat-key` (whatever stat the caller cares about — core
@@ -209,64 +235,58 @@ interface hooks {
     /// responsible for actually calling `apply-stat-delta` itself — this
     /// hook alone changes nothing (docs/PROPOSAL.md, "v0 Hooks": "plugin
     /// logic decides both, and explicitly drives the corresponding host
-    /// function... to make it happen"). No live host call site exists
-    /// yet — nothing in `world`/`gateway` currently has a concept of an
-    /// attack/damage-causing client action to call this from; see
-    /// docs/specs/Plugin_API.md.
-    on-damage-calc: func(attacker-entity-id: string, target-entity-id: string, stat-key: string, base-amount: s64);
+    /// function... to make it happen"). Live (#154): fires when a client
+    /// sends an `Attack` action; `zone-id` is where it happened.
+    on-damage-calc: func(zone-id: string, attacker-entity-id: string, target-entity-id: string, stat-key: string, base-amount: s64);
 
-    /// Fired once the host is told an entity has died (a plugin decides
-    /// what "died" means for its own game and reports it — see
-    /// `set_entity_state`-style future host function in
-    /// docs/PROPOSAL.md's "v0 Host Functions"; no such reporting host
-    /// function is built yet, so this hook has no live call site either,
-    /// same caveat as `on-damage-calc`).
-    on-death: func(entity-id: string);
+    /// Fired once a `report-death` request this plugin made is applied
+    /// (#154) — the plugin decided this entity died and reported it;
+    /// this is the host's confirmation callback. `zone-id` is the entity's
+    /// zone at the time.
+    on-death: func(zone-id: string, entity-id: string);
 
-    /// Fired the same way `on-death` is (or would be) — no live call
-    /// site yet, same caveat.
-    on-respawn: func(entity-id: string);
+    /// Fired the same way `on-death` is, for `report-respawn` (#154).
+    on-respawn: func(zone-id: string, entity-id: string);
 
-    /// Called once per simulation tick for an NPC entity whose spawn
-    /// table declared a `route_id` (content::manifest::Route) — gives
-    /// the plugin the NPC's current position and its full route
+    /// Called once per simulation tick, per zone, for an NPC entity whose
+    /// spawn table declared a `route_id` (content::manifest::Route) —
+    /// gives the plugin the NPC's current position and its full route
     /// (waypoints, whether it loops, its declared speed) so the plugin
     /// can decide the NPC's next position and drive it there via
     /// `move-entity`. The host never moves an NPC on its own
     /// (docs/PROPOSAL.md, "World Content": "the core provides the data
     /// structure and movement validation; behavior is a plugin
     /// concern").
-    on-npc-tick: func(entity-id: string, x: f64, y: f64, route-waypoints: list<tuple<f64, f64>>, route-loop: bool, route-speed: f64, dt: f64);
+    on-npc-tick: func(zone-id: string, entity-id: string, x: f64, y: f64, route-waypoints: list<tuple<f64, f64>>, route-loop: bool, route-speed: f64, dt: f64);
 
     /// Fired when a player interacts with an NPC entity specifically
     /// (as opposed to `on-interact`'s generic trigger-volume case) —
     /// `npc-entity-id` is the NPC, `actor-entity-id` is the interacting
-    /// player.
-    on-npc-interact: func(npc-entity-id: string, actor-entity-id: string);
+    /// player, both in `zone-id`.
+    on-npc-interact: func(zone-id: string, npc-entity-id: string, actor-entity-id: string);
 
     /// Fired for a chat message whose leading `/command` matches one of
     /// this plugin's declared `chat_commands` (`plugin.toml`) — `command`
     /// is the matched name without the leading slash, `args` is
-    /// everything after it verbatim (unparsed by the host), and
-    /// `sender-entity-id` is the sending connection's own entity (so the
-    /// plugin can `send-message` a reply). A matched command is consumed
-    /// — it is not also published to `chat` as an ordinary message.
-    on-chat-command: func(command: string, args: string, sender-entity-id: string);
+    /// everything after it verbatim (unparsed by the host), `zone-id` is
+    /// the sending connection's current zone, and `sender-entity-id` is
+    /// the sending connection's own entity (so the plugin can
+    /// `send-message` a reply). A matched command is consumed — it is not
+    /// also published to `chat` as an ordinary message.
+    on-chat-command: func(zone-id: string, command: string, args: string, sender-entity-id: string);
 
     /// Fired after a `grant-item` call this plugin made is actually
     /// applied (the drain succeeded) — `quantity` is the item type's new
     /// total, not the delta just granted. Live: `world::world_actor`
     /// calls this itself right after applying a queued grant, so unlike
     /// most of this interface's hooks, a plugin can treat this as
-    /// confirmation the grant went through.
-    on-item-acquire: func(entity-id: string, item-type: string, new-quantity: s64);
+    /// confirmation the grant went through. `zone-id` is the entity's
+    /// zone at the time.
+    on-item-acquire: func(zone-id: string, entity-id: string, item-type: string, new-quantity: s64);
 
-    /// No live host call site yet — no "use an item" client action
-    /// exists anywhere in `docs/specs/Networking_Spec.md`'s message
-    /// catalog. A plugin wanting to let a player use an item today has
-    /// to route it through its own declared `chat_commands` or
-    /// `message_types` and call `remove-item` itself.
-    on-item-use: func(entity-id: string, item-type: string);
+    /// Live (#154): fires when a client sends a `UseItem` action.
+    /// `zone-id` is where it happened.
+    on-item-use: func(zone-id: string, entity-id: string, item-type: string);
 }
 
 world plugin {

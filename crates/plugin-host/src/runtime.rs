@@ -492,6 +492,10 @@ pub struct LoadedPlugin {
 
 impl LoadedPlugin {
     #[tracing::instrument(skip_all)]
+    /// Called once, at process startup, for genuinely global setup only
+    /// (#152) — one plugin instance now serves every zone-service, so
+    /// there's no zone context here; see `on_zone_loaded` for per-zone
+    /// initialization.
     pub fn on_load(&mut self) -> Result<()> {
         self.bindings
             .worldzero_plugin_hooks()
@@ -506,19 +510,34 @@ impl LoadedPlugin {
             .map_err(|e| Error::new("plugin-host", format!("on_unload hook failed: {e:#}")))
     }
 
-    pub fn on_entity_spawn(&mut self, entity_id: &str, entity_type: &str) -> Result<()> {
+    /// Live: `server::main` calls this once per zone-service, as that
+    /// zone starts up (#152) — the per-zone counterpart to `on_load`,
+    /// e.g. for `spawn-npc` calls against that zone's own spawn tables.
+    pub fn on_zone_loaded(&mut self, zone_id: &str) -> Result<()> {
         self.bindings
             .worldzero_plugin_hooks()
-            .call_on_entity_spawn(&mut self.store, entity_id, entity_type)
+            .call_on_zone_loaded(&mut self.store, zone_id)
+            .map_err(|e| Error::new("plugin-host", format!("on_zone_loaded hook failed: {e:#}")))
+    }
+
+    pub fn on_entity_spawn(
+        &mut self,
+        zone_id: &str,
+        entity_id: &str,
+        entity_type: &str,
+    ) -> Result<()> {
+        self.bindings
+            .worldzero_plugin_hooks()
+            .call_on_entity_spawn(&mut self.store, zone_id, entity_id, entity_type)
             .map_err(|e| Error::new("plugin-host", format!("on_entity_spawn hook failed: {e:#}")))
     }
 
     /// Live: `server::session` calls this once a connection's character
-    /// is fully spawned into a zone, after roster delivery (#155).
-    pub fn on_player_join_zone(&mut self, entity_id: &str) -> Result<()> {
+    /// is fully spawned into `zone_id`, after roster delivery (#155).
+    pub fn on_player_join_zone(&mut self, zone_id: &str, entity_id: &str) -> Result<()> {
         self.bindings
             .worldzero_plugin_hooks()
-            .call_on_player_join_zone(&mut self.store, entity_id)
+            .call_on_player_join_zone(&mut self.store, zone_id, entity_id)
             .map_err(|e| {
                 Error::new(
                     "plugin-host",
@@ -528,11 +547,11 @@ impl LoadedPlugin {
     }
 
     /// Live: `server::session` calls this on a connection's clean
-    /// disconnect (#155).
-    pub fn on_player_leave_zone(&mut self, entity_id: &str) -> Result<()> {
+    /// disconnect from `zone_id` (#155).
+    pub fn on_player_leave_zone(&mut self, zone_id: &str, entity_id: &str) -> Result<()> {
         self.bindings
             .worldzero_plugin_hooks()
-            .call_on_player_leave_zone(&mut self.store, entity_id)
+            .call_on_player_leave_zone(&mut self.store, zone_id, entity_id)
             .map_err(|e| {
                 Error::new(
                     "plugin-host",
@@ -541,26 +560,38 @@ impl LoadedPlugin {
             })
     }
 
-    pub fn on_interact(&mut self, trigger_id: &str, actor_entity_id: &str) -> Result<()> {
+    pub fn on_interact(
+        &mut self,
+        zone_id: &str,
+        trigger_id: &str,
+        actor_entity_id: &str,
+    ) -> Result<()> {
         self.bindings
             .worldzero_plugin_hooks()
-            .call_on_interact(&mut self.store, trigger_id, actor_entity_id)
+            .call_on_interact(&mut self.store, zone_id, trigger_id, actor_entity_id)
             .map_err(|e| Error::new("plugin-host", format!("on_interact hook failed: {e:#}")))
     }
 
     /// Delivers a gateway-routed message whose `message_type` matched one
     /// of this plugin's declared `message_types` (#95) — the caller is
     /// responsible for that match; this always calls the hook.
-    #[tracing::instrument(skip(self, payload), fields(message_type, sender_entity_id))]
+    #[tracing::instrument(skip(self, payload), fields(zone_id, message_type, sender_entity_id))]
     pub fn on_message(
         &mut self,
+        zone_id: &str,
         message_type: u16,
         sender_entity_id: &str,
         payload: &[u8],
     ) -> Result<()> {
         self.bindings
             .worldzero_plugin_hooks()
-            .call_on_message(&mut self.store, message_type, sender_entity_id, payload)
+            .call_on_message(
+                &mut self.store,
+                zone_id,
+                message_type,
+                sender_entity_id,
+                payload,
+            )
             .map_err(|e| Error::new("plugin-host", format!("on_message hook failed: {e:#}")))
     }
 
@@ -569,8 +600,10 @@ impl LoadedPlugin {
     /// always `0` (the core never invents a damage number, see
     /// `wit/plugin.wit`'s doc comment); the plugin owns the whole
     /// mitigation formula and must call `apply_stat_delta` itself.
+    #[allow(clippy::too_many_arguments)]
     pub fn on_damage_calc(
         &mut self,
+        zone_id: &str,
         attacker_entity_id: &str,
         target_entity_id: &str,
         stat_key: &str,
@@ -580,6 +613,7 @@ impl LoadedPlugin {
             .worldzero_plugin_hooks()
             .call_on_damage_calc(
                 &mut self.store,
+                zone_id,
                 attacker_entity_id,
                 target_entity_id,
                 stat_key,
@@ -592,29 +626,30 @@ impl LoadedPlugin {
     /// `report-death` request (#154) — the plugin decided this entity
     /// died and reported it; this is the host's confirmation callback,
     /// not a request for the plugin to decide anything.
-    pub fn on_death(&mut self, entity_id: &str) -> Result<()> {
+    pub fn on_death(&mut self, zone_id: &str, entity_id: &str) -> Result<()> {
         self.bindings
             .worldzero_plugin_hooks()
-            .call_on_death(&mut self.store, entity_id)
+            .call_on_death(&mut self.store, zone_id, entity_id)
             .map_err(|e| Error::new("plugin-host", format!("on_death hook failed: {e:#}")))
     }
 
     /// Live, same shape as `on_death` — fired after a queued
     /// `report-respawn` request is applied (#154).
-    pub fn on_respawn(&mut self, entity_id: &str) -> Result<()> {
+    pub fn on_respawn(&mut self, zone_id: &str, entity_id: &str) -> Result<()> {
         self.bindings
             .worldzero_plugin_hooks()
-            .call_on_respawn(&mut self.store, entity_id)
+            .call_on_respawn(&mut self.store, zone_id, entity_id)
             .map_err(|e| Error::new("plugin-host", format!("on_respawn hook failed: {e:#}")))
     }
 
-    /// Called once per tick for an NPC entity whose spawn table declared
-    /// a route (`world::world_actor` drives this call site — the plugin
-    /// is expected to respond with `move-entity` calls, not have its NPC
-    /// moved for it).
+    /// Called once per tick, per zone, for an NPC entity whose spawn
+    /// table declared a route (`world::world_actor` drives this call
+    /// site — the plugin is expected to respond with `move-entity`
+    /// calls, not have its NPC moved for it).
     #[allow(clippy::too_many_arguments)]
     pub fn on_npc_tick(
         &mut self,
+        zone_id: &str,
         entity_id: &str,
         x: f64,
         y: f64,
@@ -627,6 +662,7 @@ impl LoadedPlugin {
             .worldzero_plugin_hooks()
             .call_on_npc_tick(
                 &mut self.store,
+                zone_id,
                 entity_id,
                 x,
                 y,
@@ -641,10 +677,15 @@ impl LoadedPlugin {
     /// Live: `server::world_actor` calls this when a client's
     /// `InteractNpc` action names a currently-spawned NPC entity (#154) —
     /// distinct from the generic trigger-volume `on_interact` above.
-    pub fn on_npc_interact(&mut self, npc_entity_id: &str, actor_entity_id: &str) -> Result<()> {
+    pub fn on_npc_interact(
+        &mut self,
+        zone_id: &str,
+        npc_entity_id: &str,
+        actor_entity_id: &str,
+    ) -> Result<()> {
         self.bindings
             .worldzero_plugin_hooks()
-            .call_on_npc_interact(&mut self.store, npc_entity_id, actor_entity_id)
+            .call_on_npc_interact(&mut self.store, zone_id, npc_entity_id, actor_entity_id)
             .map_err(|e| Error::new("plugin-host", format!("on_npc_interact hook failed: {e:#}")))
     }
 
@@ -654,13 +695,14 @@ impl LoadedPlugin {
     /// `on_message`.
     pub fn on_chat_command(
         &mut self,
+        zone_id: &str,
         command: &str,
         args: &str,
         sender_entity_id: &str,
     ) -> Result<()> {
         self.bindings
             .worldzero_plugin_hooks()
-            .call_on_chat_command(&mut self.store, command, args, sender_entity_id)
+            .call_on_chat_command(&mut self.store, zone_id, command, args, sender_entity_id)
             .map_err(|e| Error::new("plugin-host", format!("on_chat_command hook failed: {e:#}")))
     }
 
@@ -670,13 +712,14 @@ impl LoadedPlugin {
     /// the item type's new total, not the delta just granted.
     pub fn on_item_acquire(
         &mut self,
+        zone_id: &str,
         entity_id: &str,
         item_type: &str,
         new_quantity: i64,
     ) -> Result<()> {
         self.bindings
             .worldzero_plugin_hooks()
-            .call_on_item_acquire(&mut self.store, entity_id, item_type, new_quantity)
+            .call_on_item_acquire(&mut self.store, zone_id, entity_id, item_type, new_quantity)
             .map_err(|e| Error::new("plugin-host", format!("on_item_acquire hook failed: {e:#}")))
     }
 
@@ -684,10 +727,10 @@ impl LoadedPlugin {
     /// `UseItem` action (#154) — the core never validates ownership
     /// itself; the plugin decides what using `item_type` does and is
     /// expected to call `remove-item` if that's the right response.
-    pub fn on_item_use(&mut self, entity_id: &str, item_type: &str) -> Result<()> {
+    pub fn on_item_use(&mut self, zone_id: &str, entity_id: &str, item_type: &str) -> Result<()> {
         self.bindings
             .worldzero_plugin_hooks()
-            .call_on_item_use(&mut self.store, entity_id, item_type)
+            .call_on_item_use(&mut self.store, zone_id, entity_id, item_type)
             .map_err(|e| Error::new("plugin-host", format!("on_item_use hook failed: {e:#}")))
     }
 }
