@@ -159,7 +159,7 @@ mod tests {
     #[ignore]
     async fn migrate_up_is_idempotent_against_the_real_migrations() {
         let config = {
-            let _guard = crate::test_env_lock::LOCK.lock().unwrap();
+            let _guard = crate::test_env_lock::acquire();
             PostgresConfig::from_env().expect("WZ_POSTGRES_* env vars set")
         };
         let pool = postgres_pool(&config, PoolOptions::default())

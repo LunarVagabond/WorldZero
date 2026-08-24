@@ -153,19 +153,32 @@ fn required_port_env(var: &'static str) -> Result<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_env_lock::LOCK as ENV_LOCK;
 
     // std::env is process-global; serialize these tests (and every other
     // test in this crate reading the same WZ_POSTGRES_*/WZ_REDIS_* vars —
-    // see `test_env_lock`'s doc comment) so they don't race.
+    // see `test_env_lock`'s doc comment) so they don't race. Restores each
+    // var's *original* value afterward (CI sets real WZ_POSTGRES_HOST/etc.
+    // for pool.rs's/migrate.rs's tests to read) rather than just clearing
+    // it again — clearing-and-leaving-cleared used to be enough since
+    // nothing else in this process needed these vars afterward, but that
+    // stopped being true once pool.rs's/migrate.rs's real-connection tests
+    // started running in the same process (previously `#[ignore]`d, so
+    // this never actually mattered before).
     fn with_clean_env(vars: &[&str], f: impl FnOnce()) {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = crate::test_env_lock::acquire();
+        let originals: Vec<(&str, Option<String>)> = vars
+            .iter()
+            .map(|&var| (var, std::env::var(var).ok()))
+            .collect();
         for var in vars {
             unsafe { std::env::remove_var(var) };
         }
         f();
-        for var in vars {
-            unsafe { std::env::remove_var(var) };
+        for (var, original) in originals {
+            match original {
+                Some(value) => unsafe { std::env::set_var(var, value) },
+                None => unsafe { std::env::remove_var(var) },
+            }
         }
     }
 

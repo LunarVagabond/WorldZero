@@ -39,6 +39,18 @@ pub use error::{Error, Result, ResultExt};
 /// with `--include-ignored` (see the commit that added this).
 #[cfg(test)]
 pub(crate) mod test_env_lock {
-    use std::sync::Mutex;
-    pub static LOCK: Mutex<()> = Mutex::new(());
+    use std::sync::{Mutex, MutexGuard};
+
+    static LOCK: Mutex<()> = Mutex::new(());
+
+    /// Recovers from a poisoned lock rather than propagating the
+    /// poison — this lock only ever guards plain env var
+    /// reads/writes, no shared data an earlier panicking test could
+    /// have left inconsistent, so one test's unrelated assertion
+    /// failure (while it happened to hold this lock) shouldn't cascade
+    /// into spurious `PoisonError` failures in every other test that
+    /// also uses it.
+    pub fn acquire() -> MutexGuard<'static, ()> {
+        LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 }

@@ -114,7 +114,7 @@ mod tests {
     // `-- --include-ignored` (CI does this against its own Postgres/Redis
     // service containers; run locally with `cargo test -p common --
     // --ignored`). The `from_env()` call in each test is scoped inside its
-    // own block, guarded by `test_env_lock::LOCK` and dropped before the
+    // own block, guarded by `test_env_lock::acquire()` and dropped before the
     // first `.await` — see that lock's doc comment for why: `config`'s
     // tests transiently clear/reset these same process-global env vars,
     // and until this lock existed that could race these tests reading
@@ -125,7 +125,7 @@ mod tests {
     #[ignore]
     async fn postgres_pool_acquires_a_connection() {
         let config = {
-            let _guard = crate::test_env_lock::LOCK.lock().unwrap();
+            let _guard = crate::test_env_lock::acquire();
             PostgresConfig::from_env().expect("WZ_POSTGRES_* env vars set")
         };
         let pool = postgres_pool(&config, PoolOptions::default())
@@ -142,7 +142,7 @@ mod tests {
         use deadpool_redis::redis::AsyncCommands;
 
         let config = {
-            let _guard = crate::test_env_lock::LOCK.lock().unwrap();
+            let _guard = crate::test_env_lock::acquire();
             RedisConfig::from_env().expect("WZ_REDIS_* env vars set")
         };
         let pool = redis_pool(&config, PoolOptions::default()).unwrap();
