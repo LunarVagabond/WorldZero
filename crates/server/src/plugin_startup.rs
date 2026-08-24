@@ -7,12 +7,12 @@
 //! gateway-routed messages reaching the plugin via `on_message` need it
 //! kept alive past startup, not dropped immediately after `on_load`).
 //!
-//! Deliberately minimal beyond that: this v0 wiring calls `on_load` and
-//! wires `on_message` (#95) — still no `on_tick`, no `on_interact` (see
-//! docs/specs/Plugin_API.md, "Beyond this v0 slice"). Also wires
-//! `plugin-state-get`/`plugin-state-set` (#149,
+//! Also wires `plugin-state-get`/`plugin-state-set` (#149,
 //! `crate::plugin_state`'s module doc) — see `PluginCallbacks`'s own
-//! doc comment for the cache/queue split those two need.
+//! doc comment for the cache/queue split those two need — and
+//! `report-death`/`report-respawn` (#154), the plugin-owned trigger for
+//! `on-death`/`on-respawn`. Still no `on_tick` (see
+//! docs/specs/Plugin_API.md, "Beyond this v0 slice").
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -80,6 +80,13 @@ pub struct PluginCallbacks {
     /// call" reasoning as every other `pending_*` field above. `entity`
     /// scope writes never reach this queue — there's nothing to persist.
     pending_state_writes: PendingStateWrites,
+    /// Entity ids reported dead via `report-death`, drained and applied
+    /// (fires `on-death` back) by the caller — same "can't reach `&mut
+    /// Zone`/the DB from inside a sandboxed sync call" reasoning as
+    /// every other `pending_*` field above (#154).
+    pending_deaths: Arc<Mutex<Vec<String>>>,
+    /// Same shape as `pending_deaths`, for `report-respawn`/`on-respawn`.
+    pending_respawns: Arc<Mutex<Vec<String>>>,
 }
 
 impl HostCallbacks for PluginCallbacks {
@@ -220,6 +227,22 @@ impl HostCallbacks for PluginCallbacks {
         }
         Ok(())
     }
+
+    fn report_death(&mut self, entity_id: &str) -> std::result::Result<(), String> {
+        self.pending_deaths
+            .lock()
+            .unwrap()
+            .push(entity_id.to_string());
+        Ok(())
+    }
+
+    fn report_respawn(&mut self, entity_id: &str) -> std::result::Result<(), String> {
+        self.pending_respawns
+            .lock()
+            .unwrap()
+            .push(entity_id.to_string());
+        Ok(())
+    }
 }
 
 /// A plugin kept alive past startup: the live instance, which
@@ -242,6 +265,8 @@ pub struct PluginRuntime {
     pending_item_removals: Arc<Mutex<Vec<(String, String, i64)>>>,
     pending_currency_deltas: Arc<Mutex<Vec<(String, i64)>>>,
     pending_state_writes: PendingStateWrites,
+    pending_deaths: Arc<Mutex<Vec<String>>>,
+    pending_respawns: Arc<Mutex<Vec<String>>>,
 }
 
 impl PluginRuntime {
@@ -288,6 +313,17 @@ impl PluginRuntime {
     pub fn drain_pending_state_writes(&self) -> Vec<(PluginStateScope, String, Vec<u8>)> {
         std::mem::take(&mut self.pending_state_writes.lock().unwrap())
     }
+
+    /// Entity ids reported via `report-death` since the last drain, in
+    /// call order (#154).
+    pub fn drain_pending_deaths(&self) -> Vec<String> {
+        std::mem::take(&mut self.pending_deaths.lock().unwrap())
+    }
+
+    /// Same shape as `drain_pending_deaths`, for `report-respawn`.
+    pub fn drain_pending_respawns(&self) -> Vec<String> {
+        std::mem::take(&mut self.pending_respawns.lock().unwrap())
+    }
 }
 
 /// Loads the plugin at `wasm_path` (checked against `manifest_path`'s
@@ -315,6 +351,8 @@ pub fn load_and_run_on_load(
     let pending_item_removals = Arc::new(Mutex::new(Vec::new()));
     let pending_currency_deltas = Arc::new(Mutex::new(Vec::new()));
     let pending_state_writes = Arc::new(Mutex::new(Vec::new()));
+    let pending_deaths = Arc::new(Mutex::new(Vec::new()));
+    let pending_respawns = Arc::new(Mutex::new(Vec::new()));
     let callbacks = PluginCallbacks {
         pending_spawns: pending_spawns.clone(),
         pending_stat_deltas: pending_stat_deltas.clone(),
@@ -326,6 +364,8 @@ pub fn load_and_run_on_load(
         sessions,
         plugin_state_cache,
         pending_state_writes: pending_state_writes.clone(),
+        pending_deaths: pending_deaths.clone(),
+        pending_respawns: pending_respawns.clone(),
     };
 
     let mut plugin = host.load(&manifest, wasm_path, Box::new(callbacks))?;
@@ -343,6 +383,8 @@ pub fn load_and_run_on_load(
         pending_item_removals,
         pending_currency_deltas,
         pending_state_writes,
+        pending_deaths,
+        pending_respawns,
     };
     Ok((runtime, on_load_spawns))
 }

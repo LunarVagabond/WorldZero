@@ -93,6 +93,19 @@ impl Guest for Plugin {
             );
             return;
         }
+        // Exercises report-death/report-respawn (#154) end to end: the
+        // plugin decides "died"/"respawned" for its own reasons (here,
+        // just because the client asked) and reports it; the resulting
+        // on-death/on-respawn call back is what actually confirms to the
+        // client it happened.
+        if body == "die" {
+            let _ = worldzero::plugin::host::report_death(&sender_entity_id);
+            return;
+        }
+        if body == "respawn" {
+            let _ = worldzero::plugin::host::report_respawn(&sender_entity_id);
+            return;
+        }
         let _ = worldzero::plugin::host::send_message(
             &sender_entity_id,
             &format!("on-message {message_type}: {body}"),
@@ -100,17 +113,29 @@ impl Guest for Plugin {
     }
 
     fn on_damage_calc(
-        _attacker_entity_id: String,
+        attacker_entity_id: String,
         target_entity_id: String,
         stat_key: String,
         base_amount: i64,
     ) {
-        let _ = worldzero::plugin::host::apply_stat_delta(&target_entity_id, &stat_key, -base_amount);
+        // The core never invents `base_amount` (#154, always 0) — a real
+        // plugin would compute its own damage here (weapon data, roll,
+        // whatever); this fixture just applies a fixed 3-point hit so the
+        // effect is observable, and confirms to the attacker it landed.
+        let _ = worldzero::plugin::host::apply_stat_delta(&target_entity_id, &stat_key, -3);
+        let _ = worldzero::plugin::host::send_message(
+            &attacker_entity_id,
+            &format!("hit {target_entity_id} for 3 {stat_key} (base_amount was {base_amount})"),
+        );
     }
 
-    fn on_death(_entity_id: String) {}
+    fn on_death(entity_id: String) {
+        let _ = worldzero::plugin::host::send_message(&entity_id, "you died");
+    }
 
-    fn on_respawn(_entity_id: String) {}
+    fn on_respawn(entity_id: String) {
+        let _ = worldzero::plugin::host::send_message(&entity_id, "you respawned");
+    }
 
     fn on_npc_tick(
         entity_id: String,
@@ -194,6 +219,10 @@ impl Guest for Plugin {
     fn on_item_use(entity_id: String, item_type: String) {
         let _ = worldzero::plugin::host::remove_item(&entity_id, &item_type, 1);
         let _ = worldzero::plugin::host::modify_currency(&entity_id, 5);
+        let _ = worldzero::plugin::host::send_message(
+            &entity_id,
+            &format!("used {item_type}"),
+        );
     }
 }
 

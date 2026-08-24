@@ -123,6 +123,16 @@ impl Zone {
         self.index.position_of(entity)
     }
 
+    /// `None` if `entity` isn't currently spawned in this zone — the
+    /// server-authoritative check behind an attack/NPC-interact client
+    /// action targeting another entity by id (#154): the client names a
+    /// target, the server confirms it's real and (for NPC-interact) an
+    /// actual NPC before ever calling a plugin hook, same discipline
+    /// `request_move` already applies to a client-claimed position.
+    pub fn kind_of(&self, entity: EntityId) -> Option<EntityKind> {
+        self.entities.get(&entity).copied()
+    }
+
     /// Every currently-spawned entity, its kind, and its position — the
     /// "here's who's already here" roster a newly-joining client needs
     /// (a pre-spawned NPC otherwise has no way to become visible to a
@@ -349,6 +359,23 @@ routes:
         zone.spawn_npc_with_route(entity, (10.0, 10.0), "does-not-exist");
 
         assert!(zone.npcs_with_routes().is_empty());
+    }
+
+    #[test]
+    fn kind_of_is_none_for_an_entity_that_was_never_spawned() {
+        let zone = zone_with_a_route();
+        assert_eq!(zone.kind_of(EntityId::new()), None);
+    }
+
+    #[test]
+    fn kind_of_reflects_a_spawned_entitys_kind_and_forgets_it_on_despawn() {
+        let mut zone = zone_with_a_route();
+        let entity = EntityId::new();
+        zone.spawn(entity, EntityKind::Player, (0.0, 0.0));
+        assert_eq!(zone.kind_of(entity), Some(EntityKind::Player));
+
+        zone.despawn(entity);
+        assert_eq!(zone.kind_of(entity), None);
     }
 
     #[test]

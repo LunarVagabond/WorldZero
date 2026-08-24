@@ -29,7 +29,7 @@ fn manifest() -> PluginManifest {
         r#"
 [plugin]
 name = "test-plugin"
-host_api_version = "0.6.0"
+host_api_version = "0.7.0"
 message_types = [1000]
 "#,
     )
@@ -47,6 +47,8 @@ struct RecordingCallbacks {
     currency_deltas: Arc<Mutex<Vec<(String, i64)>>>,
     roles: Arc<Mutex<HashMap<String, Vec<String>>>>,
     state: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    deaths: Arc<Mutex<Vec<String>>>,
+    respawns: Arc<Mutex<Vec<String>>>,
 }
 
 /// A plain string discriminating [`PluginStateScope`] variants for this
@@ -170,6 +172,16 @@ impl HostCallbacks for RecordingCallbacks {
             .insert(state_cache_key(&scope, key), value);
         Ok(())
     }
+
+    fn report_death(&mut self, entity_id: &str) -> Result<(), String> {
+        self.deaths.lock().unwrap().push(entity_id.to_string());
+        Ok(())
+    }
+
+    fn report_respawn(&mut self, entity_id: &str) -> Result<(), String> {
+        self.respawns.lock().unwrap().push(entity_id.to_string());
+        Ok(())
+    }
 }
 
 #[test]
@@ -225,7 +237,7 @@ fn a_plugin_computes_damage_ticks_a_route_and_handles_a_chat_command() {
         .expect("on_damage_calc should succeed");
     assert_eq!(
         callbacks.stat_deltas.lock().unwrap().as_slice(),
-        [("target-1".to_string(), "hp".to_string(), -12)]
+        [("target-1".to_string(), "hp".to_string(), -3)]
     );
 
     plugin
@@ -248,10 +260,11 @@ fn a_plugin_computes_damage_ticks_a_route_and_handles_a_chat_command() {
         .on_chat_command("roll", "2d6", "actor-1")
         .expect("on_chat_command should succeed");
     let messages = callbacks.messages.lock().unwrap();
-    assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0].0, "actor-1");
-    assert!(messages[0].1.contains("roll"));
-    assert!(messages[0].1.contains("2d6"));
+    // messages[0] is on_damage_calc's own confirmation to the attacker.
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[1].0, "actor-1");
+    assert!(messages[1].1.contains("roll"));
+    assert!(messages[1].1.contains("2d6"));
 }
 
 #[test]
@@ -284,6 +297,56 @@ fn a_plugin_grants_removes_items_and_modifies_currency() {
         callbacks.currency_deltas.lock().unwrap().as_slice(),
         [("actor-1".to_string(), 5)]
     );
+}
+
+#[test]
+#[ignore]
+fn a_plugin_handles_npc_interaction_and_reports_death_and_respawn() {
+    let wasm_path = fixture_dir().join("target/wasm32-wasip2/release/test_plugin.wasm");
+    let callbacks = RecordingCallbacks::default();
+
+    let host = PluginHost::new();
+    let mut plugin = host
+        .load(&manifest(), &wasm_path, Box::new(callbacks.clone()))
+        .expect("failed to load the well-behaved test plugin");
+
+    plugin
+        .on_npc_interact("npc-1", "actor-1")
+        .expect("on_npc_interact should succeed");
+    {
+        let messages = callbacks.messages.lock().unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].0, "actor-1");
+        assert!(messages[0].1.contains("npc-1"), "{:?}", messages[0]);
+    }
+
+    // #154: the plugin decides "died"/"respawned" (here, just because the
+    // client asked via on-message) and reports it — the resulting
+    // on-death/on-respawn call back is what actually confirms it.
+    plugin
+        .on_message(1000, "actor-1", b"die")
+        .expect("on_message should succeed");
+    assert_eq!(
+        callbacks.deaths.lock().unwrap().as_slice(),
+        ["actor-1".to_string()]
+    );
+
+    plugin.on_death("actor-1").expect("on_death should succeed");
+    plugin
+        .on_message(1000, "actor-1", b"respawn")
+        .expect("on_message should succeed");
+    assert_eq!(
+        callbacks.respawns.lock().unwrap().as_slice(),
+        ["actor-1".to_string()]
+    );
+    plugin
+        .on_respawn("actor-1")
+        .expect("on_respawn should succeed");
+
+    let messages = callbacks.messages.lock().unwrap();
+    assert_eq!(messages.len(), 3);
+    assert!(messages[1].1.contains("died"), "{:?}", messages[1]);
+    assert!(messages[2].1.contains("respawned"), "{:?}", messages[2]);
 }
 
 #[test]

@@ -135,7 +135,7 @@ A plugin is a `wasmtime`-sandboxed WASM component plus a manifest, [`config/plug
 ```toml
 [plugin]
 name = "example-plugin"
-host_api_version = "0.6.0"
+host_api_version = "0.7.0"
 capabilities = []
 message_types = []
 chat_commands = []

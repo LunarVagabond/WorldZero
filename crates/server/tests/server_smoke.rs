@@ -43,6 +43,7 @@ const ZONE_TRANSITION_ADDR: &str = "127.0.0.1:7913";
 const LAYER_ADDR: &str = "127.0.0.1:7918";
 const LAYER_DISABLED_ADDR: &str = "127.0.0.1:7919";
 const PLAYER_SESSION_ADDR: &str = "127.0.0.1:7920";
+const COMBAT_ADDR: &str = "127.0.0.1:7921";
 
 struct ServerProcess {
     child: Child,
@@ -275,7 +276,7 @@ fn setup_config_dir(test_name: &str) -> PathBuf {
         r#"
 [plugin]
 name = "test-plugin"
-host_api_version = "0.6.0"
+host_api_version = "0.7.0"
 message_types = [1000]
 "#,
     )
@@ -529,6 +530,176 @@ async fn player_join_and_leave_hooks_fire_for_real() {
             }
             ServerMessage::Moved { .. } => {}
             other => panic!("expected the last-left query reply, got {other:?}"),
+        }
+    }
+}
+
+/// #154: real client-protocol call sites for `on-damage-calc`,
+/// `on-item-use`, and `on-npc-interact` — each fires the fixture
+/// plugin's hook with real, server-validated data (an `Attack`/
+/// `InteractNpc` naming an entity id the client made up would be dropped
+/// before the hook is ever called, not passed through). Also covers
+/// `report-death`/`report-respawn` (the plugin-owned trigger for
+/// `on-death`/`on-respawn`) via the fixture's `die`/`respawn`
+/// `on-message` commands.
+#[tokio::test]
+#[ignore]
+async fn combat_item_use_npc_interact_and_death_respawn_hooks_fire_for_real() {
+    let config_dir = setup_config_dir("combat-hooks");
+
+    let _server = start_server(&config_dir, COMBAT_ADDR);
+    wait_for_port(COMBAT_ADDR).await;
+
+    let mut attacker = connect(&config_dir, COMBAT_ADDR).await;
+    register_and_authenticate(
+        &mut attacker,
+        &format!("attacker-{}", uuid::Uuid::now_v7()),
+        "hunter2",
+    )
+    .await;
+    let (_attacker_id, npc_id) = loop {
+        if let ServerMessage::Joined {
+            entity_id, roster, ..
+        } = recv_world(&mut attacker).await
+        {
+            let npc_id = roster
+                .iter()
+                .find(|entry| entry.entity_type == "npc")
+                .map(|entry| entry.entity_id.clone())
+                .expect("expected the plugin-spawned NPC in the join roster");
+            break (entity_id, npc_id);
+        }
+    };
+    // Drain this connection's own join greeting (#155).
+    loop {
+        match recv_world(&mut attacker).await {
+            ServerMessage::PluginMessage { .. } => break,
+            ServerMessage::Moved { .. } => {}
+            other => panic!("expected the join greeting, got {other:?}"),
+        }
+    }
+
+    let mut target = connect(&config_dir, COMBAT_ADDR).await;
+    register_and_authenticate(
+        &mut target,
+        &format!("target-{}", uuid::Uuid::now_v7()),
+        "hunter2",
+    )
+    .await;
+    let target_id = loop {
+        if let ServerMessage::Joined { entity_id, .. } = recv_world(&mut target).await {
+            break entity_id;
+        }
+    };
+    loop {
+        match recv_world(&mut target).await {
+            ServerMessage::PluginMessage { .. } => break,
+            ServerMessage::Moved { .. } => {}
+            other => panic!("expected the join greeting, got {other:?}"),
+        }
+    }
+    // The attacker also sees the target's own join broadcast — drain it.
+    loop {
+        match recv_world(&mut attacker).await {
+            ServerMessage::EntitySpawned { .. } => break,
+            ServerMessage::Moved { .. } => {}
+            other => panic!("expected the target's EntitySpawned, got {other:?}"),
+        }
+    }
+
+    // Attack: the server confirms target_id is real before ever calling
+    // on-damage-calc — the client only ever requests the attack, never
+    // reports a damage amount (#154).
+    send_world(
+        &mut attacker,
+        &ClientMessage::Attack {
+            target_entity_id: target_id.clone(),
+            stat_key: "hp".to_string(),
+        },
+    )
+    .await;
+    loop {
+        match recv_world(&mut attacker).await {
+            ServerMessage::PluginMessage { body } => {
+                assert!(body.contains(&target_id), "{body}");
+                assert!(body.contains("hp"), "{body}");
+                assert!(body.contains("base_amount was 0"), "{body}");
+                break;
+            }
+            ServerMessage::Moved { .. } | ServerMessage::EntitySpawned { .. } => {}
+            other => panic!("expected the on-damage-calc confirmation, got {other:?}"),
+        }
+    }
+
+    // InteractNpc: distinct from the generic trigger-volume on-interact.
+    send_world(
+        &mut attacker,
+        &ClientMessage::InteractNpc {
+            npc_entity_id: npc_id.clone(),
+        },
+    )
+    .await;
+    loop {
+        match recv_world(&mut attacker).await {
+            ServerMessage::PluginMessage { body } => {
+                assert!(body.contains(&npc_id), "{body}");
+                break;
+            }
+            ServerMessage::Moved { .. } | ServerMessage::EntitySpawned { .. } => {}
+            other => panic!("expected the on-npc-interact confirmation, got {other:?}"),
+        }
+    }
+
+    // UseItem: the core never validates ownership itself — the hook
+    // fires regardless, the plugin decides what happens.
+    send_world(
+        &mut attacker,
+        &ClientMessage::UseItem {
+            item_type: "torch".to_string(),
+        },
+    )
+    .await;
+    loop {
+        match recv_world(&mut attacker).await {
+            ServerMessage::PluginMessage { body } => {
+                assert!(body.contains("torch"), "{body}");
+                break;
+            }
+            ServerMessage::Moved { .. } | ServerMessage::EntitySpawned { .. } => {}
+            other => panic!("expected the on-item-use confirmation, got {other:?}"),
+        }
+    }
+
+    // report-death/report-respawn (#154): the plugin decides "died"/
+    // "respawned" and reports it; on-death/on-respawn firing back is
+    // what actually confirms it to the client.
+    attacker
+        .send(gateway::Envelope::new(1000, b"die".to_vec()))
+        .await
+        .unwrap();
+    loop {
+        match recv_world(&mut attacker).await {
+            ServerMessage::PluginMessage { body } => {
+                assert!(body.contains("you died"), "{body}");
+                break;
+            }
+            ServerMessage::Moved { .. } | ServerMessage::EntitySpawned { .. } => {}
+            other => panic!("expected on-death's confirmation, got {other:?}"),
+        }
+    }
+
+    attacker
+        .send(gateway::Envelope::new(1000, b"respawn".to_vec()))
+        .await
+        .unwrap();
+    loop {
+        match recv_world(&mut attacker).await {
+            ServerMessage::PluginMessage { body } => {
+                assert!(body.contains("you respawned"), "{body}");
+                break;
+            }
+            ServerMessage::Moved { .. } | ServerMessage::EntitySpawned { .. } => {}
+            other => panic!("expected on-respawn's confirmation, got {other:?}"),
         }
     }
 }

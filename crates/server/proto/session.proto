@@ -17,6 +17,9 @@ package worldzero.session;
 message ClientMessage {
   oneof kind {
     Move move = 1;
+    Attack attack = 2;
+    UseItem use_item = 3;
+    InteractNpc interact_npc = 4;
   }
 }
 
@@ -26,6 +29,34 @@ message ClientMessage {
 message Move {
   double x = 1;
   double y = 2;
+}
+
+// Requests attacking target_entity_id — the server confirms the target
+// actually exists in this zone before ever calling the configured
+// plugin's on-damage-calc hook; the client never reports a damage amount
+// or outcome, only the intent to attack (#154, docs/specs/Plugin_API.md).
+// stat_key is an opaque, game-defined string naming which declared stat
+// this attack is aimed at — same "core has no privileged notion of HP"
+// discipline as apply-stat-delta's own stat_key.
+message Attack {
+  string target_entity_id = 1;
+  string stat_key = 2;
+}
+
+// Requests using item_type from this connection's own inventory — an
+// opaque string, same discipline as grant-item/remove-item. The server
+// never validates ownership itself; the configured plugin's on-item-use
+// hook decides what using it does (#154).
+message UseItem {
+  string item_type = 1;
+}
+
+// Requests interacting with npc_entity_id specifically — distinct from a
+// generic trigger-volume interaction. The server confirms the target
+// actually is a currently-spawned NPC before ever calling the configured
+// plugin's on-npc-interact hook (#154).
+message InteractNpc {
+  string npc_entity_id = 1;
 }
 
 message RosterEntry {
