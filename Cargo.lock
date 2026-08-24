@@ -3203,6 +3203,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "service-registry"
+version = "0.1.0"
+dependencies = [
+ "common",
+ "deadpool-redis",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "time",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "sha1"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"

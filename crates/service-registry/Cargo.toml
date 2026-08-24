@@ -1,0 +1,19 @@
+[package]
+name = "service-registry"
+description = "Redis-backed self-registration for live service instances: register/heartbeat/deregister/query plus pub/sub change notifications. See decision #132 and implementation ticket #134."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+common = { version = "0.1.0", path = "../common" }
+deadpool-redis = { version = "0.23.0", features = ["rt_tokio_1"] }
+futures-util = "0.3.34"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+time = { version = "0.3.55", features = ["formatting", "parsing", "serde-well-known"] }
+uuid = { version = "1.25.0", features = ["v7", "serde"] }
+
+[dev-dependencies]
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "time"] }
