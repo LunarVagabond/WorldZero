@@ -3,7 +3,7 @@
 # or config/stats.schema.yaml). See docs/specs/Plugin_API.md.
 [plugin]
 name = "example-plugin"
-host_api_version = "0.5.0"
+host_api_version = "0.6.0"
 capabilities = []
 # 1000: echoed back by on-message below (docs/specs/Networking_Spec.md's
 # plugin-declared floor is >= 1000) — send this message_type over the

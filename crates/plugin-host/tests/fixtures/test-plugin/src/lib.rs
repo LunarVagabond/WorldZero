@@ -43,6 +43,28 @@ impl Guest for Plugin {
 
     fn on_entity_spawn(_entity_id: String, _entity_type: String) {}
 
+    fn on_player_join_zone(entity_id: String) {
+        let _ =
+            worldzero::plugin::host::send_message(&entity_id, &format!("welcome, {entity_id}"));
+    }
+
+    // Exercises a leave hook still being able to reach the departing
+    // entity's own character-backed storage (#155) — a plugin might want
+    // to record a farewell bonus, close out a timed buff, etc. Also
+    // records the departing entity id under zone-scope plugin state
+    // (#149) — the only way a black-box, network-only end-to-end test can
+    // observe this hook fired for real, since the departing connection
+    // itself is gone by the time it would receive any reply.
+    fn on_player_leave_zone(entity_id: String) {
+        let _ =
+            worldzero::plugin::host::apply_stat_delta(&entity_id, "reputation.ironclad_guild", 1);
+        let _ = worldzero::plugin::host::plugin_state_set(
+            &worldzero::plugin::host::PluginStateScope::Zone("test-zone".to_string()),
+            "last-left-entity",
+            entity_id.as_bytes(),
+        );
+    }
+
     fn on_interact(trigger_id: String, actor_entity_id: String) {
         let _ = worldzero::plugin::host::send_message(
             &actor_entity_id,
@@ -52,6 +74,25 @@ impl Guest for Plugin {
 
     fn on_message(message_type: u16, sender_entity_id: String, payload: Vec<u8>) {
         let body = String::from_utf8_lossy(&payload);
+        // Reads back what `on_player_leave_zone` recorded (#155) — the
+        // only way a black-box, network-only test can observe that hook
+        // fired, since the departing connection is already gone by the
+        // time it would receive a reply of its own.
+        if body == "last-left" {
+            let value = worldzero::plugin::host::plugin_state_get(
+                &worldzero::plugin::host::PluginStateScope::Zone("test-zone".to_string()),
+                "last-left-entity",
+            )
+            .ok()
+            .flatten()
+            .map(|bytes| String::from_utf8_lossy(&bytes).to_string())
+            .unwrap_or_else(|| "<nobody has left yet>".to_string());
+            let _ = worldzero::plugin::host::send_message(
+                &sender_entity_id,
+                &format!("last-left: {value}"),
+            );
+            return;
+        }
         let _ = worldzero::plugin::host::send_message(
             &sender_entity_id,
             &format!("on-message {message_type}: {body}"),

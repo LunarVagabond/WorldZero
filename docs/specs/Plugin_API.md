@@ -2,7 +2,7 @@
 
 Corresponds to [Plugin System](../PROPOSAL.md#plugin-system) in the proposal.
 
-**Status:** the v0 slice below is real and implemented (`plugin-host`, #37/#38, extended by #95, #116, #57, #124, and #149) — one WIT world with thirteen hooks and ten host functions: #38's original NPC-spawn-plus-interaction slice, #116's combat/NPC-patrol/chat-command hooks, #57's inventory/economy hooks and host functions (#112 supplied the core storage these write through), #124's `caller-role` (the account-roles decision, #114), and #149's `plugin-state-get`/`plugin-state-set` (the Plugin-Scoped Data Store). See "Beyond this v0 slice" below for what's still not here.
+**Status:** the v0 slice below is real and implemented (`plugin-host`, #37/#38, extended by #95, #116, #57, #124, #149, and #155) — one WIT world with fifteen hooks and ten host functions: #38's original NPC-spawn-plus-interaction slice, #116's combat/NPC-patrol/chat-command hooks, #57's inventory/economy hooks and host functions (#112 supplied the core storage these write through), #124's `caller-role` (the account-roles decision, #114), #149's `plugin-state-get`/`plugin-state-set` (the Plugin-Scoped Data Store), and #155's `on-player-join-zone`/`on-player-leave-zone`. See "Beyond this v0 slice" below for what's still not here.
 
 ## Interface technology
 
@@ -15,7 +15,7 @@ WASM Component Model + WIT (docs/PROPOSAL.md, "Interface Technology") — the ac
 ## The `plugin` world (v0)
 
 ```wit
-package worldzero:plugin@0.5.0;
+package worldzero:plugin@0.6.0;
 
 interface host {
     spawn-npc: func(spawn-table-id: string) -> result<string, string>;
@@ -32,6 +32,8 @@ interface hooks {
     on-load: func();
     on-unload: func();
     on-entity-spawn: func(entity-id: string, entity-type: string);
+    on-player-join-zone: func(entity-id: string);
+    on-player-leave-zone: func(entity-id: string);
     on-interact: func(trigger-id: string, actor-entity-id: string);
     on-message: func(message-type: u16, sender-entity-id: string, payload: list<u8>);
     on-damage-calc: func(attacker-entity-id: string, target-entity-id: string, stat-key: string, base-amount: s64);
@@ -51,7 +53,7 @@ world plugin {
 }
 ```
 
-`worldzero:plugin@0.5.0` is the actual versioning mechanism (docs/PROPOSAL.md, "Interface Technology": WIT "worlds" give real interface versioning). A breaking change to this interface bumps the package version and/or introduces a new world; a plugin manifest declares which `host_api_version` it targets (`plugin.toml` below), and `plugin-host` refuses to instantiate a plugin declaring a version it doesn't implement (`crates/plugin-host/src/manifest.rs::PluginManifest::check_compatible`) — it never silently links a plugin against an interface shape it wasn't built for. `0.2.0` added `on-message` (#95); `0.3.0` added the combat/NPC-patrol/chat-command hooks and `apply-stat-delta`/`move-entity` (#116); `0.4.0` added the inventory/economy hooks and host functions below (#57); `0.5.0` added `caller-role` (#124). A plugin declaring an older version is refused, not silently linked against the new shape.
+`worldzero:plugin@0.6.0` is the actual versioning mechanism (docs/PROPOSAL.md, "Interface Technology": WIT "worlds" give real interface versioning). A breaking change to this interface bumps the package version and/or introduces a new world; a plugin manifest declares which `host_api_version` it targets (`plugin.toml` below), and `plugin-host` refuses to instantiate a plugin declaring a version it doesn't implement (`crates/plugin-host/src/manifest.rs::PluginManifest::check_compatible`) — it never silently links a plugin against an interface shape it wasn't built for. `0.2.0` added `on-message` (#95); `0.3.0` added the combat/NPC-patrol/chat-command hooks and `apply-stat-delta`/`move-entity` (#116); `0.4.0` added the inventory/economy hooks and host functions below (#57); `0.5.0` added `caller-role` (#124); `0.6.0` added `on-player-join-zone`/`on-player-leave-zone` (#155). A plugin declaring an older version is refused, not silently linked against the new shape.
 
 ### Why `include wasi:cli/imports`
 
@@ -64,6 +66,8 @@ A `wasm32-wasip2` Rust binary needs baseline WASI Preview 2 imports (clocks, ran
 | `on-load` | `func()` | The plugin is instantiated for a zone-service. |
 | `on-unload` | `func()` | Before the plugin is torn down. |
 | `on-entity-spawn` | `func(entity-id, entity-type)` | Any entity enters the zone's simulation (`entity-type` matches `content::manifest::SpawnTable`'s `entity_type`, e.g. `"npc.wolf"`; empty for a player). |
+| `on-player-join-zone` | `func(entity-id)` | **Live (#155).** Fires once a player's connection has fully joined a zone — after roster delivery, so a `send-message` call made from inside this hook reaches a client that's actually ready. Fires for every zone a player is ever in, regardless of which zone(s) the loaded plugin is itself attached to; a zone-service with no plugin configured never calls this at all. |
+| `on-player-leave-zone` | `func(entity-id)` | **Live (#155).** Fires on a player's clean disconnect, same entity id. `server::session` awaits this hook (and any pending effects it triggers) actually running before it clears that entity from its own bookkeeping, so the plugin can still resolve the departing entity's character (e.g. to `apply-stat-delta`) from inside the handler. |
 | `on-interact` | `func(trigger-id, actor-entity-id)` | A player's entity enters a trigger volume whose manifest `event` is an interact-style event (`content::manifest::Trigger`). |
 | `on-message` | `func(message-type, sender-entity-id, payload)` | The gateway receives an envelope whose `message_type` matches one of this plugin's declared `message_types` (below) — `sender-entity-id` is the sending connection's own entity, `payload` is the envelope's opaque bytes (#95). |
 | `on-damage-calc` | `func(attacker-entity-id, target-entity-id, stat-key, base-amount)` | **No live host call site yet** — nothing in `world`/`gateway` has a concept of an attack/damage-causing client action to call this from. The plugin owns the whole mitigation formula and must call `apply-stat-delta` itself; this hook alone changes nothing (docs/PROPOSAL.md, "v0 Hooks"). |
@@ -75,7 +79,7 @@ A `wasm32-wasip2` Rust binary needs baseline WASI Preview 2 imports (clocks, ran
 | `on-item-acquire` | `func(entity-id, item-type, new-quantity)` | **Live.** Fires after a `grant-item` call this same plugin made is actually applied — `world::world_actor` calls this itself right after a queued grant lands, so (unlike most of this interface) a plugin can treat this as real confirmation, not just "the call was queued." `new-quantity` is the item type's new total, not the delta granted. |
 | `on-item-use` | `func(entity-id, item-type)` | **No live host call site yet** — no "use an item" client action exists in `docs/specs/Networking_Spec.md`'s message catalog. A plugin wanting this today routes it through its own `chat_commands`/`message_types` and calls `remove-item` itself. |
 
-Every plugin exports all thirteen — a WIT world's exports aren't individually optional, so there's no per-plugin "I don't implement this hook" declaration in this v0 slice (contrast with the richer, deferred story in "Beyond this v0 slice" below).
+Every plugin exports all fifteen — a WIT world's exports aren't individually optional, so there's no per-plugin "I don't implement this hook" declaration in this v0 slice (contrast with the richer, deferred story in "Beyond this v0 slice" below).
 
 ### Host functions (plugin calls out to the host)
 
@@ -122,7 +126,7 @@ Same convention as the content manifest and dev-config files elsewhere in the pr
 ```toml
 [plugin]
 name = "example-plugin"
-host_api_version = "0.5.0"
+host_api_version = "0.6.0"
 capabilities = []
 message_types = []
 chat_commands = []
@@ -131,7 +135,7 @@ chat_commands = []
 | Field | Type | Notes |
 |---|---|---|
 | `plugin.name` | string | Free-form, used in error/log messages. |
-| `plugin.host_api_version` | string | Must equal `plugin_host::HOST_API_VERSION` (currently `"0.5.0"`, matching the WIT package version above) or the plugin is refused before instantiation. |
+| `plugin.host_api_version` | string | Must equal `plugin_host::HOST_API_VERSION` (currently `"0.6.0"`, matching the WIT package version above) or the plugin is refused before instantiation. |
 | `plugin.capabilities` | list of strings, optional | Parsed and carried, **not yet enforced against anything** — see below. |
 | `plugin.message_types` | list of `u16`, optional | Gateway `message_type` values (docs/specs/Networking_Spec.md) routed to this plugin's `on-message` hook (#95). Each must be `>= 1000` (0-999 is core-reserved) and appear at most once, checked by `PluginManifest::check_compatible` before the plugin is instantiated. |
 | `plugin.chat_commands` | list of strings, optional | Chat command names, without the leading `/` (#57). Each must be non-empty, have no leading `/`, and appear at most once, checked the same way as `message_types`. A matched command is routed to `on-chat-command` instead of published as ordinary chat. |
@@ -148,9 +152,9 @@ Real design from docs/PROPOSAL.md's "Plugin System" section, deliberately not bu
 
 - **`on_tick(zone, dt)`** (the zone-wide tick hook, distinct from #116's per-NPC `on-npc-tick`) — `world`'s tick loop has the call site (`world::zone::Zone::run`'s `on_tick` callback parameter), just not wired to a real plugin call yet.
 - **A true synchronous "query" host function against `character`'s live storage** — `item-quantity`/`currency-balance`-style reads that hand a value straight back to the plugin. Still deliberately not built: `PluginCallbacks` is called synchronously from inside `wasmtime`, while `character::CharacterStore` is async-only (`sqlx`); reads would need either a new blocking-call mechanism (`tokio::task::block_in_place`, not used anywhere else in this codebase) or an eventually-consistent cache, and neither was worth the complexity for v0 — a plugin that needs to know a quantity/balance can track it itself from `on-item-acquire`/its own bookkeeping. `caller-role` (#124) sidesteps this exact constraint for account roles specifically, not by adding blocking DB calls, but by having `server::session` populate an in-memory cache at join time (`session::EntityRoles`) that `caller-role` reads synchronously — a pattern this general query problem could reuse later if a case for it emerges, but wasn't generalized here.
-- **Player session** (`on_player_join_zone`, `on_player_leave_zone`).
 - **Live call sites for `on-damage-calc`/`on-death`/`on-respawn`/`on-npc-interact`/`on-item-use`** — these hooks exist and are callable (#116/#57), but nothing in `world`/`gateway`'s client protocol has an attack action, an entity-targeted interact action, or a use-item action yet to call them from; see each hook's row above.
 - **Per-plugin optional hooks** — with thirteen hooks now, most plugins won't want all of them; a real WIT world for that likely needs either per-hook opt-in at the manifest level with the host only calling what's declared, or restructuring hooks as several smaller worlds/interfaces a plugin composes from.
 - **Real capability gating** — `plugin.toml`'s `capabilities` field exists today but gates nothing; once host functions are grouped (`economy`, `combat`, ...) per the proposal, the host should refuse to load a plugin declaring a capability the operator hasn't enabled for that deployment.
 - **Cross-plugin RPC, hot-reload, plugin-defined persistent schema (structured tables beyond the opaque blob store)** — explicit v0 non-goals per the proposal, not accidentally missing. The opaque-blob-store half of that story *is* now in (#149, `plugin-state-get`/`plugin-state-set` above) — the non-goal is specifically anything beyond it (a plugin declaring its own real DB schema). (Plugin-declared gateway message types/custom packets *are* now in — `on-message`, #95 — cross-plugin collision checking for them is still deferred; see docs/specs/Networking_Spec.md.)
 - ~~**Account roles for dev/admin-only commands**~~ — decided in #114, implemented in #124: see the `caller-role` host function above and docs/specs/Auth_Spec.md's "Account roles" section.
+- ~~**Player session** (`on_player_join_zone`, `on_player_leave_zone`)~~ — implemented in #155: see the `on-player-join-zone`/`on-player-leave-zone` hooks above.

@@ -42,6 +42,7 @@ const CHAT_DISABLED_ADDR: &str = "127.0.0.1:7912";
 const ZONE_TRANSITION_ADDR: &str = "127.0.0.1:7913";
 const LAYER_ADDR: &str = "127.0.0.1:7918";
 const LAYER_DISABLED_ADDR: &str = "127.0.0.1:7919";
+const PLAYER_SESSION_ADDR: &str = "127.0.0.1:7920";
 
 struct ServerProcess {
     child: Child,
@@ -274,7 +275,7 @@ fn setup_config_dir(test_name: &str) -> PathBuf {
         r#"
 [plugin]
 name = "test-plugin"
-host_api_version = "0.5.0"
+host_api_version = "0.6.0"
 message_types = [1000]
 "#,
     )
@@ -426,6 +427,108 @@ async fn connect_register_move_and_persist_across_reconnect() {
         if let ServerMessage::Joined { x, y, .. } = recv_world(&mut stream).await {
             assert_eq!((x, y), MOVE_TO, "position should persist across reconnect");
             break;
+        }
+    }
+}
+
+/// #155: `on-player-join-zone` fires once a connection is fully joined
+/// (the fixture plugin greets the newly-joined entity via `send-message`,
+/// observable as the client's first `PluginMessage` right after `Joined`)
+/// and `on-player-leave-zone` fires on clean disconnect — verified here
+/// via the fixture recording the departing entity id under zone-scope
+/// plugin state (#149) on leave, then a second connection reading it back
+/// through the same `message_type` 1000 path the first smoke test already
+/// exercises for `on-message` — the only network-observable proof a
+/// black-box test has that the leave hook actually ran, since the
+/// departing connection itself is already gone by the time it fires.
+#[tokio::test]
+#[ignore]
+async fn player_join_and_leave_hooks_fire_for_real() {
+    let config_dir = setup_config_dir("player-session");
+
+    let _server = start_server(&config_dir, PLAYER_SESSION_ADDR);
+    wait_for_port(PLAYER_SESSION_ADDR).await;
+
+    let username = format!("smoke-{}", uuid::Uuid::now_v7());
+    let password = "hunter2";
+
+    let mut stream = connect(&config_dir, PLAYER_SESSION_ADDR).await;
+    send_auth(
+        &mut stream,
+        &AuthClientMessage::Register {
+            username: username.clone(),
+            password: password.to_string(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv_auth(&mut stream).await,
+        AuthServerMessage::Authenticated { .. }
+    ));
+
+    let own_entity_id = loop {
+        if let ServerMessage::Joined { entity_id, .. } = recv_world(&mut stream).await {
+            break entity_id;
+        }
+    };
+
+    loop {
+        match recv_world(&mut stream).await {
+            ServerMessage::PluginMessage { body } => {
+                assert!(body.contains("welcome"), "{body}");
+                assert!(body.contains(&own_entity_id), "{body}");
+                break;
+            }
+            ServerMessage::Moved { .. } => {}
+            other => panic!("expected the on-player-join-zone greeting, got {other:?}"),
+        }
+    }
+
+    drop(stream);
+    // Give the session task a moment to notice the disconnect and run
+    // on-player-leave-zone before the second connection asks about it.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let mut stream = connect(&config_dir, PLAYER_SESSION_ADDR).await;
+    send_auth(
+        &mut stream,
+        &AuthClientMessage::Register {
+            username: format!("smoke-{}", uuid::Uuid::now_v7()),
+            password: password.to_string(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv_auth(&mut stream).await,
+        AuthServerMessage::Authenticated { .. }
+    ));
+    loop {
+        if let ServerMessage::Joined { .. } = recv_world(&mut stream).await {
+            break;
+        }
+    }
+    // Drain this second connection's own join greeting before querying.
+    loop {
+        match recv_world(&mut stream).await {
+            ServerMessage::PluginMessage { .. } => break,
+            ServerMessage::Moved { .. } => {}
+            other => panic!("expected this connection's own join greeting, got {other:?}"),
+        }
+    }
+
+    stream
+        .send(gateway::Envelope::new(1000, b"last-left".to_vec()))
+        .await
+        .unwrap();
+    loop {
+        match recv_world(&mut stream).await {
+            ServerMessage::PluginMessage { body } => {
+                assert!(body.starts_with("last-left:"), "{body}");
+                assert!(body.contains(&own_entity_id), "{body}");
+                break;
+            }
+            ServerMessage::Moved { .. } => {}
+            other => panic!("expected the last-left query reply, got {other:?}"),
         }
     }
 }
@@ -715,11 +818,17 @@ async fn chat_disabled_returns_a_clear_error() {
         .await
         .unwrap();
 
-    match recv_world(&mut stream).await {
-        ServerMessage::Error { message } => {
-            assert!(message.contains("chat is disabled"), "{message}");
+    loop {
+        match recv_world(&mut stream).await {
+            ServerMessage::Error { message } => {
+                assert!(message.contains("chat is disabled"), "{message}");
+                break;
+            }
+            // The configured plugin's own on-player-join-zone greeting
+            // (#155) — unrelated to this test, drain past it.
+            ServerMessage::PluginMessage { .. } => {}
+            other => panic!("expected an Error, got {other:?}"),
         }
-        other => panic!("expected an Error, got {other:?}"),
     }
 }
 

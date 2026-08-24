@@ -59,6 +59,30 @@ enum WorldCommand {
         args: String,
         sender_entity_id: EntityId,
     },
+    /// A connection has fully joined this zone (`session::handle_session`,
+    /// after roster delivery) or is cleanly disconnecting from it (#155) —
+    /// routed here for the same reason `PluginMessage`/`ChatCommand` are:
+    /// the live plugin instance lives on this task. Sent for every zone a
+    /// player is ever in, not just the one the configured plugin happens
+    /// to be attached to — a zone actor with no plugin configured just
+    /// no-ops rather than warning, since that's the common case for most
+    /// zones (contrast with `PluginMessage`/`ChatCommand`, which only ever
+    /// reach a zone once something already matched a plugin's own
+    /// declared `message_types`/`chat_commands`).
+    PlayerJoin {
+        entity_id: EntityId,
+    },
+    /// Carries a reply so `session::handle_session` can await the hook
+    /// (and any pending effects it triggers) actually running *before*
+    /// it removes this entity from `entity_characters`/`entity_roles` —
+    /// unlike every other fire-and-forget command here, ordering matters:
+    /// a plugin's `on-player-leave-zone` handler resolving this entity's
+    /// character (e.g. to `apply-stat-delta`) would silently no-op if the
+    /// caller already cleared the map first (#155).
+    PlayerLeave {
+        entity_id: EntityId,
+        reply: oneshot::Sender<()>,
+    },
 }
 
 #[derive(Clone)]
@@ -148,6 +172,28 @@ impl WorldHandle {
             args,
             sender_entity_id,
         });
+    }
+
+    /// Fire-and-forget, same contract as `dispatch_plugin_message` — sent
+    /// for every zone a player joins/leaves, not only the zone (if any) a
+    /// configured plugin is attached to (#155).
+    pub fn dispatch_player_join(&self, entity_id: EntityId) {
+        self.send(WorldCommand::PlayerJoin { entity_id });
+    }
+
+    /// Awaits the actor having actually run `on-player-leave-zone` (and
+    /// applied any pending effects it triggered) before returning — see
+    /// `WorldCommand::PlayerLeave`'s doc comment for why this can't be
+    /// fire-and-forget like the rest of this handle's methods. Resolves
+    /// immediately if the actor task is gone.
+    pub async fn dispatch_player_leave(&self, entity_id: EntityId) {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if self.send(WorldCommand::PlayerLeave {
+            entity_id,
+            reply: reply_tx,
+        }) {
+            let _ = reply_rx.await;
+        }
     }
 }
 
@@ -325,6 +371,58 @@ pub fn spawn_world_actor(
                                     tracing::warn!(entity_id, item_type, error = %e, "plugin on_item_acquire hook failed");
                                 }
                             }
+                        }
+                        WorldCommand::PlayerJoin { entity_id } => {
+                            let Some(runtime) = plugin.as_mut() else {
+                                continue;
+                            };
+                            let entity_id_str = entity_id.to_string();
+                            if let Err(e) = runtime.plugin.on_player_join_zone(&entity_id_str) {
+                                tracing::warn!(%entity_id, error = %e, "plugin on_player_join_zone hook failed");
+                            }
+                            let moves = runtime.drain_pending_moves();
+                            let stat_deltas = runtime.drain_pending_stat_deltas();
+                            let item_grants = runtime.drain_pending_item_grants();
+                            let item_removals = runtime.drain_pending_item_removals();
+                            let currency_deltas = runtime.drain_pending_currency_deltas();
+                            let state_writes = runtime.drain_pending_state_writes();
+                            let acquired = apply_plugin_pending_effects(
+                                &mut zone, moves, stat_deltas, item_grants, item_removals,
+                                currency_deltas, state_writes, &character_store, &entity_characters,
+                                &plugin_state_store,
+                            ).await;
+                            for (entity_id, item_type, new_quantity) in acquired {
+                                if let Err(e) = runtime.plugin.on_item_acquire(&entity_id, &item_type, new_quantity) {
+                                    tracing::warn!(entity_id, item_type, error = %e, "plugin on_item_acquire hook failed");
+                                }
+                            }
+                        }
+                        WorldCommand::PlayerLeave { entity_id, reply } => {
+                            let Some(runtime) = plugin.as_mut() else {
+                                let _ = reply.send(());
+                                continue;
+                            };
+                            let entity_id_str = entity_id.to_string();
+                            if let Err(e) = runtime.plugin.on_player_leave_zone(&entity_id_str) {
+                                tracing::warn!(%entity_id, error = %e, "plugin on_player_leave_zone hook failed");
+                            }
+                            let moves = runtime.drain_pending_moves();
+                            let stat_deltas = runtime.drain_pending_stat_deltas();
+                            let item_grants = runtime.drain_pending_item_grants();
+                            let item_removals = runtime.drain_pending_item_removals();
+                            let currency_deltas = runtime.drain_pending_currency_deltas();
+                            let state_writes = runtime.drain_pending_state_writes();
+                            let acquired = apply_plugin_pending_effects(
+                                &mut zone, moves, stat_deltas, item_grants, item_removals,
+                                currency_deltas, state_writes, &character_store, &entity_characters,
+                                &plugin_state_store,
+                            ).await;
+                            for (entity_id, item_type, new_quantity) in acquired {
+                                if let Err(e) = runtime.plugin.on_item_acquire(&entity_id, &item_type, new_quantity) {
+                                    tracing::warn!(entity_id, item_type, error = %e, "plugin on_item_acquire hook failed");
+                                }
+                            }
+                            let _ = reply.send(());
                         }
                     }
                 }
