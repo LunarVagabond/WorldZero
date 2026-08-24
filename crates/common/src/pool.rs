@@ -110,14 +110,24 @@ pub async fn redis_pubsub_connection(
 mod tests {
     use super::*;
 
-    // Real Postgres/Redis, not run in CI (no network path to the internal
-    // Proxmox host from GitHub Actions) — set WZ_POSTGRES_*/WZ_REDIS_* to
-    // run these locally: `cargo test -p common -- --ignored`.
+    // Real Postgres/Redis — set WZ_POSTGRES_*/WZ_REDIS_* and run with
+    // `-- --include-ignored` (CI does this against its own Postgres/Redis
+    // service containers; run locally with `cargo test -p common --
+    // --ignored`). The `from_env()` call in each test is scoped inside its
+    // own block, guarded by `test_env_lock::LOCK` and dropped before the
+    // first `.await` — see that lock's doc comment for why: `config`'s
+    // tests transiently clear/reset these same process-global env vars,
+    // and until this lock existed that could race these tests reading
+    // them (only visible once both ran in the same process together,
+    // which `#[ignore]` had been silently preventing).
 
     #[tokio::test]
     #[ignore]
     async fn postgres_pool_acquires_a_connection() {
-        let config = PostgresConfig::from_env().expect("WZ_POSTGRES_* env vars set");
+        let config = {
+            let _guard = crate::test_env_lock::LOCK.lock().unwrap();
+            PostgresConfig::from_env().expect("WZ_POSTGRES_* env vars set")
+        };
         let pool = postgres_pool(&config, PoolOptions::default())
             .await
             .unwrap();
@@ -131,7 +141,10 @@ mod tests {
     async fn redis_pool_acquires_a_connection() {
         use deadpool_redis::redis::AsyncCommands;
 
-        let config = RedisConfig::from_env().expect("WZ_REDIS_* env vars set");
+        let config = {
+            let _guard = crate::test_env_lock::LOCK.lock().unwrap();
+            RedisConfig::from_env().expect("WZ_REDIS_* env vars set")
+        };
         let pool = redis_pool(&config, PoolOptions::default()).unwrap();
 
         let mut conn = redis_connection(&pool).await.unwrap();

@@ -27,3 +27,18 @@ pub mod migrate;
 pub mod pool;
 
 pub use error::{Error, Result, ResultExt};
+
+/// Shared across every test module in this crate that reads or mutates
+/// `WZ_POSTGRES_*`/`WZ_REDIS_*` env vars — `std::env` is process-global
+/// and `cargo test` runs every test in this crate's binary concurrently
+/// by default, so `config`'s tests transiently clearing/resetting these
+/// vars can otherwise race `pool`'s/`migrate`'s real-connection tests
+/// reading them via `from_env()`. Invisible as long as the latter stayed
+/// `#[ignore]`d and never ran alongside `config`'s tests in the same
+/// process; surfaced for real the first time CI ran the whole workspace
+/// with `--include-ignored` (see the commit that added this).
+#[cfg(test)]
+pub(crate) mod test_env_lock {
+    use std::sync::Mutex;
+    pub static LOCK: Mutex<()> = Mutex::new(());
+}

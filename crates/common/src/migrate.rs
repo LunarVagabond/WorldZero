@@ -137,8 +137,9 @@ mod tests {
         );
     }
 
-    // Real Postgres, not run in CI — set WZ_POSTGRES_* and run with
-    // `-- --ignored`. Deliberately non-destructive: `migrate_down_one`
+    // Real Postgres — set WZ_POSTGRES_* and run with `-- --include-ignored`
+    // (CI does this against its own service container; run locally with
+    // `-- --ignored`). Deliberately non-destructive: `migrate_down_one`
     // against the real db/migrations directory is exercised manually
     // (`make migrate-down` / `make migrate`), not here — sqlx's migrator
     // cross-checks the *entire* applied-migration history in
@@ -146,11 +147,21 @@ mod tests {
     // whatever migration source you hand it, so there's no clean way to
     // sandbox an up/down round trip in an isolated directory without
     // racing `character`/`auth`'s tests, which depend on this same real
-    // schema and run concurrently under `cargo test --workspace -- --ignored`.
+    // schema and run concurrently under `cargo test --workspace --
+    // --include-ignored` — safe in practice since `migrate_up` is
+    // idempotent and additive, never dropping/altering what those tests
+    // depend on.
+    //
+    // The `from_env()` call is scoped/guarded/dropped-before-`.await` the
+    // same way `pool.rs`'s ignored tests are — see `test_env_lock`'s doc
+    // comment.
     #[tokio::test]
     #[ignore]
     async fn migrate_up_is_idempotent_against_the_real_migrations() {
-        let config = PostgresConfig::from_env().expect("WZ_POSTGRES_* env vars set");
+        let config = {
+            let _guard = crate::test_env_lock::LOCK.lock().unwrap();
+            PostgresConfig::from_env().expect("WZ_POSTGRES_* env vars set")
+        };
         let pool = postgres_pool(&config, PoolOptions::default())
             .await
             .unwrap();

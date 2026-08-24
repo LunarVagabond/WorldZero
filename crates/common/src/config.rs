@@ -152,13 +152,12 @@ fn required_port_env(var: &'static str) -> Result<u16> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
-
     use super::*;
+    use crate::test_env_lock::LOCK as ENV_LOCK;
 
-    // std::env is process-global; serialize these tests so they don't race.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
+    // std::env is process-global; serialize these tests (and every other
+    // test in this crate reading the same WZ_POSTGRES_*/WZ_REDIS_* vars —
+    // see `test_env_lock`'s doc comment) so they don't race.
     fn with_clean_env(vars: &[&str], f: impl FnOnce()) {
         let _guard = ENV_LOCK.lock().unwrap();
         for var in vars {
