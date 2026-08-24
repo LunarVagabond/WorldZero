@@ -81,6 +81,34 @@ impl AttributeSchema {
         Ok(())
     }
 
+    /// Produces the `stats` blob a character should have after moving to
+    /// a realm whose declared schema is `self` (#53's transfer flow),
+    /// given `stored` — the character's current stats, possibly declared
+    /// under a *different* source realm's schema. Applies
+    /// [`Self::resolve_read`]'s exact per-key logic to every key this
+    /// schema declares at once: present in `stored` → kept as-is (not
+    /// re-validated against this schema's bounds — reading an
+    /// already-stored value never re-validates, same as
+    /// [`Self::resolve_read`]); missing → this schema's declared
+    /// default. Any key `stored` has that this schema doesn't declare is
+    /// silently dropped — the destination game never declared it, so
+    /// there's nothing sensible to keep it as.
+    pub fn migrate_stats(
+        &self,
+        stored: &serde_json::Map<String, serde_json::Value>,
+    ) -> serde_json::Map<String, serde_json::Value> {
+        self.stats
+            .iter()
+            .map(|decl| {
+                let value = stored
+                    .get(&decl.key)
+                    .and_then(serde_json::Value::as_i64)
+                    .unwrap_or(decl.default);
+                (decl.key.clone(), serde_json::Value::from(value))
+            })
+            .collect()
+    }
+
     /// Resolves a read: the stored value if present, otherwise the
     /// declared default. Rejects a key the schema doesn't declare at all.
     pub fn resolve_read(
@@ -191,5 +219,32 @@ stats:
     fn read_of_unknown_key_is_rejected() {
         let stored = serde_json::Map::new();
         assert!(example_schema().resolve_read(&stored, "stamina").is_err());
+    }
+
+    #[test]
+    fn migrate_stats_keeps_keys_the_destination_also_declares() {
+        let mut stored = serde_json::Map::new();
+        stored.insert("hp".to_string(), serde_json::json!(77));
+
+        let migrated = example_schema().migrate_stats(&stored);
+        assert_eq!(migrated.get("hp"), Some(&serde_json::json!(77)));
+    }
+
+    #[test]
+    fn migrate_stats_fills_missing_keys_with_the_destinations_default() {
+        let stored = serde_json::Map::new();
+        let migrated = example_schema().migrate_stats(&stored);
+        assert_eq!(migrated.get("mana"), Some(&serde_json::json!(50)));
+    }
+
+    #[test]
+    fn migrate_stats_drops_keys_the_destination_does_not_declare() {
+        let mut stored = serde_json::Map::new();
+        stored.insert("hp".to_string(), serde_json::json!(10));
+        stored.insert("stamina".to_string(), serde_json::json!(999));
+
+        let migrated = example_schema().migrate_stats(&stored);
+        assert!(!migrated.contains_key("stamina"));
+        assert_eq!(migrated.len(), example_schema().stats.len());
     }
 }
