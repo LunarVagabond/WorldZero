@@ -392,6 +392,14 @@ fn plugin_chat_command(declared_commands: &[String], body: &str) -> Option<(Stri
         .then(|| (command.to_string(), args.to_string()))
 }
 
+/// Root span for #49's demonstrated cross-service trace path: `gateway`
+/// (this connection's own task) → `auth` (`register`/`verify_credentials`,
+/// `issue_session`) → Redis (`auth::SessionManager::issue`'s write). A
+/// single client action — the connection's very first envelope — nests
+/// three crates' worth of spans under one trace, exported as one
+/// reconstructable request if `WZ_OTEL_ENDPOINT` is set
+/// (`common::logging::init`), otherwise just ordinary nested log context.
+#[tracing::instrument(skip_all)]
 async fn authenticate(
     message: auth::gateway_protocol::ClientMessage,
     provider: &auth::UsernamePasswordProvider,

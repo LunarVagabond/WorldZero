@@ -1,8 +1,19 @@
 //! `tracing` init + the shared `<TIMESTAMP> <LEVEL> <SOURCE> <MESSAGE>`
-//! formatter (docs/specs/Observability_Spec.md).
+//! formatter (docs/specs/Observability_Spec.md), plus optional
+//! OpenTelemetry-compatible distributed tracing export (#49) layered
+//! onto the exact same `tracing` spans/events every crate already emits
+//! for logging — one instrumentation API (`tracing::instrument`,
+//! `tracing::info!`/`warn!`/etc.), two consumers, not two separate
+//! tracing systems to keep in sync.
 
 use std::fmt;
+use std::sync::OnceLock;
 
+use opentelemetry::KeyValue;
+use opentelemetry::trace::TracerProvider as _;
+use opentelemetry_otlp::WithExportConfig;
+use opentelemetry_sdk::Resource;
+use opentelemetry_sdk::trace::SdkTracerProvider;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tracing::{Event, Subscriber};
@@ -58,8 +69,44 @@ impl Visit for MessageVisitor {
     }
 }
 
-/// Sets the global `tracing` subscriber. Call once, as early as possible in
-/// `server`'s `main.rs`. Level filtering via `RUST_LOG`, defaulting to `info`.
+/// Unset means distributed tracing export is disabled entirely — unlike
+/// `chat`/`metrics` (`common::config::ServicesConfig`, default-enabled
+/// flags), there's no separate `WZ_SERVICE_TRACING_ENABLED` toggle: a
+/// self-hoster who hasn't stood up an OTel collector has nothing useful
+/// to point this at, so the presence of a real endpoint *is* the enable
+/// signal — same "a config value's presence gates the behavior, no
+/// redundant boolean" pattern `gateway::tls`'s `WZ_TLS_CERT_PATH` already
+/// uses.
+const OTEL_ENDPOINT_VAR: &str = "WZ_OTEL_ENDPOINT";
+
+/// Tags every exported span's `service.name` resource attribute — what a
+/// trace viewer (Jaeger, Tempo, ...) groups/colors traces by. Defaults to
+/// `"worldzero"`: today every crate runs inside one combined `server`
+/// process (Phase 1/2), so there is exactly one meaningful service name,
+/// not one per crate — `tracing`'s own `target` field (the same one the
+/// fixed log line format's `SOURCE` column resolves from) is still what
+/// identifies *which crate* emitted a given span within that one
+/// service. Override via `WZ_OTEL_SERVICE_NAME` once/if a deployment
+/// actually splits services across processes.
+const OTEL_SERVICE_NAME_VAR: &str = "WZ_OTEL_SERVICE_NAME";
+const DEFAULT_OTEL_SERVICE_NAME: &str = "worldzero";
+
+/// Kept alive for the process's lifetime once built — dropping an
+/// `SdkTracerProvider` stops span export. No explicit shutdown/flush
+/// hook exists anywhere else in this codebase either (metrics/DB pools
+/// aren't drained on exit), so this matches that same "best-effort,
+/// not gracefully drained on abrupt exit" posture; the batch exporter's
+/// own periodic flush interval means an ordinary process exit still
+/// gets most spans out.
+static TRACER_PROVIDER: OnceLock<SdkTracerProvider> = OnceLock::new();
+
+/// Sets the global `tracing` subscriber. Call once, as early as possible
+/// in any binary's `main.rs` — every existing call site (`server`,
+/// `common::bin::migrate`, `chat`'s demo bins, ...) already does this
+/// with no arguments and needs no change: whether OpenTelemetry export
+/// is also active is decided entirely by `WZ_OTEL_ENDPOINT`, not by a
+/// different function or a different code path (#49's acceptance
+/// criteria). Level filtering via `RUST_LOG`, defaulting to `info`.
 pub fn init() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
@@ -67,10 +114,51 @@ pub fn init() {
         .event_format(LineFormatter)
         .with_ansi(false);
 
+    let otel_layer = std::env::var(OTEL_ENDPOINT_VAR).ok().map(build_otel_layer);
+
     tracing_subscriber::registry()
         .with(filter)
         .with(fmt_layer)
+        .with(otel_layer)
         .init();
+
+    match std::env::var(OTEL_ENDPOINT_VAR) {
+        Ok(endpoint) => tracing::info!(endpoint, "distributed tracing export enabled"),
+        Err(_) => {
+            tracing::info!("distributed tracing export disabled ({OTEL_ENDPOINT_VAR} not set)")
+        }
+    }
+}
+
+fn build_otel_layer<S>(endpoint: String) -> impl tracing_subscriber::Layer<S>
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+{
+    let service_name = std::env::var(OTEL_SERVICE_NAME_VAR)
+        .unwrap_or_else(|_| DEFAULT_OTEL_SERVICE_NAME.to_string());
+
+    let exporter = opentelemetry_otlp::SpanExporter::builder()
+        .with_tonic()
+        .with_endpoint(&endpoint)
+        .build()
+        .expect("failed to build the OTLP span exporter");
+
+    let provider = SdkTracerProvider::builder()
+        .with_batch_exporter(exporter)
+        .with_resource(
+            Resource::builder()
+                .with_attribute(KeyValue::new("service.name", service_name.clone()))
+                .build(),
+        )
+        .build();
+
+    let tracer = provider.tracer(service_name);
+    // Only the first `init()` call's provider is kept — matches
+    // `tracing_subscriber::registry().init()`'s own "global subscriber
+    // set once" contract this function is already bound by.
+    let _ = TRACER_PROVIDER.set(provider);
+
+    tracing_opentelemetry::layer().with_tracer(tracer)
 }
 
 #[cfg(test)]
@@ -146,6 +234,17 @@ mod tests {
         for level in ["TRACE", "DEBUG", "INFO", "WARN", "ERROR"] {
             assert!(output.contains(level), "missing {level} in:\n{output}");
         }
+    }
+
+    #[tokio::test]
+    async fn build_otel_layer_does_not_panic_for_a_syntactically_valid_endpoint() {
+        // Exporter construction is lazy (doesn't require a reachable
+        // collector) but needs a Tokio runtime context to set up its
+        // gRPC channel — just proves the `WZ_OTEL_ENDPOINT`-set branch
+        // of `init()` wires itself up without panicking.
+        let _layer = super::build_otel_layer::<tracing_subscriber::Registry>(
+            "http://127.0.0.1:4317".to_string(),
+        );
     }
 
     #[test]

@@ -21,6 +21,7 @@ impl SessionManager {
         Self { redis }
     }
 
+    #[tracing::instrument(skip(self), fields(%account_id))]
     pub async fn issue(&self, account_id: AccountId) -> Result<Session> {
         let token = generate_token();
         let key = format!("session:{token}");
