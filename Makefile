@@ -10,7 +10,7 @@ LOG_FILE := $(LOG_DIR)/server.log
 EXAMPLE_PLUGIN_DIR := examples/example-plugin
 EXAMPLE_PLUGIN_WASM := $(EXAMPLE_PLUGIN_DIR)/target/wasm32-wasip2/release/example_plugin.wasm
 
-.PHONY: help build run quickstart start stop restart status test test-live fmt fmt-check lint check clean migrate migrate-down chat-server chat docker-up docker-down docker-status docker-logs
+.PHONY: help build run quickstart start stop restart status test test-live fmt fmt-check lint check clean migrate migrate-down chat-server chat realm docker-up docker-down docker-status docker-logs
 
 help:
 	@echo "WorldZero — local dev commands"
@@ -32,6 +32,8 @@ help:
 	@echo "  make status        report whether the background server is running"
 	@echo "  make migrate       apply pending db/migrations/*.up.sql (needs WZ_POSTGRES_* — .env is loaded automatically)"
 	@echo "  make migrate-down  revert the most recently applied migration (its .down.sql)"
+	@echo "  make realm ARGS='create MyRealm open'   realm-directory CLI (create/list/get/update/delete/"
+	@echo "                     assign-zone/unassign-zone — needs WZ_POSTGRES_*, run 'make realm ARGS=' for full usage)"
 	@echo "  make chat-server   run the chat gateway demo server (TCP+TLS+auth, routes into chat) — start this first"
 	@echo "  make chat NAME=x   run an interactive chat demo client as username 'x' (gateway mode by default,"
 	@echo "                     needs ARGS='--password <pw>' — add --register on first use to create the account;"
@@ -115,6 +117,9 @@ migrate:
 
 migrate-down:
 	$(CARGO) run -p common --bin migrate -- down
+
+realm:
+	$(CARGO) run -p realm-directory --bin realm -- $(ARGS)
 
 chat-server:
 	$(CARGO) run -p chat --bin gateway_server
