@@ -123,6 +123,15 @@ pub trait HostCallbacks: Send + 'static {
         key: &str,
         value: Vec<u8>,
     ) -> std::result::Result<(), String>;
+
+    /// Reports a death (`wit/plugin.wit`'s `report-death`) — queued,
+    /// applied on the implementor's own drain mechanism, same shape as
+    /// `apply_stat_delta` (#154).
+    fn report_death(&mut self, entity_id: &str) -> std::result::Result<(), String>;
+
+    /// Reports a respawn (`wit/plugin.wit`'s `report-respawn`) — same
+    /// shape as `report_death`.
+    fn report_respawn(&mut self, entity_id: &str) -> std::result::Result<(), String>;
 }
 
 struct PluginState {
@@ -217,6 +226,14 @@ impl HostInterface for PluginState {
         value: Vec<u8>,
     ) -> std::result::Result<(), String> {
         self.callbacks.plugin_state_set(scope.into(), &key, value)
+    }
+
+    fn report_death(&mut self, entity_id: String) -> std::result::Result<(), String> {
+        self.callbacks.report_death(&entity_id)
+    }
+
+    fn report_respawn(&mut self, entity_id: String) -> std::result::Result<(), String> {
+        self.callbacks.report_respawn(&entity_id)
     }
 }
 
@@ -396,8 +413,11 @@ impl LoadedPlugin {
             .map_err(|e| Error::new("plugin-host", format!("on_message hook failed: {e:#}")))
     }
 
-    /// No live host call site exists yet — see `wit/plugin.wit`'s
-    /// `on-damage-calc` doc comment.
+    /// Live: `server::world_actor` calls this when a client's `Attack`
+    /// action names a valid target entity (#154) — `base_amount` is
+    /// always `0` (the core never invents a damage number, see
+    /// `wit/plugin.wit`'s doc comment); the plugin owns the whole
+    /// mitigation formula and must call `apply_stat_delta` itself.
     pub fn on_damage_calc(
         &mut self,
         attacker_entity_id: &str,
@@ -417,8 +437,10 @@ impl LoadedPlugin {
             .map_err(|e| Error::new("plugin-host", format!("on_damage_calc hook failed: {e:#}")))
     }
 
-    /// No live host call site exists yet — see `wit/plugin.wit`'s
-    /// `on-death` doc comment.
+    /// Live: `server::world_actor` calls this after applying a queued
+    /// `report-death` request (#154) — the plugin decided this entity
+    /// died and reported it; this is the host's confirmation callback,
+    /// not a request for the plugin to decide anything.
     pub fn on_death(&mut self, entity_id: &str) -> Result<()> {
         self.bindings
             .worldzero_plugin_hooks()
@@ -426,8 +448,8 @@ impl LoadedPlugin {
             .map_err(|e| Error::new("plugin-host", format!("on_death hook failed: {e:#}")))
     }
 
-    /// No live host call site exists yet — see `wit/plugin.wit`'s
-    /// `on-respawn` doc comment.
+    /// Live, same shape as `on_death` — fired after a queued
+    /// `report-respawn` request is applied (#154).
     pub fn on_respawn(&mut self, entity_id: &str) -> Result<()> {
         self.bindings
             .worldzero_plugin_hooks()
@@ -465,9 +487,9 @@ impl LoadedPlugin {
             .map_err(|e| Error::new("plugin-host", format!("on_npc_tick hook failed: {e:#}")))
     }
 
-    /// No live host call site exists yet — a player-targets-an-NPC
-    /// client action doesn't exist in `docs/specs/Networking_Spec.md`'s
-    /// message catalog yet, only the generic trigger-volume `on-interact`.
+    /// Live: `server::world_actor` calls this when a client's
+    /// `InteractNpc` action names a currently-spawned NPC entity (#154) —
+    /// distinct from the generic trigger-volume `on_interact` above.
     pub fn on_npc_interact(&mut self, npc_entity_id: &str, actor_entity_id: &str) -> Result<()> {
         self.bindings
             .worldzero_plugin_hooks()
@@ -507,8 +529,10 @@ impl LoadedPlugin {
             .map_err(|e| Error::new("plugin-host", format!("on_item_acquire hook failed: {e:#}")))
     }
 
-    /// No live host call site exists yet — see `wit/plugin.wit`'s
-    /// `on-item-use` doc comment.
+    /// Live: `server::world_actor` calls this when a client sends a
+    /// `UseItem` action (#154) — the core never validates ownership
+    /// itself; the plugin decides what using `item_type` does and is
+    /// expected to call `remove-item` if that's the right response.
     pub fn on_item_use(&mut self, entity_id: &str, item_type: &str) -> Result<()> {
         self.bindings
             .worldzero_plugin_hooks()

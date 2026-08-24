@@ -7,14 +7,21 @@
 // account-roles decision (#114) needed to gate dev/admin-only
 // plugin-declared chat commands. #155 adds `on-player-join-zone`/
 // `on-player-leave-zone` (docs/PROPOSAL.md's "Player session" hook
-// group) — see docs/specs/Plugin_API.md, "Beyond this v0 slice" for what
-// still isn't here — per-plugin optional hooks, gated capability groups.
-// A WIT "world" is the actual versioning mechanism (docs/PROPOSAL.md,
-// "Interface Technology"): a breaking change bumps the package version
-// below and/or lands as a new world, rather than silently changing what
-// `plugin` means underneath existing compiled plugins.
+// group). #154 adds real client-protocol call sites for
+// `on-damage-calc`/`on-item-use`/`on-npc-interact` (`server`'s new
+// `Attack`/`UseItem`/`InteractNpc` client actions) and `report-death`/
+// `report-respawn` host functions — the plugin-owned trigger for
+// `on-death`/`on-respawn` (core still has no notion of what "died"
+// means; a plugin reports it once it decides, and the host fires the
+// hook back) — see docs/specs/Plugin_API.md, "Beyond this v0 slice" for
+// what still isn't here — per-plugin optional hooks, gated capability
+// groups. A WIT "world" is the actual versioning mechanism
+// (docs/PROPOSAL.md, "Interface Technology"): a breaking change bumps
+// the package version below and/or lands as a new world, rather than
+// silently changing what `plugin` means underneath existing compiled
+// plugins.
 
-package worldzero:plugin@0.6.0;
+package worldzero:plugin@0.7.0;
 
 /// What the host exposes for a plugin to call out to — nothing crosses
 /// this boundary that isn't listed here (docs/PROPOSAL.md, "Plugin
@@ -130,6 +137,22 @@ interface host {
     /// `apply-stat-delta`/`grant-item`. `entity` scope has nothing to
     /// queue — it was never going to be persisted.
     plugin-state-set: func(scope: plugin-state-scope, key: string, value: list<u8>) -> result<_, string>;
+
+    /// Reports that `entity-id` has died — the plugin decides what "died"
+    /// means for its own game (e.g. a declared stat it just drove to
+    /// zero via `apply-stat-delta`) and calls this itself; the host has
+    /// no privileged notion of death (docs/PROPOSAL.md's "Combat" hook
+    /// group: "core has no notion of HP or a death condition"). Queued,
+    /// applied on the zone's next tick drain — fires `on-death` back to
+    /// every loaded plugin once applied (today: just the caller's own,
+    /// forward-compatible with #152's planned multi-plugin fan-out) —
+    /// same "queued, not synchronously confirmed" shape as
+    /// `apply-stat-delta` (#154).
+    report-death: func(entity-id: string) -> result<_, string>;
+
+    /// Same shape as `report-death`, for the respawn case — fires
+    /// `on-respawn` once applied (#154).
+    report-respawn: func(entity-id: string) -> result<_, string>;
 }
 
 /// What the host calls into the plugin for — a plugin only receives the

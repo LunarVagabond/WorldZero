@@ -66,24 +66,38 @@ impl Guest for Plugin {
         );
     }
 
-    // No live host call site exists yet for any of the four hooks below
-    // (wit/plugin.wit's doc comments explain why per hook) — implemented
-    // as no-ops/minimal stand-ins here only because a WIT world's
-    // exports aren't individually optional in v0, not because this
-    // example plugin actually uses them yet.
-
+    // Live: fires when a client sends an Attack action (#154) —
+    // base_amount is always 0 (the core never invents a damage number),
+    // so this fixed 5-point wolf bite is entirely this plugin's own
+    // formula, same as any real game's damage calc would be.
     fn on_damage_calc(
-        _attacker_entity_id: String,
+        attacker_entity_id: String,
         target_entity_id: String,
         stat_key: String,
-        base_amount: i64,
+        _base_amount: i64,
     ) {
-        let _ = worldzero::plugin::host::apply_stat_delta(&target_entity_id, &stat_key, -base_amount);
+        let _ = worldzero::plugin::host::apply_stat_delta(&target_entity_id, &stat_key, -5);
+        let _ = worldzero::plugin::host::send_message(
+            &attacker_entity_id,
+            &format!("a wolf bites {target_entity_id} for 5 {stat_key}"),
+        );
     }
 
-    fn on_death(_entity_id: String) {}
+    // Live: fires once this plugin's own report-death call (wherever it
+    // decides a declared stat has hit a meaningful threshold) is applied
+    // (#154) — this minimal example never calls report-death itself, so
+    // in practice this only fires if some other plugin does once #152
+    // lands multi-plugin support.
+    fn on_death(entity_id: String) {
+        let _ = worldzero::plugin::host::send_message(&entity_id, "the wolves finish you off");
+    }
 
-    fn on_respawn(_entity_id: String) {}
+    fn on_respawn(entity_id: String) {
+        let _ = worldzero::plugin::host::send_message(
+            &entity_id,
+            "you wake up, wolves nowhere in sight",
+        );
+    }
 
     // This one *is* live: `wolf-pack-01`'s spawn table declares
     // `route_id: wolf-patrol-01` (config/zone.manifest.example.yaml), so
@@ -131,10 +145,16 @@ impl Guest for Plugin {
         );
     }
 
-    // No live host call site exists yet, same caveat as on_damage_calc
-    // and friends above — nothing in the client protocol has a "use an
-    // item" action yet.
-    fn on_item_use(_entity_id: String, _item_type: String) {}
+    // Live: fires when a client sends a UseItem action (#154) — the core
+    // never validates ownership itself, so this fixed response fires
+    // even for an item this connection doesn't actually own; a real
+    // plugin wanting to prevent that checks its own bookkeeping first.
+    fn on_item_use(entity_id: String, item_type: String) {
+        let _ = worldzero::plugin::host::send_message(
+            &entity_id,
+            &format!("you use the {item_type} — the wolves eye it warily"),
+        );
+    }
 }
 
 export!(Plugin);

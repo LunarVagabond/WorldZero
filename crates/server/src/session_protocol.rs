@@ -27,6 +27,26 @@ pub enum ClientMessage {
     /// for the next simulation tick, never applied immediately
     /// (`world::Zone::request_move`).
     Move { x: f64, y: f64 },
+    /// Requests attacking `target_entity_id` — the server confirms the
+    /// target actually exists in this zone before ever calling the
+    /// configured plugin's `on-damage-calc` hook; never a client-reported
+    /// damage amount or outcome, only the intent to attack (#154).
+    /// `stat_key` is an opaque, game-defined string, same discipline as
+    /// `apply-stat-delta`'s own `stat_key`.
+    Attack {
+        target_entity_id: String,
+        stat_key: String,
+    },
+    /// Requests using `item_type` from this connection's own inventory —
+    /// an opaque string. The server never validates ownership itself;
+    /// the configured plugin's `on-item-use` hook decides what using it
+    /// does (#154).
+    UseItem { item_type: String },
+    /// Requests interacting with `npc_entity_id` specifically, distinct
+    /// from a generic trigger-volume interaction — the server confirms
+    /// the target actually is a currently-spawned NPC before ever
+    /// calling the configured plugin's `on-npc-interact` hook (#154).
+    InteractNpc { npc_entity_id: String },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -167,6 +187,19 @@ impl From<&ClientMessage> for proto::ClientMessage {
         use proto::client_message::Kind;
         let kind = match message {
             ClientMessage::Move { x, y } => Kind::Move(proto::Move { x: *x, y: *y }),
+            ClientMessage::Attack {
+                target_entity_id,
+                stat_key,
+            } => Kind::Attack(proto::Attack {
+                target_entity_id: target_entity_id.clone(),
+                stat_key: stat_key.clone(),
+            }),
+            ClientMessage::UseItem { item_type } => Kind::UseItem(proto::UseItem {
+                item_type: item_type.clone(),
+            }),
+            ClientMessage::InteractNpc { npc_entity_id } => Kind::InteractNpc(proto::InteractNpc {
+                npc_entity_id: npc_entity_id.clone(),
+            }),
         };
         proto::ClientMessage { kind: Some(kind) }
     }
@@ -179,6 +212,19 @@ impl TryFrom<proto::ClientMessage> for ClientMessage {
         use proto::client_message::Kind;
         match message.kind {
             Some(Kind::Move(proto::Move { x, y })) => Ok(ClientMessage::Move { x, y }),
+            Some(Kind::Attack(proto::Attack {
+                target_entity_id,
+                stat_key,
+            })) => Ok(ClientMessage::Attack {
+                target_entity_id,
+                stat_key,
+            }),
+            Some(Kind::UseItem(proto::UseItem { item_type })) => {
+                Ok(ClientMessage::UseItem { item_type })
+            }
+            Some(Kind::InteractNpc(proto::InteractNpc { npc_entity_id })) => {
+                Ok(ClientMessage::InteractNpc { npc_entity_id })
+            }
             None => Err(Error::new(
                 "server",
                 "gateway world message has no kind set",

@@ -83,6 +83,39 @@ enum WorldCommand {
         entity_id: EntityId,
         reply: oneshot::Sender<()>,
     },
+    /// A client's `Attack` action targeting another entity (#154) — the
+    /// actor confirms `target` is actually spawned in this zone
+    /// (`Zone::kind_of`) before ever calling the hook, the same
+    /// server-authoritative discipline `RequestMove` already applies to
+    /// a client-claimed position; an unknown/vanished target is logged
+    /// and dropped, not passed through. Fires `on-damage-calc` with
+    /// `base-amount` always `0` (the core never invents a damage number
+    /// — see `wit/plugin.wit`'s doc comment) and `stat_key` as the client
+    /// requested (an opaque, game-defined string, same "id/key is
+    /// plugin-owned" discipline as `item_type` below — never a
+    /// core-privileged concept like "hp").
+    Attack {
+        attacker: EntityId,
+        target: EntityId,
+        stat_key: String,
+    },
+    /// A client's `UseItem` action (#154) — `item_type` is an opaque
+    /// string, same discipline as `grant-item`/`remove-item`; the core
+    /// never validates ownership itself, the plugin decides what using it
+    /// does (typically by calling `remove-item` itself in response).
+    UseItem {
+        entity_id: EntityId,
+        item_type: String,
+    },
+    /// A client's `InteractNpc` action targeting a specific NPC entity
+    /// (#154), distinct from the generic trigger-volume `on-interact` —
+    /// the actor confirms `npc` is actually a currently-spawned NPC
+    /// (`Zone::kind_of`) before ever calling the hook; a target that
+    /// doesn't exist or isn't an NPC is logged and dropped.
+    InteractNpc {
+        npc: EntityId,
+        actor: EntityId,
+    },
 }
 
 #[derive(Clone)]
@@ -195,6 +228,28 @@ impl WorldHandle {
             let _ = reply_rx.await;
         }
     }
+
+    /// Fire-and-forget, same contract as `dispatch_plugin_message` (#154).
+    pub fn dispatch_attack(&self, attacker: EntityId, target: EntityId, stat_key: String) {
+        self.send(WorldCommand::Attack {
+            attacker,
+            target,
+            stat_key,
+        });
+    }
+
+    /// Fire-and-forget, same contract as `dispatch_plugin_message` (#154).
+    pub fn dispatch_use_item(&self, entity_id: EntityId, item_type: String) {
+        self.send(WorldCommand::UseItem {
+            entity_id,
+            item_type,
+        });
+    }
+
+    /// Fire-and-forget, same contract as `dispatch_plugin_message` (#154).
+    pub fn dispatch_interact_npc(&self, npc: EntityId, actor: EntityId) {
+        self.send(WorldCommand::InteractNpc { npc, actor });
+    }
 }
 
 /// Spawns the actor task and returns a handle to it. `on_tick` runs once
@@ -271,22 +326,9 @@ pub fn spawn_world_actor(
                                 tracing::warn!(%entity, error = %e, "plugin on_npc_tick hook failed");
                             }
                         }
-                        let moves = runtime.drain_pending_moves();
-                        let stat_deltas = runtime.drain_pending_stat_deltas();
-                        let item_grants = runtime.drain_pending_item_grants();
-                        let item_removals = runtime.drain_pending_item_removals();
-                        let currency_deltas = runtime.drain_pending_currency_deltas();
-                        let state_writes = runtime.drain_pending_state_writes();
-                        let acquired = apply_plugin_pending_effects(
-                            &mut zone, moves, stat_deltas, item_grants, item_removals,
-                            currency_deltas, state_writes, &character_store, &entity_characters,
-                            &plugin_state_store,
+                        drain_and_apply_plugin_effects(
+                            runtime, &mut zone, &character_store, &entity_characters, &plugin_state_store,
                         ).await;
-                        for (entity_id, item_type, new_quantity) in acquired {
-                            if let Err(e) = runtime.plugin.on_item_acquire(&entity_id, &item_type, new_quantity) {
-                                tracing::warn!(entity_id, item_type, error = %e, "plugin on_item_acquire hook failed");
-                            }
-                        }
                     }
 
                     next_tick_at += tick_interval;
@@ -325,22 +367,9 @@ pub fn spawn_world_actor(
                             for spawn_table_id in runtime.drain_pending_spawns() {
                                 spawn_npc_from_table(&mut zone, &spawn_table_id);
                             }
-                            let moves = runtime.drain_pending_moves();
-                            let stat_deltas = runtime.drain_pending_stat_deltas();
-                            let item_grants = runtime.drain_pending_item_grants();
-                            let item_removals = runtime.drain_pending_item_removals();
-                            let currency_deltas = runtime.drain_pending_currency_deltas();
-                            let state_writes = runtime.drain_pending_state_writes();
-                            let acquired = apply_plugin_pending_effects(
-                                &mut zone, moves, stat_deltas, item_grants, item_removals,
-                                currency_deltas, state_writes, &character_store, &entity_characters,
-                                &plugin_state_store,
+                            drain_and_apply_plugin_effects(
+                                runtime, &mut zone, &character_store, &entity_characters, &plugin_state_store,
                             ).await;
-                            for (entity_id, item_type, new_quantity) in acquired {
-                                if let Err(e) = runtime.plugin.on_item_acquire(&entity_id, &item_type, new_quantity) {
-                                    tracing::warn!(entity_id, item_type, error = %e, "plugin on_item_acquire hook failed");
-                                }
-                            }
                         }
                         WorldCommand::ChatCommand { command, args, sender_entity_id } => {
                             let Some(runtime) = plugin.as_mut() else {
@@ -355,22 +384,9 @@ pub fn spawn_world_actor(
                             if let Err(e) = runtime.plugin.on_chat_command(&command, &args, &sender_entity_id_str) {
                                 tracing::warn!(command, error = %e, "plugin on_chat_command hook failed");
                             }
-                            let moves = runtime.drain_pending_moves();
-                            let stat_deltas = runtime.drain_pending_stat_deltas();
-                            let item_grants = runtime.drain_pending_item_grants();
-                            let item_removals = runtime.drain_pending_item_removals();
-                            let currency_deltas = runtime.drain_pending_currency_deltas();
-                            let state_writes = runtime.drain_pending_state_writes();
-                            let acquired = apply_plugin_pending_effects(
-                                &mut zone, moves, stat_deltas, item_grants, item_removals,
-                                currency_deltas, state_writes, &character_store, &entity_characters,
-                                &plugin_state_store,
+                            drain_and_apply_plugin_effects(
+                                runtime, &mut zone, &character_store, &entity_characters, &plugin_state_store,
                             ).await;
-                            for (entity_id, item_type, new_quantity) in acquired {
-                                if let Err(e) = runtime.plugin.on_item_acquire(&entity_id, &item_type, new_quantity) {
-                                    tracing::warn!(entity_id, item_type, error = %e, "plugin on_item_acquire hook failed");
-                                }
-                            }
                         }
                         WorldCommand::PlayerJoin { entity_id } => {
                             let Some(runtime) = plugin.as_mut() else {
@@ -380,22 +396,9 @@ pub fn spawn_world_actor(
                             if let Err(e) = runtime.plugin.on_player_join_zone(&entity_id_str) {
                                 tracing::warn!(%entity_id, error = %e, "plugin on_player_join_zone hook failed");
                             }
-                            let moves = runtime.drain_pending_moves();
-                            let stat_deltas = runtime.drain_pending_stat_deltas();
-                            let item_grants = runtime.drain_pending_item_grants();
-                            let item_removals = runtime.drain_pending_item_removals();
-                            let currency_deltas = runtime.drain_pending_currency_deltas();
-                            let state_writes = runtime.drain_pending_state_writes();
-                            let acquired = apply_plugin_pending_effects(
-                                &mut zone, moves, stat_deltas, item_grants, item_removals,
-                                currency_deltas, state_writes, &character_store, &entity_characters,
-                                &plugin_state_store,
+                            drain_and_apply_plugin_effects(
+                                runtime, &mut zone, &character_store, &entity_characters, &plugin_state_store,
                             ).await;
-                            for (entity_id, item_type, new_quantity) in acquired {
-                                if let Err(e) = runtime.plugin.on_item_acquire(&entity_id, &item_type, new_quantity) {
-                                    tracing::warn!(entity_id, item_type, error = %e, "plugin on_item_acquire hook failed");
-                                }
-                            }
                         }
                         WorldCommand::PlayerLeave { entity_id, reply } => {
                             let Some(runtime) = plugin.as_mut() else {
@@ -406,23 +409,56 @@ pub fn spawn_world_actor(
                             if let Err(e) = runtime.plugin.on_player_leave_zone(&entity_id_str) {
                                 tracing::warn!(%entity_id, error = %e, "plugin on_player_leave_zone hook failed");
                             }
-                            let moves = runtime.drain_pending_moves();
-                            let stat_deltas = runtime.drain_pending_stat_deltas();
-                            let item_grants = runtime.drain_pending_item_grants();
-                            let item_removals = runtime.drain_pending_item_removals();
-                            let currency_deltas = runtime.drain_pending_currency_deltas();
-                            let state_writes = runtime.drain_pending_state_writes();
-                            let acquired = apply_plugin_pending_effects(
-                                &mut zone, moves, stat_deltas, item_grants, item_removals,
-                                currency_deltas, state_writes, &character_store, &entity_characters,
-                                &plugin_state_store,
+                            drain_and_apply_plugin_effects(
+                                runtime, &mut zone, &character_store, &entity_characters, &plugin_state_store,
                             ).await;
-                            for (entity_id, item_type, new_quantity) in acquired {
-                                if let Err(e) = runtime.plugin.on_item_acquire(&entity_id, &item_type, new_quantity) {
-                                    tracing::warn!(entity_id, item_type, error = %e, "plugin on_item_acquire hook failed");
-                                }
-                            }
                             let _ = reply.send(());
+                        }
+                        WorldCommand::Attack { attacker, target, stat_key } => {
+                            let Some(runtime) = plugin.as_mut() else {
+                                continue;
+                            };
+                            if zone.kind_of(target).is_none() {
+                                tracing::warn!(%attacker, %target, "attack targeted an entity that isn't spawned in this zone");
+                                continue;
+                            }
+                            let attacker_str = attacker.to_string();
+                            let target_str = target.to_string();
+                            if let Err(e) = runtime.plugin.on_damage_calc(&attacker_str, &target_str, &stat_key, 0) {
+                                tracing::warn!(%attacker, %target, error = %e, "plugin on_damage_calc hook failed");
+                            }
+                            drain_and_apply_plugin_effects(
+                                runtime, &mut zone, &character_store, &entity_characters, &plugin_state_store,
+                            ).await;
+                        }
+                        WorldCommand::UseItem { entity_id, item_type } => {
+                            let Some(runtime) = plugin.as_mut() else {
+                                continue;
+                            };
+                            let entity_id_str = entity_id.to_string();
+                            if let Err(e) = runtime.plugin.on_item_use(&entity_id_str, &item_type) {
+                                tracing::warn!(%entity_id, item_type, error = %e, "plugin on_item_use hook failed");
+                            }
+                            drain_and_apply_plugin_effects(
+                                runtime, &mut zone, &character_store, &entity_characters, &plugin_state_store,
+                            ).await;
+                        }
+                        WorldCommand::InteractNpc { npc, actor } => {
+                            let Some(runtime) = plugin.as_mut() else {
+                                continue;
+                            };
+                            if zone.kind_of(npc) != Some(EntityKind::Npc) {
+                                tracing::warn!(%npc, %actor, "npc-interact targeted an entity that isn't a currently-spawned NPC");
+                                continue;
+                            }
+                            let npc_str = npc.to_string();
+                            let actor_str = actor.to_string();
+                            if let Err(e) = runtime.plugin.on_npc_interact(&npc_str, &actor_str) {
+                                tracing::warn!(%npc, %actor, error = %e, "plugin on_npc_interact hook failed");
+                            }
+                            drain_and_apply_plugin_effects(
+                                runtime, &mut zone, &character_store, &entity_characters, &plugin_state_store,
+                            ).await;
                         }
                     }
                 }
@@ -449,6 +485,61 @@ fn resolve_character(
 ) -> Option<common::id::CharacterId> {
     let entity_id: EntityId = entity_id.parse().ok()?;
     entity_characters.lock().unwrap().get(&entity_id).copied()
+}
+
+/// Drains every pending host-function request a plugin hook call just
+/// made, applies them, and fires whatever confirmation hooks that
+/// unblocks — the one call every `WorldCommand` match arm that invokes a
+/// hook makes right after, so a plugin's host-function calls take effect
+/// (and `on-item-acquire`/`on-death`/`on-respawn` fire back) regardless
+/// of which hook made them. Draining first (`apply_plugin_pending_effects`
+/// takes owned data, not a borrow) keeps no live borrow of `runtime`
+/// across that function's `.await`s; the plain field accesses/synchronous
+/// hook calls here are the only place `runtime` itself is touched.
+async fn drain_and_apply_plugin_effects(
+    runtime: &mut PluginRuntime,
+    zone: &mut Zone,
+    character_store: &CharacterStore,
+    entity_characters: &EntityCharacters,
+    plugin_state_store: &crate::plugin_state::PluginStateStore,
+) {
+    let moves = runtime.drain_pending_moves();
+    let stat_deltas = runtime.drain_pending_stat_deltas();
+    let item_grants = runtime.drain_pending_item_grants();
+    let item_removals = runtime.drain_pending_item_removals();
+    let currency_deltas = runtime.drain_pending_currency_deltas();
+    let state_writes = runtime.drain_pending_state_writes();
+    let acquired = apply_plugin_pending_effects(
+        zone,
+        moves,
+        stat_deltas,
+        item_grants,
+        item_removals,
+        currency_deltas,
+        state_writes,
+        character_store,
+        entity_characters,
+        plugin_state_store,
+    )
+    .await;
+    for (entity_id, item_type, new_quantity) in acquired {
+        if let Err(e) = runtime
+            .plugin
+            .on_item_acquire(&entity_id, &item_type, new_quantity)
+        {
+            tracing::warn!(entity_id, item_type, error = %e, "plugin on_item_acquire hook failed");
+        }
+    }
+    for entity_id in runtime.drain_pending_deaths() {
+        if let Err(e) = runtime.plugin.on_death(&entity_id) {
+            tracing::warn!(entity_id, error = %e, "plugin on_death hook failed");
+        }
+    }
+    for entity_id in runtime.drain_pending_respawns() {
+        if let Err(e) = runtime.plugin.on_respawn(&entity_id) {
+            tracing::warn!(entity_id, error = %e, "plugin on_respawn hook failed");
+        }
+    }
 }
 
 /// Applies whatever `move-entity`/`apply-stat-delta`/`grant-item`/

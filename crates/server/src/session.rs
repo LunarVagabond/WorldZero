@@ -262,6 +262,29 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
                         Ok(ClientMessage::Move { x, y }) => {
                             zone.world.request_move(entity_id, (x, y));
                         }
+                        Ok(ClientMessage::Attack { target_entity_id, stat_key }) => {
+                            match target_entity_id.parse::<EntityId>() {
+                                Ok(target) => zone.world.dispatch_attack(entity_id, target, stat_key),
+                                Err(_) => {
+                                    send_world(&mut sink, &ServerMessage::Error {
+                                        message: format!("{target_entity_id:?} is not a valid entity id"),
+                                    }).await?;
+                                }
+                            }
+                        }
+                        Ok(ClientMessage::UseItem { item_type }) => {
+                            zone.world.dispatch_use_item(entity_id, item_type);
+                        }
+                        Ok(ClientMessage::InteractNpc { npc_entity_id }) => {
+                            match npc_entity_id.parse::<EntityId>() {
+                                Ok(npc) => zone.world.dispatch_interact_npc(npc, entity_id),
+                                Err(_) => {
+                                    send_world(&mut sink, &ServerMessage::Error {
+                                        message: format!("{npc_entity_id:?} is not a valid entity id"),
+                                    }).await?;
+                                }
+                            }
+                        }
                         Err(e) => {
                             send_world(&mut sink, &ServerMessage::Error { message: e.to_string() }).await?;
                         }
