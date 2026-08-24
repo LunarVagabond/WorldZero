@@ -32,6 +32,7 @@ impl UsernamePasswordProvider {
     /// Not part of `AuthProvider` — registration isn't universal across
     /// providers (an OAuth provider has no separate register step), so it
     /// lives only on the provider that actually needs it.
+    #[tracing::instrument(skip(self, password), fields(username))]
     pub async fn register(&self, username: &str, password: &str) -> Result<AccountId> {
         let hash = hash_password(password)?;
         self.store.create(username, &hash).await
@@ -40,6 +41,7 @@ impl UsernamePasswordProvider {
 
 #[async_trait]
 impl AuthProvider for UsernamePasswordProvider {
+    #[tracing::instrument(skip_all)]
     async fn verify_credentials(&self, credentials: &Credentials) -> Result<AccountId> {
         let creds: UsernamePasswordCredentials = serde_json::from_value(credentials.0.clone())
             .map_err(|e| {
@@ -65,6 +67,7 @@ impl AuthProvider for UsernamePasswordProvider {
         }
     }
 
+    #[tracing::instrument(skip(self), fields(%account_id))]
     async fn issue_session(&self, account_id: AccountId) -> Result<Session> {
         self.sessions.issue(account_id).await
     }

@@ -60,6 +60,20 @@ The point of reserving `ERROR` is operational, not stylistic: once alerting exis
 
 Core ships the fixed stdout format above and nothing more — no pluggable log-sink abstraction, no bundled/blessed Loki+Grafana or DataDog integration. The format is already portable enough that any mainstream shipper (Promtail, Filebeat, DataDog Agent, Vector) can tail it without WorldZero doing anything else. What ships beyond this is docs-only — example shipper configs, "reference, not maintained product," same framing already used for the Grafana dashboard (#59/#68) — see [Log Export/Aggregation Cookbook](Log_Export_Cookbook.md) (#122) for worked examples, including how to filter/tag log output by crate.
 
-## Tracing and the admin API
+## Distributed tracing (#49, implemented)
 
-Still placeholder — OpenTelemetry spans (#49) and the admin/introspection API surface (#56) are designed at a high level in the proposal but not yet at spec detail.
+OpenTelemetry-compatible spans, layered onto the exact same `tracing` instrumentation (`tracing::instrument`, `tracing::info!`/`warn!`/etc.) every crate already uses for the fixed log line format above — one instrumentation API, two consumers, not two tracing systems to keep in sync.
+
+**Enable/disable:** `WZ_OTEL_ENDPOINT` (an OTLP gRPC collector address, e.g. `http://localhost:4317`) — unset disables tracing export entirely. There is no separate `WZ_SERVICE_TRACING_ENABLED` flag the way `chat`/`metrics` have (`common::config::ServicesConfig`): unlike those, tracing has no useful zero-config default (a self-hoster without a running collector has nothing to send spans to), so the endpoint's presence *is* the enable signal — same pattern `gateway::tls`'s `WZ_TLS_CERT_PATH` already uses. `WZ_OTEL_SERVICE_NAME` (default `"worldzero"`) tags every exported span's `service.name` resource attribute — one value today since every crate still runs inside one combined `server` process; `tracing`'s own `target` field (the log line format's `SOURCE` column) still identifies which crate emitted a given span.
+
+**Call site:** `common::logging::init()` — the same function every binary already calls with no arguments (`server`, `common::bin::migrate`, `chat`'s demo bins, ...). Whether OTel export is active is decided entirely by the env var, never a different function or code path — this is what #49's "works whether services are combined in one process or split across separate processes, without requiring different code paths" acceptance criterion means in practice: nothing about *how* a call site is instrumented changes based on deployment topology, only whether a collector is listening.
+
+**Demonstrated cross-service path:** `server::session::authenticate` (`gateway`, the connection's own task) → `auth::UsernamePasswordProvider::verify_credentials`/`register`/`issue_session` (`auth`) → `auth::SessionManager::issue`'s Redis write — a single client action (the connection's first envelope) nests spans across three crates under one trace, fully synchronous and awaited end to end, so span parent/child linkage is exact with no manual context-passing needed. Also individually instrumented (not chained into that same trace, since there's no single "caused by" request to nest under): `world::Zone::tick` (one span per tick — a tick batches queued moves from many different callers, not one), `character::CharacterStore::set_stat`/`update_position_and_zone`, and `plugin_host::LoadedPlugin::on_load`/`on_message`.
+
+**Real cross-*process* trace-context propagation** (a W3C traceparent-equivalent carried over the wire) is deferred — nothing in this codebase is actually split across separate processes yet (`server` remains one combined process per docs/PROPOSAL.md's Phase 1/2 scope), so there is no real network boundary to propagate a trace context across. When that day comes (`realm-directory`'s eventual multi-process story, tracked in #130), the same `tracing`-based instrumentation carries forward unchanged; only a wire-level context-carrying mechanism would need adding then, not a rewrite of the spans themselves.
+
+**Hot-path overhead:** measured, not assumed — `world::zone::tests::tick_span_overhead_is_negligible` runs 1,000 instrumented ticks under a real (non-no-op) subscriber and confirms the total stays several orders of magnitude under the 20Hz tick budget (50ms/tick).
+
+## The admin API
+
+Still placeholder — the admin/introspection API surface (#56) is designed at a high level in the proposal but not yet at spec detail.

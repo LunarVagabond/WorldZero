@@ -137,6 +137,7 @@ impl CharacterStore {
     /// crossed a zone link (#45) mid-session, so the persisted zone
     /// always reflects where the character actually ended up, not just
     /// where they started the connection.
+    #[tracing::instrument(skip(self, position), fields(%character_id, zone_id))]
     pub async fn update_position_and_zone(
         &self,
         character_id: CharacterId,
@@ -160,6 +161,7 @@ impl CharacterStore {
 
     /// Validates against the declared schema, then writes — a rejected
     /// write never reaches the `stats` column.
+    #[tracing::instrument(skip(self), fields(%character_id))]
     pub async fn set_stat(&self, character_id: CharacterId, key: &str, value: i64) -> Result<()> {
         self.schema.validate_write(key, value)?;
 

@@ -150,6 +150,18 @@ impl Zone {
     /// fixed rate. Pure and synchronous — the async wall-clock scheduling
     /// lives in [`Self::run`], kept separate so tick logic itself is
     /// trivially unit-testable without a real clock.
+    ///
+    /// Instrumented (#49) so a trace viewer can see `world`'s own
+    /// per-tick span alongside `gateway`/`auth`/`character`/`plugin-host`'s
+    /// spans — not chained as one parent/child trace with whichever
+    /// client request queued a given tick's moves (a tick batches N
+    /// queued moves from N different callers at once, so there's no
+    /// single "caused by" request to nest under; see
+    /// `crates/server/src/session.rs`'s `authenticate` for the ticket's
+    /// actual demonstrated parent/child cross-service path).
+    /// `#[tracing::instrument]`'s overhead on this hot path is measured
+    /// in `zone::tests::tick_span_overhead_is_negligible`, not assumed.
+    #[tracing::instrument(skip_all)]
     pub fn tick(&mut self) -> Vec<(EntityId, MovementOutcome)> {
         let dt = self.config.tick_interval().as_secs_f64();
         let moves = std::mem::take(&mut self.pending_moves);
@@ -561,6 +573,41 @@ links:
 
         assert_eq!(outcomes, vec![(entity, MovementOutcome::Applied)]);
         assert_eq!(zone.position_of(entity), Some((51.0, 50.0)));
+    }
+
+    #[test]
+    fn tick_span_overhead_is_negligible() {
+        // Not a formal perf target (same spirit as
+        // `spatial::tests::radius_queries_stay_fast_at_a_few_thousand_entities`)
+        // — proves `#[tracing::instrument]` on `tick()`'s hot path doesn't
+        // meaningfully eat into the 20Hz tick budget (50ms/tick), per
+        // #49's acceptance criteria ("measured, not assumed negligible").
+        // Runs under a real (non-no-op) subscriber, not the default
+        // no-subscriber case a `None` dispatcher already makes cheap.
+        use tracing_subscriber::prelude::*;
+
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_subscriber::fmt::layer().with_writer(std::io::sink));
+
+        tracing::subscriber::with_default(subscriber, || {
+            let mut zone = zone_with_square_bounds();
+            let entity = EntityId::new();
+            zone.spawn(entity, EntityKind::Player, (50.0, 50.0));
+
+            let start = std::time::Instant::now();
+            for i in 0..1000 {
+                let offset = if i % 2 == 0 { 0.05 } else { -0.05 };
+                zone.request_move(entity, (50.0 + offset, 50.0));
+                zone.tick();
+            }
+            let elapsed = start.elapsed();
+
+            assert!(
+                elapsed < std::time::Duration::from_millis(500),
+                "1,000 instrumented ticks took {elapsed:?} ({:?}/tick against a 50ms/tick budget at 20Hz) — looks like a real instrumentation regression",
+                elapsed / 1000
+            );
+        });
     }
 
     #[test]

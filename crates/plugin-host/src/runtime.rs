@@ -257,6 +257,7 @@ pub struct LoadedPlugin {
 }
 
 impl LoadedPlugin {
+    #[tracing::instrument(skip_all)]
     pub fn on_load(&mut self) -> Result<()> {
         self.bindings
             .worldzero_plugin_hooks()
@@ -288,6 +289,7 @@ impl LoadedPlugin {
     /// Delivers a gateway-routed message whose `message_type` matched one
     /// of this plugin's declared `message_types` (#95) — the caller is
     /// responsible for that match; this always calls the hook.
+    #[tracing::instrument(skip(self, payload), fields(message_type, sender_entity_id))]
     pub fn on_message(
         &mut self,
         message_type: u16,
