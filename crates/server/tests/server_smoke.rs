@@ -277,6 +277,7 @@ fn setup_config_dir(test_name: &str) -> PathBuf {
 [plugin]
 name = "test-plugin"
 host_api_version = "0.7.0"
+capabilities = ["spawning", "movement", "combat", "economy"]
 message_types = [1000]
 "#,
     )

@@ -134,6 +134,147 @@ pub trait HostCallbacks: Send + 'static {
     fn report_respawn(&mut self, entity_id: &str) -> std::result::Result<(), String>;
 }
 
+/// Which capability (`manifest::KNOWN_CAPABILITIES`) a host function
+/// requires, `None` for the handful that are ungated regardless of what
+/// a plugin declared (#153): `send-message` (a plugin that can't reply
+/// to anyone is useless for almost any purpose), `caller-role` (read-only,
+/// answers from a cache already scoped to the calling connection),
+/// `plugin-state-get`/`-set` (self-scoped storage — a plugin reading or
+/// writing its own state can't affect another entity/plugin). Every
+/// other host function reaches across entity boundaries (moving/damaging/
+/// granting-to another entity, spawning a new one) and is gated.
+fn required_capability(function: &str) -> Option<&'static str> {
+    use crate::manifest::{
+        CAPABILITY_COMBAT, CAPABILITY_ECONOMY, CAPABILITY_MOVEMENT, CAPABILITY_SPAWNING,
+    };
+    match function {
+        "spawn-npc" => Some(CAPABILITY_SPAWNING),
+        "move-entity" => Some(CAPABILITY_MOVEMENT),
+        "apply-stat-delta" | "report-death" | "report-respawn" => Some(CAPABILITY_COMBAT),
+        "grant-item" | "remove-item" | "modify-currency" => Some(CAPABILITY_ECONOMY),
+        _ => None,
+    }
+}
+
+/// Wraps a real `HostCallbacks` implementor and refuses any call to a
+/// gated host function the plugin didn't declare the covering capability
+/// for (#153) — every `PluginHost::load`ed plugin goes through this, so
+/// enforcement lives once in `plugin-host` itself rather than being
+/// re-implemented by every `HostCallbacks` implementor (`server`'s
+/// `PluginCallbacks` and friends stay unaware of capability gating
+/// entirely). A rejected call surfaces as an ordinary `Err` string back
+/// to the plugin, the same shape every other host-function failure
+/// already takes — never a trap/panic.
+struct CapabilityGatedCallbacks {
+    inner: Box<dyn HostCallbacks>,
+    granted: std::collections::HashSet<String>,
+}
+
+impl CapabilityGatedCallbacks {
+    fn new(inner: Box<dyn HostCallbacks>, capabilities: &[String]) -> Self {
+        Self {
+            inner,
+            granted: capabilities.iter().cloned().collect(),
+        }
+    }
+
+    fn check(&self, function: &str) -> std::result::Result<(), String> {
+        match required_capability(function) {
+            Some(capability) if !self.granted.contains(capability) => Err(format!(
+                "plugin lacks the {capability:?} capability required to call {function} \
+                 — declare it in plugin.toml's capabilities list"
+            )),
+            _ => Ok(()),
+        }
+    }
+}
+
+impl HostCallbacks for CapabilityGatedCallbacks {
+    fn spawn_npc(&mut self, spawn_table_id: &str) -> std::result::Result<String, String> {
+        self.check("spawn-npc")?;
+        self.inner.spawn_npc(spawn_table_id)
+    }
+
+    fn send_message(
+        &mut self,
+        target_entity_id: &str,
+        body: &str,
+    ) -> std::result::Result<(), String> {
+        self.inner.send_message(target_entity_id, body)
+    }
+
+    fn apply_stat_delta(
+        &mut self,
+        entity_id: &str,
+        stat_key: &str,
+        delta: i64,
+    ) -> std::result::Result<(), String> {
+        self.check("apply-stat-delta")?;
+        self.inner.apply_stat_delta(entity_id, stat_key, delta)
+    }
+
+    fn move_entity(&mut self, entity_id: &str, x: f64, y: f64) -> std::result::Result<(), String> {
+        self.check("move-entity")?;
+        self.inner.move_entity(entity_id, x, y)
+    }
+
+    fn grant_item(
+        &mut self,
+        entity_id: &str,
+        item_type: &str,
+        quantity: i64,
+    ) -> std::result::Result<(), String> {
+        self.check("grant-item")?;
+        self.inner.grant_item(entity_id, item_type, quantity)
+    }
+
+    fn remove_item(
+        &mut self,
+        entity_id: &str,
+        item_type: &str,
+        quantity: i64,
+    ) -> std::result::Result<(), String> {
+        self.check("remove-item")?;
+        self.inner.remove_item(entity_id, item_type, quantity)
+    }
+
+    fn modify_currency(&mut self, entity_id: &str, delta: i64) -> std::result::Result<(), String> {
+        self.check("modify-currency")?;
+        self.inner.modify_currency(entity_id, delta)
+    }
+
+    fn caller_role(&mut self, entity_id: &str) -> std::result::Result<Vec<String>, String> {
+        self.inner.caller_role(entity_id)
+    }
+
+    fn plugin_state_get(
+        &mut self,
+        scope: PluginStateScope,
+        key: &str,
+    ) -> std::result::Result<Option<Vec<u8>>, String> {
+        self.inner.plugin_state_get(scope, key)
+    }
+
+    fn plugin_state_set(
+        &mut self,
+        scope: PluginStateScope,
+        key: &str,
+        value: Vec<u8>,
+    ) -> std::result::Result<(), String> {
+        self.inner.plugin_state_set(scope, key, value)
+    }
+
+    fn report_death(&mut self, entity_id: &str) -> std::result::Result<(), String> {
+        self.check("report-death")?;
+        self.inner.report_death(entity_id)
+    }
+
+    fn report_respawn(&mut self, entity_id: &str) -> std::result::Result<(), String> {
+        self.check("report-respawn")?;
+        self.inner.report_respawn(entity_id)
+    }
+}
+
 struct PluginState {
     wasi_ctx: WasiCtx,
     table: ResourceTable,
@@ -304,7 +445,13 @@ impl PluginHost {
         let state = PluginState {
             wasi_ctx: WasiCtxBuilder::new().build(),
             table: ResourceTable::new(),
-            callbacks: host_callbacks,
+            // Every loaded plugin's calls go through the capability gate
+            // (#153) — enforced here, once, rather than trusting each
+            // `HostCallbacks` implementor to re-check it.
+            callbacks: Box::new(CapabilityGatedCallbacks::new(
+                host_callbacks,
+                &manifest.plugin.capabilities,
+            )),
         };
         let mut store = Store::new(&self.engine, state);
 
@@ -538,5 +685,137 @@ impl LoadedPlugin {
             .worldzero_plugin_hooks()
             .call_on_item_use(&mut self.store, entity_id, item_type)
             .map_err(|e| Error::new("plugin-host", format!("on_item_use hook failed: {e:#}")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A `HostCallbacks` that always succeeds — these tests only care
+    /// whether `CapabilityGatedCallbacks` lets a call *through*, not what
+    /// the underlying implementor does with it (`plugin_sandbox.rs`
+    /// covers the real-wasm end-to-end case, #153's acceptance criteria).
+    struct AlwaysOk;
+
+    impl HostCallbacks for AlwaysOk {
+        fn spawn_npc(&mut self, _: &str) -> std::result::Result<String, String> {
+            Ok(String::new())
+        }
+        fn send_message(&mut self, _: &str, _: &str) -> std::result::Result<(), String> {
+            Ok(())
+        }
+        fn apply_stat_delta(
+            &mut self,
+            _: &str,
+            _: &str,
+            _: i64,
+        ) -> std::result::Result<(), String> {
+            Ok(())
+        }
+        fn move_entity(&mut self, _: &str, _: f64, _: f64) -> std::result::Result<(), String> {
+            Ok(())
+        }
+        fn grant_item(&mut self, _: &str, _: &str, _: i64) -> std::result::Result<(), String> {
+            Ok(())
+        }
+        fn remove_item(&mut self, _: &str, _: &str, _: i64) -> std::result::Result<(), String> {
+            Ok(())
+        }
+        fn modify_currency(&mut self, _: &str, _: i64) -> std::result::Result<(), String> {
+            Ok(())
+        }
+        fn caller_role(&mut self, _: &str) -> std::result::Result<Vec<String>, String> {
+            Ok(Vec::new())
+        }
+        fn plugin_state_get(
+            &mut self,
+            _: PluginStateScope,
+            _: &str,
+        ) -> std::result::Result<Option<Vec<u8>>, String> {
+            Ok(None)
+        }
+        fn plugin_state_set(
+            &mut self,
+            _: PluginStateScope,
+            _: &str,
+            _: Vec<u8>,
+        ) -> std::result::Result<(), String> {
+            Ok(())
+        }
+        fn report_death(&mut self, _: &str) -> std::result::Result<(), String> {
+            Ok(())
+        }
+        fn report_respawn(&mut self, _: &str) -> std::result::Result<(), String> {
+            Ok(())
+        }
+    }
+
+    fn gated(capabilities: &[&str]) -> CapabilityGatedCallbacks {
+        CapabilityGatedCallbacks::new(
+            Box::new(AlwaysOk),
+            &capabilities
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    #[test]
+    fn ungated_functions_always_succeed_with_no_capabilities_declared() {
+        let mut callbacks = gated(&[]);
+        assert!(callbacks.send_message("e1", "hi").is_ok());
+        assert!(callbacks.caller_role("e1").is_ok());
+        assert!(
+            callbacks
+                .plugin_state_get(PluginStateScope::Entity("e1".to_string()), "k")
+                .is_ok()
+        );
+        assert!(
+            callbacks
+                .plugin_state_set(PluginStateScope::Entity("e1".to_string()), "k", vec![])
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn each_gated_function_is_rejected_without_its_capability_and_allowed_with_it() {
+        let mut none = gated(&[]);
+        assert!(none.spawn_npc("table").is_err());
+        assert!(none.move_entity("e1", 0.0, 0.0).is_err());
+        assert!(none.apply_stat_delta("e1", "hp", -1).is_err());
+        assert!(none.report_death("e1").is_err());
+        assert!(none.report_respawn("e1").is_err());
+        assert!(none.grant_item("e1", "torch", 1).is_err());
+        assert!(none.remove_item("e1", "torch", 1).is_err());
+        assert!(none.modify_currency("e1", 1).is_err());
+
+        let mut spawning = gated(&["spawning"]);
+        assert!(spawning.spawn_npc("table").is_ok());
+        assert!(spawning.move_entity("e1", 0.0, 0.0).is_err());
+
+        let mut movement = gated(&["movement"]);
+        assert!(movement.move_entity("e1", 0.0, 0.0).is_ok());
+        assert!(movement.apply_stat_delta("e1", "hp", -1).is_err());
+
+        let mut combat = gated(&["combat"]);
+        assert!(combat.apply_stat_delta("e1", "hp", -1).is_ok());
+        assert!(combat.report_death("e1").is_ok());
+        assert!(combat.report_respawn("e1").is_ok());
+        assert!(combat.grant_item("e1", "torch", 1).is_err());
+
+        let mut economy = gated(&["economy"]);
+        assert!(economy.grant_item("e1", "torch", 1).is_ok());
+        assert!(economy.remove_item("e1", "torch", 1).is_ok());
+        assert!(economy.modify_currency("e1", 1).is_ok());
+        assert!(economy.spawn_npc("table").is_err());
+    }
+
+    #[test]
+    fn a_rejection_names_the_missing_capability() {
+        let mut none = gated(&[]);
+        let err = none.grant_item("e1", "torch", 1).unwrap_err();
+        assert!(err.contains("economy"), "{err}");
+        assert!(err.contains("grant-item"), "{err}");
     }
 }

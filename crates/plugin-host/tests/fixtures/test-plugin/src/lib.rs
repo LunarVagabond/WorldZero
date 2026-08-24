@@ -44,8 +44,7 @@ impl Guest for Plugin {
     fn on_entity_spawn(_entity_id: String, _entity_type: String) {}
 
     fn on_player_join_zone(entity_id: String) {
-        let _ =
-            worldzero::plugin::host::send_message(&entity_id, &format!("welcome, {entity_id}"));
+        let _ = worldzero::plugin::host::send_message(&entity_id, &format!("welcome, {entity_id}"));
     }
 
     // Exercises a leave hook still being able to reach the departing
@@ -160,7 +159,17 @@ impl Guest for Plugin {
 
     fn on_chat_command(command: String, args: String, sender_entity_id: String) {
         if command == "give" {
-            let _ = worldzero::plugin::host::grant_item(&sender_entity_id, &args, 1);
+            // Reports a capability rejection (#153) back to the client —
+            // the only way a black-box/host-side test can observe a
+            // gated host-function call was actually refused through the
+            // real sandboxed call boundary, since the hook call itself
+            // still returns Ok regardless.
+            if let Err(e) = worldzero::plugin::host::grant_item(&sender_entity_id, &args, 1) {
+                let _ = worldzero::plugin::host::send_message(
+                    &sender_entity_id,
+                    &format!("grant-item failed: {e}"),
+                );
+            }
             return;
         }
         if command == "whoami" {
@@ -219,10 +228,7 @@ impl Guest for Plugin {
     fn on_item_use(entity_id: String, item_type: String) {
         let _ = worldzero::plugin::host::remove_item(&entity_id, &item_type, 1);
         let _ = worldzero::plugin::host::modify_currency(&entity_id, 5);
-        let _ = worldzero::plugin::host::send_message(
-            &entity_id,
-            &format!("used {item_type}"),
-        );
+        let _ = worldzero::plugin::host::send_message(&entity_id, &format!("used {item_type}"));
     }
 }
 
