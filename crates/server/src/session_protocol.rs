@@ -3,7 +3,10 @@
 //! once authenticated (docs/PROPOSAL.md, "Phased Roadmap," Phase 1: "one
 //! client able to connect, move, and persist state across sessions").
 //! `message_type` 200 — see docs/specs/Networking_Spec.md's catalog note.
-//! JSON payloads, same tradeoff as `auth`/`chat`'s gateway protocols.
+//! Protobuf payloads (`proto/session.proto`, decision #109, implemented
+//! in #123) — see `auth::gateway_protocol`'s doc comment for why the
+//! ergonomic `ClientMessage`/`ServerMessage` enums below wrap the
+//! generated `proto` module rather than being it.
 //!
 //! Identity comes from `auth::gateway_protocol`'s handshake first, same
 //! as chat's gateway integration — nothing here carries or trusts a
@@ -11,12 +14,14 @@
 
 use common::{Error, Result};
 use gateway::Envelope;
-use serde::{Deserialize, Serialize};
+
+mod proto {
+    include!(concat!(env!("OUT_DIR"), "/worldzero.session.rs"));
+}
 
 pub const WORLD_MESSAGE_TYPE: u16 = 200;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind")]
+#[derive(Debug, Clone)]
 pub enum ClientMessage {
     /// Requests moving this connection's own entity to `(x, y)` — queued
     /// for the next simulation tick, never applied immediately
@@ -24,7 +29,7 @@ pub enum ClientMessage {
     Move { x: f64, y: f64 },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RosterEntry {
     pub entity_id: String,
     pub entity_type: String,
@@ -32,8 +37,7 @@ pub struct RosterEntry {
     pub y: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind")]
+#[derive(Debug, Clone)]
 pub enum ServerMessage {
     /// Sent once, right after this connection's own entity is spawned
     /// into the zone — its assigned `entity_id`, its starting position
@@ -115,34 +119,204 @@ pub enum ServerMessage {
 impl ClientMessage {
     #[allow(dead_code, clippy::wrong_self_convention)]
     pub fn into_envelope(&self) -> Result<Envelope> {
-        encode(self)
+        encode(&proto::ClientMessage::from(self))
     }
 
     #[allow(dead_code)]
     pub fn from_envelope(envelope: &Envelope) -> Result<Self> {
-        decode(envelope)
+        decode::<proto::ClientMessage>(envelope)?.try_into()
     }
 }
 
 impl ServerMessage {
     #[allow(dead_code, clippy::wrong_self_convention)]
     pub fn into_envelope(&self) -> Result<Envelope> {
-        encode(self)
+        encode(&proto::ServerMessage::from(self))
     }
 
     #[allow(dead_code)]
     pub fn from_envelope(envelope: &Envelope) -> Result<Self> {
-        decode(envelope)
+        decode::<proto::ServerMessage>(envelope)?.try_into()
     }
 }
 
-fn encode(message: &impl Serialize) -> Result<Envelope> {
-    let payload = serde_json::to_vec(message)
-        .map_err(|e| Error::wrap("server", "failed to encode gateway world message", e))?;
-    Ok(Envelope::new(WORLD_MESSAGE_TYPE, payload))
+impl From<&RosterEntry> for proto::RosterEntry {
+    fn from(entry: &RosterEntry) -> Self {
+        proto::RosterEntry {
+            entity_id: entry.entity_id.clone(),
+            entity_type: entry.entity_type.clone(),
+            x: entry.x,
+            y: entry.y,
+        }
+    }
 }
 
-fn decode<T: for<'de> Deserialize<'de>>(envelope: &Envelope) -> Result<T> {
+impl From<proto::RosterEntry> for RosterEntry {
+    fn from(entry: proto::RosterEntry) -> Self {
+        RosterEntry {
+            entity_id: entry.entity_id,
+            entity_type: entry.entity_type,
+            x: entry.x,
+            y: entry.y,
+        }
+    }
+}
+
+impl From<&ClientMessage> for proto::ClientMessage {
+    fn from(message: &ClientMessage) -> Self {
+        use proto::client_message::Kind;
+        let kind = match message {
+            ClientMessage::Move { x, y } => Kind::Move(proto::Move { x: *x, y: *y }),
+        };
+        proto::ClientMessage { kind: Some(kind) }
+    }
+}
+
+impl TryFrom<proto::ClientMessage> for ClientMessage {
+    type Error = Error;
+
+    fn try_from(message: proto::ClientMessage) -> Result<Self> {
+        use proto::client_message::Kind;
+        match message.kind {
+            Some(Kind::Move(proto::Move { x, y })) => Ok(ClientMessage::Move { x, y }),
+            None => Err(Error::new(
+                "server",
+                "gateway world message has no kind set",
+            )),
+        }
+    }
+}
+
+impl From<&ServerMessage> for proto::ServerMessage {
+    fn from(message: &ServerMessage) -> Self {
+        use proto::server_message::Kind;
+        let kind = match message {
+            ServerMessage::Joined {
+                entity_id,
+                x,
+                y,
+                roster,
+            } => Kind::Joined(proto::Joined {
+                entity_id: entity_id.clone(),
+                x: *x,
+                y: *y,
+                roster: roster.iter().map(proto::RosterEntry::from).collect(),
+            }),
+            ServerMessage::EntitySpawned {
+                entity_id,
+                entity_type,
+                x,
+                y,
+            } => Kind::EntitySpawned(proto::EntitySpawned {
+                entity_id: entity_id.clone(),
+                entity_type: entity_type.clone(),
+                x: *x,
+                y: *y,
+            }),
+            ServerMessage::EntityDespawned { entity_id } => {
+                Kind::EntityDespawned(proto::EntityDespawned {
+                    entity_id: entity_id.clone(),
+                })
+            }
+            ServerMessage::ZoneChanged {
+                zone_id,
+                entity_id,
+                x,
+                y,
+                roster,
+            } => Kind::ZoneChanged(proto::ZoneChanged {
+                zone_id: zone_id.clone(),
+                entity_id: entity_id.clone(),
+                x: *x,
+                y: *y,
+                roster: roster.iter().map(proto::RosterEntry::from).collect(),
+            }),
+            ServerMessage::Moved { entity_id, x, y } => Kind::Moved(proto::Moved {
+                entity_id: entity_id.clone(),
+                x: *x,
+                y: *y,
+            }),
+            ServerMessage::Rejected { reason } => Kind::Rejected(proto::Rejected {
+                reason: reason.clone(),
+            }),
+            ServerMessage::Error { message } => Kind::Error(proto::Error {
+                message: message.clone(),
+            }),
+            ServerMessage::PluginMessage { body } => {
+                Kind::PluginMessage(proto::PluginMessage { body: body.clone() })
+            }
+        };
+        proto::ServerMessage { kind: Some(kind) }
+    }
+}
+
+impl TryFrom<proto::ServerMessage> for ServerMessage {
+    type Error = Error;
+
+    fn try_from(message: proto::ServerMessage) -> Result<Self> {
+        use proto::server_message::Kind;
+        match message.kind {
+            Some(Kind::Joined(proto::Joined {
+                entity_id,
+                x,
+                y,
+                roster,
+            })) => Ok(ServerMessage::Joined {
+                entity_id,
+                x,
+                y,
+                roster: roster.into_iter().map(RosterEntry::from).collect(),
+            }),
+            Some(Kind::EntitySpawned(proto::EntitySpawned {
+                entity_id,
+                entity_type,
+                x,
+                y,
+            })) => Ok(ServerMessage::EntitySpawned {
+                entity_id,
+                entity_type,
+                x,
+                y,
+            }),
+            Some(Kind::EntityDespawned(proto::EntityDespawned { entity_id })) => {
+                Ok(ServerMessage::EntityDespawned { entity_id })
+            }
+            Some(Kind::ZoneChanged(proto::ZoneChanged {
+                zone_id,
+                entity_id,
+                x,
+                y,
+                roster,
+            })) => Ok(ServerMessage::ZoneChanged {
+                zone_id,
+                entity_id,
+                x,
+                y,
+                roster: roster.into_iter().map(RosterEntry::from).collect(),
+            }),
+            Some(Kind::Moved(proto::Moved { entity_id, x, y })) => {
+                Ok(ServerMessage::Moved { entity_id, x, y })
+            }
+            Some(Kind::Rejected(proto::Rejected { reason })) => {
+                Ok(ServerMessage::Rejected { reason })
+            }
+            Some(Kind::Error(proto::Error { message })) => Ok(ServerMessage::Error { message }),
+            Some(Kind::PluginMessage(proto::PluginMessage { body })) => {
+                Ok(ServerMessage::PluginMessage { body })
+            }
+            None => Err(Error::new(
+                "server",
+                "gateway world message has no kind set",
+            )),
+        }
+    }
+}
+
+fn encode(message: &impl prost::Message) -> Result<Envelope> {
+    Ok(Envelope::new(WORLD_MESSAGE_TYPE, message.encode_to_vec()))
+}
+
+fn decode<T: prost::Message + Default>(envelope: &Envelope) -> Result<T> {
     if envelope.message_type != WORLD_MESSAGE_TYPE {
         return Err(Error::new(
             "server",
@@ -152,7 +326,7 @@ fn decode<T: for<'de> Deserialize<'de>>(envelope: &Envelope) -> Result<T> {
             ),
         ));
     }
-    serde_json::from_slice(&envelope.payload)
+    T::decode(envelope.payload.clone())
         .map_err(|e| Error::wrap("server", "failed to decode gateway world message", e))
 }
 
@@ -171,7 +345,35 @@ mod tests {
 
     #[test]
     fn decode_rejects_the_wrong_message_type() {
-        let envelope = Envelope::new(1, b"{}".to_vec());
+        let envelope = Envelope::new(1, b"".to_vec());
         assert!(ClientMessage::from_envelope(&envelope).is_err());
+    }
+
+    #[test]
+    fn decode_rejects_an_envelope_with_no_kind_set() {
+        let envelope = Envelope::new(WORLD_MESSAGE_TYPE, b"".to_vec());
+        let err = ClientMessage::from_envelope(&envelope).unwrap_err();
+        assert!(err.to_string().contains("no kind set"), "{err}");
+    }
+
+    #[test]
+    fn joined_round_trips_a_roster() {
+        let message = ServerMessage::Joined {
+            entity_id: "e1".to_string(),
+            x: 1.0,
+            y: 2.0,
+            roster: vec![RosterEntry {
+                entity_id: "e2".to_string(),
+                entity_type: "npc.wolf".to_string(),
+                x: 3.0,
+                y: 4.0,
+            }],
+        };
+        let envelope = message.into_envelope().unwrap();
+        let decoded = ServerMessage::from_envelope(&envelope).unwrap();
+        assert!(matches!(
+            decoded,
+            ServerMessage::Joined { roster, .. } if roster.len() == 1 && roster[0].entity_id == "e2"
+        ));
     }
 }
