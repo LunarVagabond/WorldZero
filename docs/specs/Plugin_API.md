@@ -2,7 +2,7 @@
 
 Corresponds to [Plugin System](../PROPOSAL.md#plugin-system) in the proposal.
 
-**Status:** the v0 slice below is real and implemented (`plugin-host`, #37/#38, extended by #95, #116, and #57) — one WIT world with thirteen hooks and seven host functions: #38's original NPC-spawn-plus-interaction slice, #116's combat/NPC-patrol/chat-command hooks, and #57's inventory/economy hooks and host functions (#112 supplied the core storage these write through). See "Beyond this v0 slice" below for what's still not here.
+**Status:** the v0 slice below is real and implemented (`plugin-host`, #37/#38, extended by #95, #116, #57, and #124) — one WIT world with thirteen hooks and eight host functions: #38's original NPC-spawn-plus-interaction slice, #116's combat/NPC-patrol/chat-command hooks, #57's inventory/economy hooks and host functions (#112 supplied the core storage these write through), and #124's `caller-role` (the account-roles decision, #114). See "Beyond this v0 slice" below for what's still not here.
 
 ## Interface technology
 
@@ -15,7 +15,7 @@ WASM Component Model + WIT (docs/PROPOSAL.md, "Interface Technology") — the ac
 ## The `plugin` world (v0)
 
 ```wit
-package worldzero:plugin@0.4.0;
+package worldzero:plugin@0.5.0;
 
 interface host {
     spawn-npc: func(spawn-table-id: string) -> result<string, string>;
@@ -25,6 +25,7 @@ interface host {
     grant-item: func(entity-id: string, item-type: string, quantity: s64) -> result<_, string>;
     remove-item: func(entity-id: string, item-type: string, quantity: s64) -> result<_, string>;
     modify-currency: func(entity-id: string, delta: s64) -> result<_, string>;
+    caller-role: func(entity-id: string) -> result<list<string>, string>;
 }
 
 interface hooks {
@@ -50,7 +51,7 @@ world plugin {
 }
 ```
 
-`worldzero:plugin@0.4.0` is the actual versioning mechanism (docs/PROPOSAL.md, "Interface Technology": WIT "worlds" give real interface versioning). A breaking change to this interface bumps the package version and/or introduces a new world; a plugin manifest declares which `host_api_version` it targets (`plugin.toml` below), and `plugin-host` refuses to instantiate a plugin declaring a version it doesn't implement (`crates/plugin-host/src/manifest.rs::PluginManifest::check_compatible`) — it never silently links a plugin against an interface shape it wasn't built for. `0.2.0` added `on-message` (#95); `0.3.0` added the combat/NPC-patrol/chat-command hooks and `apply-stat-delta`/`move-entity` (#116); `0.4.0` added the inventory/economy hooks and host functions below (#57). A plugin declaring an older version is refused, not silently linked against the new shape.
+`worldzero:plugin@0.5.0` is the actual versioning mechanism (docs/PROPOSAL.md, "Interface Technology": WIT "worlds" give real interface versioning). A breaking change to this interface bumps the package version and/or introduces a new world; a plugin manifest declares which `host_api_version` it targets (`plugin.toml` below), and `plugin-host` refuses to instantiate a plugin declaring a version it doesn't implement (`crates/plugin-host/src/manifest.rs::PluginManifest::check_compatible`) — it never silently links a plugin against an interface shape it wasn't built for. `0.2.0` added `on-message` (#95); `0.3.0` added the combat/NPC-patrol/chat-command hooks and `apply-stat-delta`/`move-entity` (#116); `0.4.0` added the inventory/economy hooks and host functions below (#57); `0.5.0` added `caller-role` (#124). A plugin declaring an older version is refused, not silently linked against the new shape.
 
 ### Why `include wasi:cli/imports`
 
@@ -87,8 +88,9 @@ Every plugin exports all thirteen — a WIT world's exports aren't individually 
 | `grant-item` | `func(entity-id: string, item-type: string, quantity: s64) -> result<_, string>` | Queues a grant applied through `character::CharacterStore::grant_item` (#112's `items` table) — player entities only, same caveat as `apply-stat-delta`. A successful grant fires `on-item-acquire` back to the plugin. |
 | `remove-item` | `func(entity-id: string, item-type: string, quantity: s64) -> result<_, string>` | Queues a removal applied through `character::CharacterStore::remove_item`. Rejected during the drain (not synchronously) if the character doesn't own enough — same "queued, not confirmed synchronously" caveat as `apply-stat-delta`. |
 | `modify-currency` | `func(entity-id: string, delta: s64) -> result<_, string>` | Queues a currency balance adjustment applied through `character::CharacterStore::modify_currency`. Rejected during the drain if the result would go negative. |
+| `caller-role` | `func(entity-id: string) -> result<list<string>, string>` | Returns the roles (docs/specs/Auth_Spec.md, "Account roles", #114/#124) held by the account behind `entity-id` — empty list if none, the common case. Global scope for v0. Unlike the seven above, this is answered from an in-memory cache populated at session join, never a live `auth` DB read from inside the sandboxed call — see "Beyond this v0 slice" and docs/specs/Auth_Spec.md for why. Only resolves for a connected player entity. |
 
-All seven are always available to a v0 plugin — no capability gating exists yet (see "Beyond this v0 slice"). `grant-item`/`remove-item`/`modify-currency` only resolve for player entities — an NPC entity id is rejected, since NPCs have no character-backed storage (no NPC item/currency ownership exists, only players own items/currency).
+All eight are always available to a v0 plugin — no capability gating exists yet (see "Beyond this v0 slice"). `grant-item`/`remove-item`/`modify-currency` only resolve for player entities — an NPC entity id is rejected, since NPCs have no character-backed storage (no NPC item/currency ownership exists, only players own items/currency).
 
 ### Ids are opaque strings
 
@@ -101,7 +103,7 @@ Same convention as the content manifest and dev-config files elsewhere in the pr
 ```toml
 [plugin]
 name = "example-plugin"
-host_api_version = "0.4.0"
+host_api_version = "0.5.0"
 capabilities = []
 message_types = []
 chat_commands = []
@@ -110,7 +112,7 @@ chat_commands = []
 | Field | Type | Notes |
 |---|---|---|
 | `plugin.name` | string | Free-form, used in error/log messages. |
-| `plugin.host_api_version` | string | Must equal `plugin_host::HOST_API_VERSION` (currently `"0.4.0"`, matching the WIT package version above) or the plugin is refused before instantiation. |
+| `plugin.host_api_version` | string | Must equal `plugin_host::HOST_API_VERSION` (currently `"0.5.0"`, matching the WIT package version above) or the plugin is refused before instantiation. |
 | `plugin.capabilities` | list of strings, optional | Parsed and carried, **not yet enforced against anything** — see below. |
 | `plugin.message_types` | list of `u16`, optional | Gateway `message_type` values (docs/specs/Networking_Spec.md) routed to this plugin's `on-message` hook (#95). Each must be `>= 1000` (0-999 is core-reserved) and appear at most once, checked by `PluginManifest::check_compatible` before the plugin is instantiated. |
 | `plugin.chat_commands` | list of strings, optional | Chat command names, without the leading `/` (#57). Each must be non-empty, have no leading `/`, and appear at most once, checked the same way as `message_types`. A matched command is routed to `on-chat-command` instead of published as ordinary chat. |
@@ -126,10 +128,10 @@ chat_commands = []
 Real design from docs/PROPOSAL.md's "Plugin System" section, deliberately not built yet:
 
 - **`on_tick(zone, dt)`** (the zone-wide tick hook, distinct from #116's per-NPC `on-npc-tick`) — `world`'s tick loop has the call site (`world::zone::Zone::run`'s `on_tick` callback parameter), just not wired to a real plugin call yet.
-- **A true synchronous "query" host function** — `item-quantity`/`currency-balance`-style reads that hand a value straight back to the plugin. Deliberately not built: `PluginCallbacks` is called synchronously from inside `wasmtime`, while `character::CharacterStore` is async-only (`sqlx`); reads would need either a new blocking-call mechanism (`tokio::task::block_in_place`, not used anywhere else in this codebase) or an eventually-consistent cache, and neither was worth the complexity for v0 — a plugin that needs to know a quantity/balance can track it itself from `on-item-acquire`/its own bookkeeping.
+- **A true synchronous "query" host function against `character`'s live storage** — `item-quantity`/`currency-balance`-style reads that hand a value straight back to the plugin. Still deliberately not built: `PluginCallbacks` is called synchronously from inside `wasmtime`, while `character::CharacterStore` is async-only (`sqlx`); reads would need either a new blocking-call mechanism (`tokio::task::block_in_place`, not used anywhere else in this codebase) or an eventually-consistent cache, and neither was worth the complexity for v0 — a plugin that needs to know a quantity/balance can track it itself from `on-item-acquire`/its own bookkeeping. `caller-role` (#124) sidesteps this exact constraint for account roles specifically, not by adding blocking DB calls, but by having `server::session` populate an in-memory cache at join time (`session::EntityRoles`) that `caller-role` reads synchronously — a pattern this general query problem could reuse later if a case for it emerges, but wasn't generalized here.
 - **Player session** (`on_player_join_zone`, `on_player_leave_zone`).
 - **Live call sites for `on-damage-calc`/`on-death`/`on-respawn`/`on-npc-interact`/`on-item-use`** — these hooks exist and are callable (#116/#57), but nothing in `world`/`gateway`'s client protocol has an attack action, an entity-targeted interact action, or a use-item action yet to call them from; see each hook's row above.
 - **Per-plugin optional hooks** — with thirteen hooks now, most plugins won't want all of them; a real WIT world for that likely needs either per-hook opt-in at the manifest level with the host only calling what's declared, or restructuring hooks as several smaller worlds/interfaces a plugin composes from.
 - **Real capability gating** — `plugin.toml`'s `capabilities` field exists today but gates nothing; once host functions are grouped (`economy`, `combat`, ...) per the proposal, the host should refuse to load a plugin declaring a capability the operator hasn't enabled for that deployment.
 - **Cross-plugin RPC, hot-reload, plugin-defined persistent schema** — explicit v0 non-goals per the proposal, not accidentally missing. (Plugin-declared gateway message types/custom packets *are* now in — `on-message`, #95 — cross-plugin collision checking for them is still deferred; see docs/specs/Networking_Spec.md.)
-- **Account roles for dev/admin-only commands** — filed as #114 (decision, undecided) once #57's chat-command hook made it obvious a plugin has no way to know whether the calling account is privileged.
+- ~~**Account roles for dev/admin-only commands**~~ — decided in #114, implemented in #124: see the `caller-role` host function above and docs/specs/Auth_Spec.md's "Account roles" section.

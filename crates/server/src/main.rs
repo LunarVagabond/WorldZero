@@ -57,7 +57,7 @@ use common::pool::{PoolOptions, postgres_pool, redis_pool};
 use content::content_pack::ContentPack;
 use content::manifest::ZoneManifest;
 use futures_util::StreamExt;
-use session::{EntityCharacters, SessionDeps, Sessions};
+use session::{EntityCharacters, EntityRoles, SessionDeps, Sessions};
 use session_protocol::{RosterEntry, ServerMessage};
 use tokio::sync::mpsc;
 use world::{EntityKind, MovementOutcome, Point, Zone};
@@ -144,6 +144,8 @@ async fn main() {
         account_store,
         sessions_manager,
     ));
+    let role_store: Arc<dyn auth::AccountRoleStore> =
+        Arc::new(auth::PostgresAccountRoleStore::new(pool.clone()));
     let character_store = Arc::new(CharacterStore::new(pool.clone(), schema, inventory_config));
     let realm_id = placeholder_realm_id();
 
@@ -164,6 +166,7 @@ async fn main() {
     };
 
     let entity_characters: EntityCharacters = Arc::new(Mutex::new(HashMap::new()));
+    let entity_roles: EntityRoles = Arc::new(Mutex::new(HashMap::new()));
 
     // Every zone-service actor's `on_tick` closure is wired up below
     // before the full `ZoneRegistry` can possibly exist (it needs every
@@ -200,7 +203,7 @@ async fn main() {
         // this leaves against `docs/specs/Plugin_API.md`'s "instantiated
         // for a zone-service" wording.
         let plugin_runtime = if index == 0 {
-            load_configured_plugin(&mut zone, sessions.clone())
+            load_configured_plugin(&mut zone, sessions.clone(), entity_roles.clone())
         } else {
             None
         };
@@ -256,6 +259,8 @@ async fn main() {
         zones,
         default_zone_id,
         entity_characters,
+        role_store,
+        entity_roles,
         plugin_message_types,
         plugin_chat_commands,
         chat: chat_deps,
@@ -312,6 +317,7 @@ fn load_zone_manifests(config_dir: &std::path::Path) -> Vec<ZoneManifest> {
 fn load_configured_plugin(
     zone: &mut Zone,
     sessions: Sessions,
+    entity_roles: EntityRoles,
 ) -> Option<plugin_startup::PluginRuntime> {
     let (Ok(plugin_manifest_path), Ok(plugin_wasm_path)) = (
         std::env::var("WZ_PLUGIN_MANIFEST_PATH"),
@@ -325,7 +331,12 @@ fn load_configured_plugin(
     let plugin_manifest_path = std::path::PathBuf::from(plugin_manifest_path);
     let plugin_wasm_path = std::path::PathBuf::from(plugin_wasm_path);
 
-    match plugin_startup::load_and_run_on_load(&plugin_manifest_path, &plugin_wasm_path, sessions) {
+    match plugin_startup::load_and_run_on_load(
+        &plugin_manifest_path,
+        &plugin_wasm_path,
+        sessions,
+        entity_roles,
+    ) {
         Ok((runtime, spawn_table_ids)) => {
             for spawn_table_id in spawn_table_ids {
                 world_actor::spawn_npc_from_table(zone, &spawn_table_id);

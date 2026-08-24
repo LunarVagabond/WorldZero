@@ -39,6 +39,19 @@ pub type Sessions = Arc<Mutex<HashMap<EntityId, mpsc::UnboundedSender<Envelope>>
 /// v0 slice").
 pub type EntityCharacters = Arc<Mutex<HashMap<EntityId, CharacterId>>>;
 
+/// Which roles (docs/specs/Auth_Spec.md, "Account roles", #114/#124) the
+/// account behind a connected player entity holds — populated once at
+/// join time (below) and consulted synchronously by `plugin_startup`'s
+/// `caller-role` host function, never queried live from `auth`'s role
+/// store from inside a sandboxed plugin call (see `wit/plugin.wit`'s
+/// `caller-role` doc comment for why: `plugin_host::HostCallbacks` is
+/// called synchronously from inside `wasmtime`, while the role store is
+/// async-only). Global scope for v0, so a plugin sees the same roles for
+/// the life of the connection — a role granted/revoked mid-session isn't
+/// reflected until reconnect, an accepted staleness window for v0. Never
+/// has an NPC entry, same as `EntityCharacters`.
+pub type EntityRoles = Arc<Mutex<HashMap<EntityId, Vec<String>>>>;
+
 pub struct SessionDeps {
     pub auth_provider: Arc<auth::UsernamePasswordProvider>,
     pub character_store: Arc<CharacterStore>,
@@ -53,6 +66,11 @@ pub struct SessionDeps {
     /// zone) — never silently drops the connection over a stale zone_id.
     pub default_zone_id: String,
     pub entity_characters: EntityCharacters,
+    /// Backs `EntityRoles` population at join time (#124) — `auth` (like
+    /// `character`) is always wired in this combined process, so this is
+    /// never optional the way `chat`/`metrics` are.
+    pub role_store: Arc<dyn auth::AccountRoleStore>,
+    pub entity_roles: EntityRoles,
     /// `message_type`s the configured plugin declared in `plugin.toml`
     /// (empty if no plugin is configured) — checked here rather than
     /// only in the world actor so an envelope with an unroutable
@@ -147,6 +165,8 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
         .lock()
         .unwrap()
         .insert(entity_id, character_id);
+    let roles = deps.role_store.roles_for(account_id).await?;
+    deps.entity_roles.lock().unwrap().insert(entity_id, roles);
     if let Some(metrics) = &deps.metrics {
         metrics.connection_count.inc();
     }
@@ -312,6 +332,7 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
     zone.world.despawn(entity_id);
     zone.sessions.lock().unwrap().remove(&entity_id);
     deps.entity_characters.lock().unwrap().remove(&entity_id);
+    deps.entity_roles.lock().unwrap().remove(&entity_id);
     broadcast(
         &zone.sessions,
         ServerMessage::EntityDespawned {

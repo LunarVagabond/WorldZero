@@ -67,6 +67,13 @@ pub trait HostCallbacks: Send + 'static {
     /// Adjusts a currency balance (`wit/plugin.wit`'s `modify-currency`)
     /// — queued, applied through `character::CharacterStore::modify_currency`.
     fn modify_currency(&mut self, entity_id: &str, delta: i64) -> std::result::Result<(), String>;
+
+    /// Returns the roles held by the account behind `entity_id`
+    /// (`wit/plugin.wit`'s `caller-role`) — unlike every other method
+    /// here, the implementation is expected to answer from an in-memory
+    /// cache populated at session join, not a live DB read; see the WIT
+    /// doc comment for why.
+    fn caller_role(&mut self, entity_id: &str) -> std::result::Result<Vec<String>, String>;
 }
 
 struct PluginState {
@@ -140,6 +147,10 @@ impl HostInterface for PluginState {
         delta: i64,
     ) -> std::result::Result<(), String> {
         self.callbacks.modify_currency(&entity_id, delta)
+    }
+
+    fn caller_role(&mut self, entity_id: String) -> std::result::Result<Vec<String>, String> {
+        self.callbacks.caller_role(&entity_id)
     }
 }
 

@@ -18,7 +18,7 @@ use common::Result;
 use common::id::EntityId;
 use plugin_host::{HostCallbacks, LoadedPlugin, PluginHost, PluginManifest};
 
-use crate::session::Sessions;
+use crate::session::{EntityRoles, Sessions};
 use crate::session_protocol::ServerMessage;
 
 /// `HostCallbacks` used for the plugin's whole lifetime — both the
@@ -51,6 +51,11 @@ pub struct PluginCallbacks {
     /// `(entity_id, delta)`, drained and applied through
     /// `character::CharacterStore::modify_currency` by the caller.
     pending_currency_deltas: Arc<Mutex<Vec<(String, i64)>>>,
+    /// Backs `caller-role` (#124) — a synchronous lookup against
+    /// `session::EntityRoles`, populated at join time, never a live
+    /// `auth` role-store query from inside this sandboxed sync call (see
+    /// `wit/plugin.wit`'s `caller-role` doc comment for why).
+    entity_roles: EntityRoles,
     sessions: Sessions,
 }
 
@@ -147,6 +152,18 @@ impl HostCallbacks for PluginCallbacks {
             .push((entity_id.to_string(), delta));
         Ok(())
     }
+
+    fn caller_role(&mut self, entity_id: &str) -> std::result::Result<Vec<String>, String> {
+        let entity_id: EntityId = entity_id
+            .parse()
+            .map_err(|_| format!("{entity_id:?} is not a valid entity id"))?;
+        self.entity_roles
+            .lock()
+            .unwrap()
+            .get(&entity_id)
+            .cloned()
+            .ok_or_else(|| format!("{entity_id} is not a connected player entity"))
+    }
 }
 
 /// A plugin kept alive past startup: the live instance, which
@@ -219,6 +236,7 @@ pub fn load_and_run_on_load(
     manifest_path: &Path,
     wasm_path: &Path,
     sessions: Sessions,
+    entity_roles: EntityRoles,
 ) -> Result<(PluginRuntime, Vec<String>)> {
     let manifest = PluginManifest::from_file(manifest_path)?;
     let message_types = manifest.plugin.message_types.clone();
@@ -237,6 +255,7 @@ pub fn load_and_run_on_load(
         pending_item_grants: pending_item_grants.clone(),
         pending_item_removals: pending_item_removals.clone(),
         pending_currency_deltas: pending_currency_deltas.clone(),
+        entity_roles,
         sessions,
     };
 

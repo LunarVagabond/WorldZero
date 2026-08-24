@@ -3,16 +3,17 @@
 //
 // #38 built the minimal slice (one NPC spawn, one interaction). #116
 // (split from #57) added combat, NPC route/patrol, and chat-command
-// hooks. #57 (now scoped to just this) adds inventory/economy — see
-// docs/specs/Plugin_API.md, "Beyond this v0 slice" for what's still not
-// here — player-session, per-plugin optional hooks, gated capability
-// groups. A WIT "world" is the actual versioning mechanism
-// (docs/PROPOSAL.md, "Interface Technology"): a breaking change bumps
-// the package version below and/or lands as a new world, rather than
-// silently changing what `plugin` means underneath existing compiled
-// plugins.
+// hooks. #57 added inventory/economy. #124 adds `caller-role`, the
+// account-roles decision (#114) needed to gate dev/admin-only
+// plugin-declared chat commands — see docs/specs/Plugin_API.md, "Beyond
+// this v0 slice" for what's still not here — player-session, per-plugin
+// optional hooks, gated capability groups. A WIT "world" is the actual
+// versioning mechanism (docs/PROPOSAL.md, "Interface Technology"): a
+// breaking change bumps the package version below and/or lands as a new
+// world, rather than silently changing what `plugin` means underneath
+// existing compiled plugins.
 
-package worldzero:plugin@0.4.0;
+package worldzero:plugin@0.5.0;
 
 /// What the host exposes for a plugin to call out to — nothing crosses
 /// this boundary that isn't listed here (docs/PROPOSAL.md, "Plugin
@@ -81,6 +82,23 @@ interface host {
     /// `remove-item`. Rejected (nothing applied) if the result would go
     /// negative.
     modify-currency: func(entity-id: string, delta: s64) -> result<_, string>;
+
+    /// Returns the roles (docs/specs/Auth_Spec.md, "Account roles",
+    /// decision #114) held by the account behind `entity-id` — global
+    /// scope for v0, no per-realm distinction (deferred until
+    /// `realm-directory`/#47 exists and per-realm admin becomes a real
+    /// requirement). Empty list if the account holds no roles, which is
+    /// the common case — not an error. A plugin's `on-chat-command`
+    /// handler queries this itself to gate dev/admin-only commands;
+    /// `plugin.toml` does not declare a required role per command for v0.
+    /// Unlike every other function here, this is answered from an
+    /// in-memory cache populated at session join, not a live DB read —
+    /// the same "no synchronous DB query from inside the sandboxed call"
+    /// constraint noted in docs/specs/Plugin_API.md's "Beyond this v0
+    /// slice" for why a general query host function doesn't exist; only
+    /// resolves for a connected player entity (an NPC entity id, or one
+    /// no longer connected, is rejected).
+    caller-role: func(entity-id: string) -> result<list<string>, string>;
 }
 
 /// What the host calls into the plugin for — a plugin only receives the

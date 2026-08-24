@@ -14,6 +14,7 @@
 //! cargo test -p plugin-host -- --ignored
 //! ```
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -28,7 +29,7 @@ fn manifest() -> PluginManifest {
         r#"
 [plugin]
 name = "test-plugin"
-host_api_version = "0.4.0"
+host_api_version = "0.5.0"
 message_types = [1000]
 "#,
     )
@@ -44,6 +45,7 @@ struct RecordingCallbacks {
     item_grants: Arc<Mutex<Vec<(String, String, i64)>>>,
     item_removals: Arc<Mutex<Vec<(String, String, i64)>>>,
     currency_deltas: Arc<Mutex<Vec<(String, i64)>>>,
+    roles: Arc<Mutex<HashMap<String, Vec<String>>>>,
 }
 
 impl HostCallbacks for RecordingCallbacks {
@@ -118,6 +120,16 @@ impl HostCallbacks for RecordingCallbacks {
             .unwrap()
             .push((entity_id.to_string(), delta));
         Ok(())
+    }
+
+    fn caller_role(&mut self, entity_id: &str) -> Result<Vec<String>, String> {
+        Ok(self
+            .roles
+            .lock()
+            .unwrap()
+            .get(entity_id)
+            .cloned()
+            .unwrap_or_default())
     }
 }
 
@@ -233,6 +245,31 @@ fn a_plugin_grants_removes_items_and_modifies_currency() {
         callbacks.currency_deltas.lock().unwrap().as_slice(),
         [("actor-1".to_string(), 5)]
     );
+}
+
+#[test]
+#[ignore]
+fn a_plugin_queries_the_caller_role() {
+    let wasm_path = fixture_dir().join("target/wasm32-wasip2/release/test_plugin.wasm");
+    let callbacks = RecordingCallbacks::default();
+    callbacks.roles.lock().unwrap().insert(
+        "actor-1".to_string(),
+        vec!["admin".to_string(), "dev".to_string()],
+    );
+
+    let host = PluginHost::new();
+    let mut plugin = host
+        .load(&manifest(), &wasm_path, Box::new(callbacks.clone()))
+        .expect("failed to load the well-behaved test plugin");
+
+    plugin
+        .on_chat_command("whoami", "", "actor-1")
+        .expect("on_chat_command should succeed");
+    let messages = callbacks.messages.lock().unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].0, "actor-1");
+    assert!(messages[0].1.contains("admin"));
+    assert!(messages[0].1.contains("dev"));
 }
 
 #[test]

@@ -263,7 +263,7 @@ fn setup_config_dir(test_name: &str) -> PathBuf {
         r#"
 [plugin]
 name = "test-plugin"
-host_api_version = "0.4.0"
+host_api_version = "0.5.0"
 message_types = [1000]
 "#,
     )
