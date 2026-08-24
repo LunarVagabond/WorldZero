@@ -107,6 +107,33 @@ impl Guest for Plugin {
             );
             return;
         }
+        // Exercises plugin-state-get/set (#149) end to end: "remember X"
+        // writes X under zone scope, "recall" reads it back — a real
+        // round trip through the actual sandboxed call boundary, not
+        // just a host-side fake.
+        if command == "remember" {
+            let _ = worldzero::plugin::host::plugin_state_set(
+                &worldzero::plugin::host::PluginStateScope::Zone("test-zone".to_string()),
+                "note",
+                args.as_bytes(),
+            );
+            return;
+        }
+        if command == "recall" {
+            let value = worldzero::plugin::host::plugin_state_get(
+                &worldzero::plugin::host::PluginStateScope::Zone("test-zone".to_string()),
+                "note",
+            )
+            .ok()
+            .flatten()
+            .map(|bytes| String::from_utf8_lossy(&bytes).to_string())
+            .unwrap_or_else(|| "<nothing remembered>".to_string());
+            let _ = worldzero::plugin::host::send_message(
+                &sender_entity_id,
+                &format!("recalled: {value}"),
+            );
+            return;
+        }
         let _ = worldzero::plugin::host::send_message(
             &sender_entity_id,
             &format!("ran command {command} with args {args}"),

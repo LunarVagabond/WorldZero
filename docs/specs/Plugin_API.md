@@ -2,7 +2,7 @@
 
 Corresponds to [Plugin System](../PROPOSAL.md#plugin-system) in the proposal.
 
-**Status:** the v0 slice below is real and implemented (`plugin-host`, #37/#38, extended by #95, #116, #57, and #124) — one WIT world with thirteen hooks and eight host functions: #38's original NPC-spawn-plus-interaction slice, #116's combat/NPC-patrol/chat-command hooks, #57's inventory/economy hooks and host functions (#112 supplied the core storage these write through), and #124's `caller-role` (the account-roles decision, #114). See "Beyond this v0 slice" below for what's still not here.
+**Status:** the v0 slice below is real and implemented (`plugin-host`, #37/#38, extended by #95, #116, #57, #124, and #149) — one WIT world with thirteen hooks and ten host functions: #38's original NPC-spawn-plus-interaction slice, #116's combat/NPC-patrol/chat-command hooks, #57's inventory/economy hooks and host functions (#112 supplied the core storage these write through), #124's `caller-role` (the account-roles decision, #114), and #149's `plugin-state-get`/`plugin-state-set` (the Plugin-Scoped Data Store). See "Beyond this v0 slice" below for what's still not here.
 
 ## Interface technology
 
@@ -89,8 +89,27 @@ Every plugin exports all thirteen — a WIT world's exports aren't individually 
 | `remove-item` | `func(entity-id: string, item-type: string, quantity: s64) -> result<_, string>` | Queues a removal applied through `character::CharacterStore::remove_item`. Rejected during the drain (not synchronously) if the character doesn't own enough — same "queued, not confirmed synchronously" caveat as `apply-stat-delta`. |
 | `modify-currency` | `func(entity-id: string, delta: s64) -> result<_, string>` | Queues a currency balance adjustment applied through `character::CharacterStore::modify_currency`. Rejected during the drain if the result would go negative. |
 | `caller-role` | `func(entity-id: string) -> result<list<string>, string>` | Returns the roles (docs/specs/Auth_Spec.md, "Account roles", #114/#124) held by the account behind `entity-id` — empty list if none, the common case. Global scope for v0. Unlike the seven above, this is answered from an in-memory cache populated at session join, never a live `auth` DB read from inside the sandboxed call — see "Beyond this v0 slice" and docs/specs/Auth_Spec.md for why. Only resolves for a connected player entity. |
+| `plugin-state-get` | `func(scope: plugin-state-scope, key: string) -> result<option<list<u8>>, string>` | Reads a previously-stored opaque blob for `scope`/`key`, `none` if nothing's been stored yet — the Plugin-Scoped Data Store (#149, docs/PROPOSAL.md's "Plugin-Scoped Data Store"). Same in-memory-cache-not-live-DB-read constraint as `caller-role` — see below. |
+| `plugin-state-set` | `func(scope: plugin-state-scope, key: string, value: list<u8>) -> result<_, string>` | Stores a blob for `scope`/`key`, overwriting whatever was there. Visible to a `plugin-state-get` in the same session immediately; for `character`/`zone` scope, also queued for durable persistence (same "queued, not synchronously confirmed" shape as `apply-stat-delta`). |
 
-All eight are always available to a v0 plugin — no capability gating exists yet (see "Beyond this v0 slice"). `grant-item`/`remove-item`/`modify-currency` only resolve for player entities — an NPC entity id is rejected, since NPCs have no character-backed storage (no NPC item/currency ownership exists, only players own items/currency).
+All ten are always available to a v0 plugin — no capability gating exists yet (see "Beyond this v0 slice"). `grant-item`/`remove-item`/`modify-currency` only resolve for player entities — an NPC entity id is rejected, since NPCs have no character-backed storage (no NPC item/currency ownership exists, only players own items/currency).
+
+### The Plugin-Scoped Data Store (`plugin-state-get`/`plugin-state-set`, #149)
+
+`plugin-state-scope` is a variant carrying both which "bucket" a key lives in and which id it's scoped to:
+
+```wit
+variant plugin-state-scope {
+    character(string),  // the entity id currently representing this character
+    entity(string),
+    zone(string),        // a content-manifest zone id
+}
+```
+
+- **`character`/`zone` scope is durable** (Postgres, `plugin_character_state`/`plugin_zone_state` tables) — hydrated into an in-memory cache once at the right lifecycle point (character scope at session join, zone scope at zone-actor startup, before either could possibly receive a `plugin-state-get` call), so reads never hit the database live from inside the sandboxed call — same constraint `caller-role` documents. Writes update that cache immediately and queue a durable write, applied on the zone's next tick drain, mirroring `apply-stat-delta`/`grant-item`'s "queued, not synchronously confirmed" shape.
+- **`entity` scope is transient** — in-memory only, cache-only end to end, no persistence. Nothing survives a restart for this scope, by design; it's for state that only needs to live as long as the entity does.
+- The value is an opaque blob to the host in every scope — a plugin author defines its shape (JSON, bincode, whatever) entirely on their own; the core never looks inside it.
+- `character` scope's id is an *entity* id, like every other host function's `entity-id` parameter — never a raw `CharacterId`, since a plugin never sees one of those directly.
 
 ### Ids are opaque strings
 
@@ -133,5 +152,5 @@ Real design from docs/PROPOSAL.md's "Plugin System" section, deliberately not bu
 - **Live call sites for `on-damage-calc`/`on-death`/`on-respawn`/`on-npc-interact`/`on-item-use`** — these hooks exist and are callable (#116/#57), but nothing in `world`/`gateway`'s client protocol has an attack action, an entity-targeted interact action, or a use-item action yet to call them from; see each hook's row above.
 - **Per-plugin optional hooks** — with thirteen hooks now, most plugins won't want all of them; a real WIT world for that likely needs either per-hook opt-in at the manifest level with the host only calling what's declared, or restructuring hooks as several smaller worlds/interfaces a plugin composes from.
 - **Real capability gating** — `plugin.toml`'s `capabilities` field exists today but gates nothing; once host functions are grouped (`economy`, `combat`, ...) per the proposal, the host should refuse to load a plugin declaring a capability the operator hasn't enabled for that deployment.
-- **Cross-plugin RPC, hot-reload, plugin-defined persistent schema** — explicit v0 non-goals per the proposal, not accidentally missing. (Plugin-declared gateway message types/custom packets *are* now in — `on-message`, #95 — cross-plugin collision checking for them is still deferred; see docs/specs/Networking_Spec.md.)
+- **Cross-plugin RPC, hot-reload, plugin-defined persistent schema (structured tables beyond the opaque blob store)** — explicit v0 non-goals per the proposal, not accidentally missing. The opaque-blob-store half of that story *is* now in (#149, `plugin-state-get`/`plugin-state-set` above) — the non-goal is specifically anything beyond it (a plugin declaring its own real DB schema). (Plugin-declared gateway message types/custom packets *are* now in — `on-message`, #95 — cross-plugin collision checking for them is still deferred; see docs/specs/Networking_Spec.md.)
 - ~~**Account roles for dev/admin-only commands**~~ — decided in #114, implemented in #124: see the `caller-role` host function above and docs/specs/Auth_Spec.md's "Account roles" section.

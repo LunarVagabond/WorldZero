@@ -12,7 +12,36 @@ use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use crate::bindings::Plugin as PluginBindings;
 use crate::bindings::worldzero::plugin::host::Host as HostInterface;
+use crate::bindings::worldzero::plugin::host::PluginStateScope as WitPluginStateScope;
 use crate::manifest::PluginManifest;
+
+/// Mirrors `wit/plugin.wit`'s `plugin-state-scope` variant — kept as our
+/// own type rather than exposing the `wasmtime`-generated one directly,
+/// same reason every other `HostCallbacks` method takes plain `&str`/etc.
+/// instead of generated binding types: this trait's implementors
+/// (`server`) shouldn't need to depend on `plugin-host`'s private
+/// `bindings` module.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PluginStateScope {
+    /// A character, identified by the *entity* id currently representing
+    /// it in the zone (not a `CharacterId` directly — the plugin only
+    /// ever knows entity ids, same as every other `HostCallbacks` method).
+    Character(String),
+    /// An entity — transient, in-memory only, no persistence.
+    Entity(String),
+    /// A zone, identified by its content-manifest zone id.
+    Zone(String),
+}
+
+impl From<WitPluginStateScope> for PluginStateScope {
+    fn from(scope: WitPluginStateScope) -> Self {
+        match scope {
+            WitPluginStateScope::Character(id) => PluginStateScope::Character(id),
+            WitPluginStateScope::Entity(id) => PluginStateScope::Entity(id),
+            WitPluginStateScope::Zone(id) => PluginStateScope::Zone(id),
+        }
+    }
+}
 
 /// What a loaded plugin is allowed to actually *do* — the host side of
 /// the `host` WIT interface's v0 functions. A trait, not a hand-called
@@ -74,6 +103,26 @@ pub trait HostCallbacks: Send + 'static {
     /// cache populated at session join, not a live DB read; see the WIT
     /// doc comment for why.
     fn caller_role(&mut self, entity_id: &str) -> std::result::Result<Vec<String>, String>;
+
+    /// Reads plugin state (`wit/plugin.wit`'s `plugin-state-get`) — same
+    /// cache-not-live-DB-read constraint as `caller_role`, see that WIT
+    /// doc comment and `plugin-state-get`'s own.
+    fn plugin_state_get(
+        &mut self,
+        scope: PluginStateScope,
+        key: &str,
+    ) -> std::result::Result<Option<Vec<u8>>, String>;
+
+    /// Writes plugin state (`wit/plugin.wit`'s `plugin-state-set`) —
+    /// updates the in-memory cache immediately; for `Character`/`Zone`
+    /// scope, also queues a durable write for the implementor's own
+    /// drain mechanism (same shape as `apply_stat_delta`/`grant_item`).
+    fn plugin_state_set(
+        &mut self,
+        scope: PluginStateScope,
+        key: &str,
+        value: Vec<u8>,
+    ) -> std::result::Result<(), String>;
 }
 
 struct PluginState {
@@ -151,6 +200,23 @@ impl HostInterface for PluginState {
 
     fn caller_role(&mut self, entity_id: String) -> std::result::Result<Vec<String>, String> {
         self.callbacks.caller_role(&entity_id)
+    }
+
+    fn plugin_state_get(
+        &mut self,
+        scope: WitPluginStateScope,
+        key: String,
+    ) -> std::result::Result<Option<Vec<u8>>, String> {
+        self.callbacks.plugin_state_get(scope.into(), &key)
+    }
+
+    fn plugin_state_set(
+        &mut self,
+        scope: WitPluginStateScope,
+        key: String,
+        value: Vec<u8>,
+    ) -> std::result::Result<(), String> {
+        self.callbacks.plugin_state_set(scope.into(), &key, value)
     }
 }
 

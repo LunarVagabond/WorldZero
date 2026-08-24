@@ -9,17 +9,26 @@
 //!
 //! Deliberately minimal beyond that: this v0 wiring calls `on_load` and
 //! wires `on_message` (#95) — still no `on_tick`, no `on_interact` (see
-//! docs/specs/Plugin_API.md, "Beyond this v0 slice").
+//! docs/specs/Plugin_API.md, "Beyond this v0 slice"). Also wires
+//! `plugin-state-get`/`plugin-state-set` (#149,
+//! `crate::plugin_state`'s module doc) — see `PluginCallbacks`'s own
+//! doc comment for the cache/queue split those two need.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use common::Result;
 use common::id::EntityId;
-use plugin_host::{HostCallbacks, LoadedPlugin, PluginHost, PluginManifest};
+use plugin_host::{HostCallbacks, LoadedPlugin, PluginHost, PluginManifest, PluginStateScope};
 
+use crate::plugin_state::{PluginStateCache, cache_key};
 use crate::session::{EntityRoles, Sessions};
 use crate::session_protocol::ServerMessage;
+
+/// `(scope, key, value)` requested via `plugin-state-set` for
+/// `character`/`zone` scope, queued for the caller's own drain — see
+/// `PluginCallbacks`'s `pending_state_writes` field.
+type PendingStateWrites = Arc<Mutex<Vec<(PluginStateScope, String, Vec<u8>)>>>;
 
 /// `HostCallbacks` used for the plugin's whole lifetime — both the
 /// one-time `on_load` call at startup and every later `on_message` call
@@ -57,6 +66,20 @@ pub struct PluginCallbacks {
     /// `wit/plugin.wit`'s `caller-role` doc comment for why).
     entity_roles: EntityRoles,
     sessions: Sessions,
+    /// Backs `plugin-state-get`/`plugin-state-set` (#149) — a
+    /// synchronous read/write against a shared in-memory cache, never a
+    /// live DB read/write from inside this sandboxed call, same reason
+    /// `caller_role` reads `entity_roles` instead of querying `auth`
+    /// live. Hydrated at the right lifecycle point per scope
+    /// (`session::handle_session` for character scope, `main` for zone
+    /// scope) — see `crate::plugin_state`'s module doc.
+    plugin_state_cache: PluginStateCache,
+    /// `(scope, key, value)` queued for `character`/`zone` scope only —
+    /// drained and persisted through `plugin_state::PluginStateStore` by
+    /// the caller, same "can't reach the DB from inside a sandboxed sync
+    /// call" reasoning as every other `pending_*` field above. `entity`
+    /// scope writes never reach this queue — there's nothing to persist.
+    pending_state_writes: PendingStateWrites,
 }
 
 impl HostCallbacks for PluginCallbacks {
@@ -164,6 +187,39 @@ impl HostCallbacks for PluginCallbacks {
             .cloned()
             .ok_or_else(|| format!("{entity_id} is not a connected player entity"))
     }
+
+    fn plugin_state_get(
+        &mut self,
+        scope: PluginStateScope,
+        key: &str,
+    ) -> std::result::Result<Option<Vec<u8>>, String> {
+        Ok(self
+            .plugin_state_cache
+            .lock()
+            .unwrap()
+            .get(&cache_key(&scope, key))
+            .cloned())
+    }
+
+    fn plugin_state_set(
+        &mut self,
+        scope: PluginStateScope,
+        key: &str,
+        value: Vec<u8>,
+    ) -> std::result::Result<(), String> {
+        self.plugin_state_cache
+            .lock()
+            .unwrap()
+            .insert(cache_key(&scope, key), value.clone());
+
+        if !matches!(scope, PluginStateScope::Entity(_)) {
+            self.pending_state_writes
+                .lock()
+                .unwrap()
+                .push((scope, key.to_string(), value));
+        }
+        Ok(())
+    }
 }
 
 /// A plugin kept alive past startup: the live instance, which
@@ -185,6 +241,7 @@ pub struct PluginRuntime {
     pending_item_grants: Arc<Mutex<Vec<(String, String, i64)>>>,
     pending_item_removals: Arc<Mutex<Vec<(String, String, i64)>>>,
     pending_currency_deltas: Arc<Mutex<Vec<(String, i64)>>>,
+    pending_state_writes: PendingStateWrites,
 }
 
 impl PluginRuntime {
@@ -223,6 +280,14 @@ impl PluginRuntime {
     pub fn drain_pending_currency_deltas(&self) -> Vec<(String, i64)> {
         std::mem::take(&mut self.pending_currency_deltas.lock().unwrap())
     }
+
+    /// `(scope, key, value)` requested via `plugin-state-set` for
+    /// `character`/`zone` scope since the last drain, in call order —
+    /// `entity` scope never reaches this queue (#149, nothing to
+    /// persist).
+    pub fn drain_pending_state_writes(&self) -> Vec<(PluginStateScope, String, Vec<u8>)> {
+        std::mem::take(&mut self.pending_state_writes.lock().unwrap())
+    }
 }
 
 /// Loads the plugin at `wasm_path` (checked against `manifest_path`'s
@@ -237,6 +302,7 @@ pub fn load_and_run_on_load(
     wasm_path: &Path,
     sessions: Sessions,
     entity_roles: EntityRoles,
+    plugin_state_cache: PluginStateCache,
 ) -> Result<(PluginRuntime, Vec<String>)> {
     let manifest = PluginManifest::from_file(manifest_path)?;
     let message_types = manifest.plugin.message_types.clone();
@@ -248,6 +314,7 @@ pub fn load_and_run_on_load(
     let pending_item_grants = Arc::new(Mutex::new(Vec::new()));
     let pending_item_removals = Arc::new(Mutex::new(Vec::new()));
     let pending_currency_deltas = Arc::new(Mutex::new(Vec::new()));
+    let pending_state_writes = Arc::new(Mutex::new(Vec::new()));
     let callbacks = PluginCallbacks {
         pending_spawns: pending_spawns.clone(),
         pending_stat_deltas: pending_stat_deltas.clone(),
@@ -257,6 +324,8 @@ pub fn load_and_run_on_load(
         pending_currency_deltas: pending_currency_deltas.clone(),
         entity_roles,
         sessions,
+        plugin_state_cache,
+        pending_state_writes: pending_state_writes.clone(),
     };
 
     let mut plugin = host.load(&manifest, wasm_path, Box::new(callbacks))?;
@@ -273,6 +342,7 @@ pub fn load_and_run_on_load(
         pending_item_grants,
         pending_item_removals,
         pending_currency_deltas,
+        pending_state_writes,
     };
     Ok((runtime, on_load_spawns))
 }

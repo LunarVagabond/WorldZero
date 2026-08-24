@@ -46,6 +46,7 @@
 
 mod chat_session;
 mod plugin_startup;
+mod plugin_state;
 mod session;
 mod session_protocol;
 mod world_actor;
@@ -179,6 +180,13 @@ async fn main() {
     let entity_characters: EntityCharacters = Arc::new(Mutex::new(HashMap::new()));
     let entity_roles: EntityRoles = Arc::new(Mutex::new(HashMap::new()));
 
+    // Shared process-wide (#149) — every connection's character-scope
+    // state and every zone's zone-scope state lands in this one cache,
+    // since only one plugin instance exists today regardless of which
+    // zone a connection is actually in. See `plugin_state`'s module doc.
+    let plugin_state_cache: plugin_state::PluginStateCache = Arc::new(Mutex::new(HashMap::new()));
+    let plugin_state_store = Arc::new(plugin_state::PluginStateStore::new(pool.clone()));
+
     // Every zone-service actor's `on_tick` closure is wired up below
     // before the full `ZoneRegistry` can possibly exist (it needs every
     // actor's `WorldHandle` first) — but a `ZoneTransition` outcome needs
@@ -214,7 +222,31 @@ async fn main() {
         // this leaves against `docs/specs/Plugin_API.md`'s "instantiated
         // for a zone-service" wording.
         let plugin_runtime = if index == 0 {
-            load_configured_plugin(&mut zone, sessions.clone(), entity_roles.clone())
+            // Zone-scope state for the plugin's own zone, hydrated once
+            // here — before any client can connect, let alone trigger a
+            // `plugin-state-get` call (#149).
+            let zone_state = plugin_state_store
+                .zone_state(&zone_id)
+                .await
+                .expect("failed to load zone-scoped plugin state");
+            let mut cache = plugin_state_cache.lock().unwrap();
+            for (key, value) in zone_state {
+                cache.insert(
+                    plugin_state::cache_key(
+                        &plugin_host::PluginStateScope::Zone(zone_id.clone()),
+                        &key,
+                    ),
+                    value,
+                );
+            }
+            drop(cache);
+
+            load_configured_plugin(
+                &mut zone,
+                sessions.clone(),
+                entity_roles.clone(),
+                plugin_state_cache.clone(),
+            )
         } else {
             None
         };
@@ -232,6 +264,7 @@ async fn main() {
             plugin_runtime,
             character_store.clone(),
             entity_characters.clone(),
+            plugin_state_store.clone(),
             zone_id.clone(),
             metrics.clone(),
             move |zone, outcomes| {
@@ -275,6 +308,7 @@ async fn main() {
     let layer_spawner_entity_characters = entity_characters.clone();
     let layer_spawner_metrics = metrics.clone();
     let layer_spawner_registry_cell = zone_registry_cell.clone();
+    let layer_spawner_plugin_state_store = plugin_state_store.clone();
     let layer_spawner: zone_registry::LayerSpawner = Box::new(move |zone_id, manifest| {
         let zone = Zone::new(manifest.clone(), layer_spawner_world_config);
         let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
@@ -288,6 +322,7 @@ async fn main() {
             None,
             layer_spawner_character_store.clone(),
             layer_spawner_entity_characters.clone(),
+            layer_spawner_plugin_state_store.clone(),
             zone_id.to_string(),
             layer_spawner_metrics.clone(),
             move |zone, outcomes| {
@@ -338,6 +373,8 @@ async fn main() {
         plugin_chat_commands,
         chat: chat_deps,
         metrics,
+        plugin_state_store,
+        plugin_state_cache,
     });
 
     let mut incoming = Box::pin(incoming);
@@ -391,6 +428,7 @@ fn load_configured_plugin(
     zone: &mut Zone,
     sessions: Sessions,
     entity_roles: EntityRoles,
+    plugin_state_cache: plugin_state::PluginStateCache,
 ) -> Option<plugin_startup::PluginRuntime> {
     let (Ok(plugin_manifest_path), Ok(plugin_wasm_path)) = (
         std::env::var("WZ_PLUGIN_MANIFEST_PATH"),
@@ -409,6 +447,7 @@ fn load_configured_plugin(
         &plugin_wasm_path,
         sessions,
         entity_roles,
+        plugin_state_cache,
     ) {
         Ok((runtime, spawn_table_ids)) => {
             for spawn_table_id in spawn_table_ids {
