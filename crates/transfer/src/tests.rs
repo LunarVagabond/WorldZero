@@ -1,11 +1,14 @@
+use std::sync::Arc;
+
 use character::{AttributeSchema, CharacterStore};
 use common::config::PostgresConfig;
-use common::id::AccountId;
+use common::id::{AccountId, CharacterId};
 use common::pool::{PoolOptions, postgres_pool};
 use realm_directory::{OpenOrBound, RealmStore};
 use sqlx::PgPool;
 
 use crate::execute::{TransferExecutor, TransferRequest};
+use crate::gate::{PurchaseVerifier, TransferGate, TransferGateStore};
 
 // Real Postgres — set WZ_POSTGRES_* and run with `-- --ignored`.
 
@@ -66,7 +69,11 @@ async fn create_account(pool: &PgPool) -> AccountId {
 }
 
 async fn executor(pool: PgPool) -> TransferExecutor {
-    TransferExecutor::new(pool.clone(), RealmStore::new(pool))
+    TransferExecutor::new(
+        pool.clone(),
+        RealmStore::new(pool.clone()),
+        TransferGateStore::new(pool),
+    )
 }
 
 #[tokio::test]
@@ -225,4 +232,233 @@ async fn transferring_into_an_open_realm_is_rejected() {
         .await
         .unwrap_err();
     assert!(err.to_string().contains("is open"), "{err}");
+}
+
+async fn source_and_destination(
+    pool: &PgPool,
+) -> (RealmStore, common::id::RealmId, common::id::RealmId) {
+    let realms = RealmStore::new(pool.clone());
+    let source_realm_id = realms.create("Source", OpenOrBound::Bound).await.unwrap();
+    let destination_realm_id = realms
+        .create("Destination", OpenOrBound::Bound)
+        .await
+        .unwrap();
+    (realms, source_realm_id, destination_realm_id)
+}
+
+async fn create_character(
+    pool: &PgPool,
+    store: &CharacterStore,
+    realm_id: common::id::RealmId,
+) -> CharacterId {
+    let account_id = create_account(pool).await;
+    store
+        .create(account_id, "Aria", realm_id, "greenwood-forest")
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_ticket_item_gate_is_consumed_on_a_successful_transfer() {
+    let pool = pool().await;
+    let (_realms, source_realm_id, destination_realm_id) = source_and_destination(&pool).await;
+    let gates = TransferGateStore::new(pool.clone());
+    gates
+        .set(
+            source_realm_id,
+            destination_realm_id,
+            TransferGate::TicketItem {
+                item_type: "realm_transfer_ticket".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let store = CharacterStore::new(pool.clone(), source_schema(), Default::default());
+    let character_id = create_character(&pool, &store, source_realm_id).await;
+    store
+        .grant_item(character_id, "realm_transfer_ticket", 1)
+        .await
+        .unwrap();
+
+    let destination_schema = destination_schema();
+    executor(pool.clone())
+        .await
+        .transfer(TransferRequest {
+            character_id,
+            destination_realm_id,
+            destination_schema: &destination_schema,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        store
+            .item_quantity(character_id, "realm_transfer_ticket")
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_ticket_item_gate_without_the_item_is_rejected_and_nothing_is_consumed() {
+    let pool = pool().await;
+    let (_realms, source_realm_id, destination_realm_id) = source_and_destination(&pool).await;
+    let gates = TransferGateStore::new(pool.clone());
+    gates
+        .set(
+            source_realm_id,
+            destination_realm_id,
+            TransferGate::TicketItem {
+                item_type: "realm_transfer_ticket".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let store = CharacterStore::new(pool.clone(), source_schema(), Default::default());
+    let character_id = create_character(&pool, &store, source_realm_id).await;
+    // Owns a different item, but not the one the gate requires.
+    store
+        .grant_item(character_id, "unrelated_item", 3)
+        .await
+        .unwrap();
+
+    let destination_schema = destination_schema();
+    let err = executor(pool.clone())
+        .await
+        .transfer(TransferRequest {
+            character_id,
+            destination_realm_id,
+            destination_schema: &destination_schema,
+        })
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("realm_transfer_ticket"), "{err}");
+
+    // Untouched: still on the source realm, unrelated item still owned.
+    let realm_id: uuid::Uuid = sqlx::query_scalar("SELECT realm_id FROM characters WHERE id = $1")
+        .bind(character_id.as_uuid())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(realm_id, source_realm_id.as_uuid());
+    assert_eq!(
+        store
+            .item_quantity(character_id, "unrelated_item")
+            .await
+            .unwrap(),
+        3
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_purchase_gate_with_no_verifier_configured_denies_by_default() {
+    let pool = pool().await;
+    let (_realms, source_realm_id, destination_realm_id) = source_and_destination(&pool).await;
+    let gates = TransferGateStore::new(pool.clone());
+    gates
+        .set(
+            source_realm_id,
+            destination_realm_id,
+            TransferGate::Purchase {
+                product_id: "realm-transfer-token".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let store = CharacterStore::new(pool.clone(), source_schema(), Default::default());
+    let character_id = create_character(&pool, &store, source_realm_id).await;
+
+    let destination_schema = destination_schema();
+    let err = executor(pool.clone())
+        .await
+        .transfer(TransferRequest {
+            character_id,
+            destination_realm_id,
+            destination_schema: &destination_schema,
+        })
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("verified purchase"), "{err}");
+}
+
+struct AlwaysVerifiedPurchase;
+
+#[async_trait::async_trait]
+impl PurchaseVerifier for AlwaysVerifiedPurchase {
+    async fn verify_purchase(
+        &self,
+        _character_id: CharacterId,
+        _product_id: &str,
+    ) -> common::Result<bool> {
+        Ok(true)
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_purchase_gate_succeeds_once_a_verifier_confirms_it() {
+    let pool = pool().await;
+    let (_realms, source_realm_id, destination_realm_id) = source_and_destination(&pool).await;
+    let gates = TransferGateStore::new(pool.clone());
+    gates
+        .set(
+            source_realm_id,
+            destination_realm_id,
+            TransferGate::Purchase {
+                product_id: "realm-transfer-token".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let store = CharacterStore::new(pool.clone(), source_schema(), Default::default());
+    let character_id = create_character(&pool, &store, source_realm_id).await;
+
+    let destination_schema = destination_schema();
+    executor(pool.clone())
+        .await
+        .with_purchase_verifier(Arc::new(AlwaysVerifiedPurchase))
+        .transfer(TransferRequest {
+            character_id,
+            destination_realm_id,
+            destination_schema: &destination_schema,
+        })
+        .await
+        .unwrap();
+
+    let realm_id: uuid::Uuid = sqlx::query_scalar("SELECT realm_id FROM characters WHERE id = $1")
+        .bind(character_id.as_uuid())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(realm_id, destination_realm_id.as_uuid());
+}
+
+#[tokio::test]
+#[ignore]
+async fn an_unconfigured_gate_defaults_to_open() {
+    let pool = pool().await;
+    let (_realms, source_realm_id, destination_realm_id) = source_and_destination(&pool).await;
+    // Deliberately no `gates.set(...)` call — no row at all for this pair.
+
+    let store = CharacterStore::new(pool.clone(), source_schema(), Default::default());
+    let character_id = create_character(&pool, &store, source_realm_id).await;
+
+    let destination_schema = destination_schema();
+    executor(pool.clone())
+        .await
+        .transfer(TransferRequest {
+            character_id,
+            destination_realm_id,
+            destination_schema: &destination_schema,
+        })
+        .await
+        .unwrap();
 }

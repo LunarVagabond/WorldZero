@@ -5,15 +5,19 @@
 //! "Transfers (bound realms only)" for the full mechanism this
 //! implements.
 //!
-//! Gating (#54) and the audit trail (#55) aren't built yet — a caller
-//! that needs either wraps [`TransferExecutor::transfer`], it doesn't
-//! change what this does.
+//! Gating (#54, [`crate::gate`]) is enforced inline below, inside the
+//! same transaction as the realm move — see [`TransferExecutor::transfer`].
+//! The audit trail (#55) isn't built yet.
+
+use std::sync::Arc;
 
 use character::AttributeSchema;
 use common::id::{CharacterId, RealmId};
 use common::{Error, Result};
 use realm_directory::{OpenOrBound, RealmStore};
 use sqlx::{PgPool, Row};
+
+use crate::gate::{DenyAllPurchaseVerifier, PurchaseVerifier, TransferGate, TransferGateStore};
 
 /// Everything one transfer attempt needs. `destination_schema` is the
 /// caller's responsibility to resolve (e.g. whichever `stats.schema.yaml`
@@ -30,11 +34,27 @@ pub struct TransferRequest<'a> {
 pub struct TransferExecutor {
     pool: PgPool,
     realms: RealmStore,
+    gates: TransferGateStore,
+    purchase_verifier: Arc<dyn PurchaseVerifier>,
 }
 
 impl TransferExecutor {
-    pub fn new(pool: PgPool, realms: RealmStore) -> Self {
-        Self { pool, realms }
+    /// Purchase-gated transfers are denied by [`DenyAllPurchaseVerifier`]
+    /// until [`Self::with_purchase_verifier`] swaps in a real one — see
+    /// that type's own doc comment for why that's the safe default
+    /// rather than silently letting purchase-gated transfers through.
+    pub fn new(pool: PgPool, realms: RealmStore, gates: TransferGateStore) -> Self {
+        Self {
+            pool,
+            realms,
+            gates,
+            purchase_verifier: Arc::new(DenyAllPurchaseVerifier),
+        }
+    }
+
+    pub fn with_purchase_verifier(mut self, purchase_verifier: Arc<dyn PurchaseVerifier>) -> Self {
+        self.purchase_verifier = purchase_verifier;
+        self
     }
 
     /// Executes `request`. Everything below runs in one Postgres
@@ -67,6 +87,13 @@ impl TransferExecutor {
     ///   concern, #136-adjacent); kept here, not deleted, since it's
     ///   correct for whatever future case *does* populate a lease row
     ///   for a character reaching this check.
+    /// - the source→destination realm pair's configured [`TransferGate`]
+    ///   (#54) rejects it: a ticket-item gate with an insufficient stack,
+    ///   or a purchase gate whose [`PurchaseVerifier`] doesn't confirm
+    ///   it. A ticket-item gate's consumption happens inside this same
+    ///   transaction, so a transfer that fails *after* consuming the
+    ///   item is impossible — the whole point of doing it here rather
+    ///   than as a separate step before the transaction opens.
     pub async fn transfer(&self, request: TransferRequest<'_>) -> Result<()> {
         let mut tx = self
             .pool
@@ -140,6 +167,75 @@ impl TransferExecutor {
                     request.character_id
                 ),
             ));
+        }
+
+        // The gate check itself doesn't need to run inside `tx` (gate
+        // config changes are rare, not a correctness-sensitive race),
+        // but a ticket-item gate's *consumption* below does — otherwise
+        // a transfer that fails after consuming the item would leave
+        // the item gone with nothing to show for it, violating #54's
+        // "does NOT consume it if the transfer fails" criterion.
+        match self
+            .gates
+            .get(source_realm_id, request.destination_realm_id)
+            .await?
+        {
+            TransferGate::Open => {}
+            TransferGate::TicketItem { item_type } => {
+                let current: Option<i64> = sqlx::query_scalar(
+                    "SELECT quantity FROM items WHERE character_id = $1 AND item_type = $2 FOR UPDATE",
+                )
+                .bind(request.character_id.as_uuid())
+                .bind(&item_type)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| Error::wrap("transfer", "failed to check ticket item", e))?;
+
+                if current.unwrap_or(0) < 1 {
+                    return Err(Error::new(
+                        "transfer",
+                        format!(
+                            "transfer requires ticket item {item_type:?}, which character {} does not have",
+                            request.character_id
+                        ),
+                    ));
+                }
+
+                if current == Some(1) {
+                    sqlx::query("DELETE FROM items WHERE character_id = $1 AND item_type = $2")
+                        .bind(request.character_id.as_uuid())
+                        .bind(&item_type)
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(|e| Error::wrap("transfer", "failed to consume ticket item", e))?;
+                } else {
+                    sqlx::query(
+                        "UPDATE items SET quantity = quantity - 1, updated_at = now() \
+                         WHERE character_id = $1 AND item_type = $2",
+                    )
+                    .bind(request.character_id.as_uuid())
+                    .bind(&item_type)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| Error::wrap("transfer", "failed to consume ticket item", e))?;
+                }
+            }
+            TransferGate::Purchase { product_id } => {
+                let verified = self
+                    .purchase_verifier
+                    .verify_purchase(request.character_id, &product_id)
+                    .await?;
+                if !verified {
+                    return Err(Error::new(
+                        "transfer",
+                        format!(
+                            "transfer requires a verified purchase ({product_id:?}), \
+                             none found for character {}",
+                            request.character_id
+                        ),
+                    ));
+                }
+            }
         }
 
         let stored_stats = stats.as_object().cloned().unwrap_or_default();

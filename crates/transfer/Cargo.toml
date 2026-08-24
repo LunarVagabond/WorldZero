@@ -7,6 +7,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+async-trait = "0.1.92"
 character = { version = "0.1.0", path = "../character" }
 common = { version = "0.1.0", path = "../common" }
 realm-directory = { version = "0.1.0", path = "../realm-directory" }
