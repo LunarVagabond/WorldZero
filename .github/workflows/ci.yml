@@ -88,6 +88,14 @@ jobs:
           cargo build --target wasm32-wasip2 --release --features panic_on_load --target-dir target/panic
           cargo build --target wasm32-wasip2 --release --features escape_attempt --target-dir target/escape
 
+      # `second-plugin` (#152) — a second, independently-authored wasm
+      # fixture used only by server_smoke.rs's multi-plugin test; same
+      # standalone-workspace shape as `test-plugin` above, and that test
+      # panics loudly (doesn't silently skip) if this build is missing.
+      - name: Build second plugin-host wasm test fixture
+        working-directory: crates/plugin-host/tests/fixtures/second-plugin
+        run: cargo build --target wasm32-wasip2 --release
+
       # `--include-ignored` rather than a separate `-- --ignored` pass —
       # one run covers both the always-on unit tests and the
       # infra-dependent integration suites now that real Postgres/Redis
