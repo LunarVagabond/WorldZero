@@ -2510,6 +2510,12 @@ dependencies = [
 [[package]]
 name = "realm-directory"
 version = "0.1.0"
+dependencies = [
+ "common",
+ "sqlx",
+ "tokio",
+ "uuid",
+]
 
 [[package]]
 name = "redis"
