@@ -1,10 +1,13 @@
 # Example plugin manifest — loaded by the `plugin-host` crate
 # (crates/plugin-host/src/manifest.rs), see docs/specs/Plugin_API.md.
-# Copy/rename this alongside your own compiled plugin .wasm (point
-# WZ_PLUGIN_MANIFEST_PATH / WZ_PLUGIN_WASM_PATH at them) and adjust freely.
+# Copy this into its own subdirectory alongside your compiled plugin
+# .wasm: <plugins-dir>/<your-plugin-name>/{plugin.toml,*.wasm}. Default
+# plugins dir is <config_dir>/plugins (override with WZ_PLUGINS_DIR) —
+# every subdirectory found there is auto-discovered and loaded at
+# startup, no per-plugin env var needed. Adjust freely.
 [plugin]
 name = "example-plugin"
-host_api_version = "0.7.0"
+host_api_version = "0.8.0"
 # Gates which host functions this plugin may call (docs/specs/Plugin_API.md's
 # "Capability gating") — spawning (spawn-npc), movement (move-entity),
 # combat (apply-stat-delta/report-death/report-respawn), economy
@@ -21,3 +24,10 @@ message_types = []
 # Chat command names (without the leading '/') routed to the
 # on-chat-command hook instead of published as ordinary chat.
 chat_commands = []
+# Which hooks the host should actually call for this plugin — a plugin
+# loads once, process-wide, and every zone-specific hook takes an
+# explicit zone-id argument rather than the plugin being scoped to a
+# zone (docs/specs/Plugin_API.md's "Multi-plugin support"). Only hooks
+# listed here are ever called; on-message/on-chat-command are the
+# exception, routed on message_types/chat_commands above instead.
+hooks = []

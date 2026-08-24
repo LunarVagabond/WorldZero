@@ -257,18 +257,23 @@ impl WorldHandle {
 /// `Moved`/`Rejected` to connected sessions is the caller's job
 /// (`crate::session`); this only drives the simulation.
 ///
-/// `plugin`, if configured, is moved onto this task and kept alive for
-/// its whole lifetime — matching docs/specs/Plugin_API.md's "instantiated
-/// for a zone-service" (#95). A `PluginMessage` command only reaches
-/// `on_message` if its `message_type` is one the plugin actually declared
-/// in `plugin.toml`; anything else is logged and dropped rather than
-/// treated as an error, since an unroutable message type is a client or
-/// config mistake, not something that should disrupt the actor.
+/// `plugins` is shared across every zone-service `server` runs (#152) —
+/// one plugin instance, process-wide, not one per zone. Every zone actor
+/// locks the same `Mutex` to dispatch a hook call, passing its own
+/// `zone_id` as an explicit argument (`wit/plugin.wit`'s `hooks`
+/// interface doc comment) — the plugin decides for itself whether/how to
+/// react to a given zone, the host never scopes a plugin to specific
+/// zones. A lifecycle hook fans out to every plugin that declared it in
+/// `plugin.toml`'s `hooks` list (`fire_hook` below) — the core never
+/// picks a winner. `on_message`/`on_chat_command` are the one exception:
+/// single-owner routing by declared `message_types`/`chat_commands`,
+/// already guaranteed collision-free across every loaded plugin before
+/// this task ever starts.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_world_actor(
     mut zone: Zone,
     tick_interval: std::time::Duration,
-    mut plugin: Option<PluginRuntime>,
+    plugins: std::sync::Arc<tokio::sync::Mutex<Vec<PluginRuntime>>>,
     character_store: std::sync::Arc<CharacterStore>,
     entity_characters: EntityCharacters,
     plugin_state_store: std::sync::Arc<crate::plugin_state::PluginStateStore>,
@@ -307,28 +312,40 @@ pub fn spawn_world_actor(
                     }
                     on_tick(&zone, outcomes);
 
-                    if let Some(runtime) = plugin.as_mut() {
-                        // The host never moves an NPC itself — it hands the
-                        // plugin the NPC's position and full route data and
-                        // waits for `move-entity` calls back (#57,
-                        // wit/plugin.wit's `on-npc-tick` doc comment).
-                        for (entity, position, route) in zone.npcs_with_routes() {
-                            let entity_str = entity.to_string();
-                            if let Err(e) = runtime.plugin.on_npc_tick(
-                                &entity_str,
-                                position.0,
-                                position.1,
-                                &route.waypoints,
-                                route.is_loop,
-                                route.speed,
-                                dt,
-                            ) {
-                                tracing::warn!(%entity, error = %e, "plugin on_npc_tick hook failed");
+                    // The host never moves an NPC itself — it hands
+                    // every opted-in plugin the NPC's position and full
+                    // route data and waits for `move-entity` calls back
+                    // (#57, wit/plugin.wit's `on-npc-tick` doc comment).
+                    // Fan-out (#152): every plugin that declared
+                    // `on-npc-tick` gets called for every route-NPC in
+                    // this zone — the host doesn't attribute an NPC to
+                    // whichever plugin spawned it.
+                    let routes = zone.npcs_with_routes();
+                    {
+                        let mut plugins = plugins.lock().await;
+                        for runtime in plugins.iter_mut() {
+                            if !runtime.wants("on-npc-tick") {
+                                continue;
                             }
+                            for (entity, position, route) in &routes {
+                                let entity_str = entity.to_string();
+                                if let Err(e) = runtime.plugin.on_npc_tick(
+                                    &zone_id,
+                                    &entity_str,
+                                    position.0,
+                                    position.1,
+                                    &route.waypoints,
+                                    route.is_loop,
+                                    route.speed,
+                                    dt,
+                                ) {
+                                    tracing::warn!(plugin = %runtime.name, %entity, error = %e, "plugin on_npc_tick hook failed");
+                                }
+                            }
+                            drain_and_apply_plugin_effects(
+                                runtime, &mut zone, &character_store, &entity_characters, &plugin_state_store,
+                            ).await;
                         }
-                        drain_and_apply_plugin_effects(
-                            runtime, &mut zone, &character_store, &entity_characters, &plugin_state_store,
-                        ).await;
                     }
 
                     next_tick_at += tick_interval;
@@ -351,18 +368,23 @@ pub fn spawn_world_actor(
                         WorldCommand::EntitiesSnapshot { reply } => {
                             let _ = reply.send(zone.entities());
                         }
+                        // `on-message`/`on-chat-command` are single-owner,
+                        // not fan-out (#152): a `message_type`/`chat_command`
+                        // is routed to whichever *one* plugin declared it
+                        // (already guaranteed unique across every loaded
+                        // plugin by `plugin_host::check_no_collisions` at
+                        // startup) — declaring `message_types`/`chat_commands`
+                        // already states interest, so neither needs to also
+                        // appear in `hooks`.
                         WorldCommand::PluginMessage { message_type, sender_entity_id, payload } => {
-                            let Some(runtime) = plugin.as_mut() else {
-                                tracing::warn!(message_type, "received a plugin message but no plugin is configured");
+                            let mut plugins = plugins.lock().await;
+                            let Some(runtime) = plugins.iter_mut().find(|p| p.message_types.contains(&message_type)) else {
+                                tracing::warn!(message_type, "received a message_type no loaded plugin declared");
                                 continue;
                             };
-                            if !runtime.message_types.contains(&message_type) {
-                                tracing::warn!(message_type, "received a message_type the configured plugin didn't declare");
-                                continue;
-                            }
                             let sender_entity_id = sender_entity_id.to_string();
-                            if let Err(e) = runtime.plugin.on_message(message_type, &sender_entity_id, &payload) {
-                                tracing::warn!(message_type, error = %e, "plugin on_message hook failed");
+                            if let Err(e) = runtime.plugin.on_message(&zone_id, message_type, &sender_entity_id, &payload) {
+                                tracing::warn!(plugin = %runtime.name, message_type, error = %e, "plugin on_message hook failed");
                             }
                             for spawn_table_id in runtime.drain_pending_spawns() {
                                 spawn_npc_from_table(&mut zone, &spawn_table_id);
@@ -372,92 +394,68 @@ pub fn spawn_world_actor(
                             ).await;
                         }
                         WorldCommand::ChatCommand { command, args, sender_entity_id } => {
-                            let Some(runtime) = plugin.as_mut() else {
-                                tracing::warn!(command, "received a chat command but no plugin is configured");
+                            let mut plugins = plugins.lock().await;
+                            let Some(runtime) = plugins.iter_mut().find(|p| p.chat_commands.contains(&command)) else {
+                                tracing::warn!(command, "received a chat command no loaded plugin declared");
                                 continue;
                             };
-                            if !runtime.chat_commands.contains(&command) {
-                                tracing::warn!(command, "received a chat command the configured plugin didn't declare");
-                                continue;
-                            }
                             let sender_entity_id_str = sender_entity_id.to_string();
-                            if let Err(e) = runtime.plugin.on_chat_command(&command, &args, &sender_entity_id_str) {
-                                tracing::warn!(command, error = %e, "plugin on_chat_command hook failed");
+                            if let Err(e) = runtime.plugin.on_chat_command(&zone_id, &command, &args, &sender_entity_id_str) {
+                                tracing::warn!(plugin = %runtime.name, command, error = %e, "plugin on_chat_command hook failed");
                             }
                             drain_and_apply_plugin_effects(
                                 runtime, &mut zone, &character_store, &entity_characters, &plugin_state_store,
                             ).await;
                         }
                         WorldCommand::PlayerJoin { entity_id } => {
-                            let Some(runtime) = plugin.as_mut() else {
-                                continue;
-                            };
                             let entity_id_str = entity_id.to_string();
-                            if let Err(e) = runtime.plugin.on_player_join_zone(&entity_id_str) {
-                                tracing::warn!(%entity_id, error = %e, "plugin on_player_join_zone hook failed");
-                            }
-                            drain_and_apply_plugin_effects(
-                                runtime, &mut zone, &character_store, &entity_characters, &plugin_state_store,
+                            let mut plugins = plugins.lock().await;
+                            fire_hook(
+                                &mut plugins, "on-player-join-zone", &mut zone, &character_store, &entity_characters, &plugin_state_store,
+                                |plugin| plugin.on_player_join_zone(&zone_id, &entity_id_str),
                             ).await;
                         }
                         WorldCommand::PlayerLeave { entity_id, reply } => {
-                            let Some(runtime) = plugin.as_mut() else {
-                                let _ = reply.send(());
-                                continue;
-                            };
                             let entity_id_str = entity_id.to_string();
-                            if let Err(e) = runtime.plugin.on_player_leave_zone(&entity_id_str) {
-                                tracing::warn!(%entity_id, error = %e, "plugin on_player_leave_zone hook failed");
-                            }
-                            drain_and_apply_plugin_effects(
-                                runtime, &mut zone, &character_store, &entity_characters, &plugin_state_store,
+                            let mut plugins = plugins.lock().await;
+                            fire_hook(
+                                &mut plugins, "on-player-leave-zone", &mut zone, &character_store, &entity_characters, &plugin_state_store,
+                                |plugin| plugin.on_player_leave_zone(&zone_id, &entity_id_str),
                             ).await;
                             let _ = reply.send(());
                         }
                         WorldCommand::Attack { attacker, target, stat_key } => {
-                            let Some(runtime) = plugin.as_mut() else {
-                                continue;
-                            };
                             if zone.kind_of(target).is_none() {
                                 tracing::warn!(%attacker, %target, "attack targeted an entity that isn't spawned in this zone");
                                 continue;
                             }
                             let attacker_str = attacker.to_string();
                             let target_str = target.to_string();
-                            if let Err(e) = runtime.plugin.on_damage_calc(&attacker_str, &target_str, &stat_key, 0) {
-                                tracing::warn!(%attacker, %target, error = %e, "plugin on_damage_calc hook failed");
-                            }
-                            drain_and_apply_plugin_effects(
-                                runtime, &mut zone, &character_store, &entity_characters, &plugin_state_store,
+                            let mut plugins = plugins.lock().await;
+                            fire_hook(
+                                &mut plugins, "on-damage-calc", &mut zone, &character_store, &entity_characters, &plugin_state_store,
+                                |plugin| plugin.on_damage_calc(&zone_id, &attacker_str, &target_str, &stat_key, 0),
                             ).await;
                         }
                         WorldCommand::UseItem { entity_id, item_type } => {
-                            let Some(runtime) = plugin.as_mut() else {
-                                continue;
-                            };
                             let entity_id_str = entity_id.to_string();
-                            if let Err(e) = runtime.plugin.on_item_use(&entity_id_str, &item_type) {
-                                tracing::warn!(%entity_id, item_type, error = %e, "plugin on_item_use hook failed");
-                            }
-                            drain_and_apply_plugin_effects(
-                                runtime, &mut zone, &character_store, &entity_characters, &plugin_state_store,
+                            let mut plugins = plugins.lock().await;
+                            fire_hook(
+                                &mut plugins, "on-item-use", &mut zone, &character_store, &entity_characters, &plugin_state_store,
+                                |plugin| plugin.on_item_use(&zone_id, &entity_id_str, &item_type),
                             ).await;
                         }
                         WorldCommand::InteractNpc { npc, actor } => {
-                            let Some(runtime) = plugin.as_mut() else {
-                                continue;
-                            };
                             if zone.kind_of(npc) != Some(EntityKind::Npc) {
                                 tracing::warn!(%npc, %actor, "npc-interact targeted an entity that isn't a currently-spawned NPC");
                                 continue;
                             }
                             let npc_str = npc.to_string();
                             let actor_str = actor.to_string();
-                            if let Err(e) = runtime.plugin.on_npc_interact(&npc_str, &actor_str) {
-                                tracing::warn!(%npc, %actor, error = %e, "plugin on_npc_interact hook failed");
-                            }
-                            drain_and_apply_plugin_effects(
-                                runtime, &mut zone, &character_store, &entity_characters, &plugin_state_store,
+                            let mut plugins = plugins.lock().await;
+                            fire_hook(
+                                &mut plugins, "on-npc-interact", &mut zone, &character_store, &entity_characters, &plugin_state_store,
+                                |plugin| plugin.on_npc_interact(&zone_id, &npc_str, &actor_str),
                             ).await;
                         }
                     }
@@ -503,6 +501,7 @@ async fn drain_and_apply_plugin_effects(
     entity_characters: &EntityCharacters,
     plugin_state_store: &crate::plugin_state::PluginStateStore,
 ) {
+    let zone_id = zone.manifest.id.clone();
     let moves = runtime.drain_pending_moves();
     let stat_deltas = runtime.drain_pending_stat_deltas();
     let item_grants = runtime.drain_pending_item_grants();
@@ -522,23 +521,72 @@ async fn drain_and_apply_plugin_effects(
         plugin_state_store,
     )
     .await;
+    let wants_item_acquire = runtime.wants("on-item-acquire");
     for (entity_id, item_type, new_quantity) in acquired {
-        if let Err(e) = runtime
-            .plugin
-            .on_item_acquire(&entity_id, &item_type, new_quantity)
+        if !wants_item_acquire {
+            continue;
+        }
+        if let Err(e) =
+            runtime
+                .plugin
+                .on_item_acquire(&zone_id, &entity_id, &item_type, new_quantity)
         {
             tracing::warn!(entity_id, item_type, error = %e, "plugin on_item_acquire hook failed");
         }
     }
+    let wants_death = runtime.wants("on-death");
     for entity_id in runtime.drain_pending_deaths() {
-        if let Err(e) = runtime.plugin.on_death(&entity_id) {
+        if !wants_death {
+            continue;
+        }
+        if let Err(e) = runtime.plugin.on_death(&zone_id, &entity_id) {
             tracing::warn!(entity_id, error = %e, "plugin on_death hook failed");
         }
     }
+    let wants_respawn = runtime.wants("on-respawn");
     for entity_id in runtime.drain_pending_respawns() {
-        if let Err(e) = runtime.plugin.on_respawn(&entity_id) {
+        if !wants_respawn {
+            continue;
+        }
+        if let Err(e) = runtime.plugin.on_respawn(&zone_id, &entity_id) {
             tracing::warn!(entity_id, error = %e, "plugin on_respawn hook failed");
         }
+    }
+}
+
+/// Fires `hook_name` on every plugin that declared it in `plugin.toml`'s
+/// `hooks` list (#152) — the event-fan-out composition model: every
+/// interested plugin gets called, independently, in load order (defined,
+/// not meaningful); the core never picks a winner or arbitrates between
+/// them. `call` invokes the actual hook (each call site's own closure,
+/// since every hook's signature differs); each plugin's own pending
+/// host-function effects are drained and applied right after its own
+/// hook call (`drain_and_apply_plugin_effects`) before moving to the
+/// next plugin, so one plugin's writes never overlap another's `.await`s.
+async fn fire_hook(
+    plugins: &mut [PluginRuntime],
+    hook_name: &str,
+    zone: &mut Zone,
+    character_store: &CharacterStore,
+    entity_characters: &EntityCharacters,
+    plugin_state_store: &crate::plugin_state::PluginStateStore,
+    mut call: impl FnMut(&mut plugin_host::LoadedPlugin) -> common::Result<()>,
+) {
+    for runtime in plugins.iter_mut() {
+        if !runtime.wants(hook_name) {
+            continue;
+        }
+        if let Err(e) = call(&mut runtime.plugin) {
+            tracing::warn!(plugin = %runtime.name, hook_name, error = %e, "plugin hook failed");
+        }
+        drain_and_apply_plugin_effects(
+            runtime,
+            zone,
+            character_store,
+            entity_characters,
+            plugin_state_store,
+        )
+        .await;
     }
 }
 

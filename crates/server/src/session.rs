@@ -96,6 +96,16 @@ pub struct SessionDeps {
     /// sandboxed call" shape `entity_roles` already uses.
     pub plugin_state_store: Arc<crate::plugin_state::PluginStateStore>,
     pub plugin_state_cache: crate::plugin_state::PluginStateCache,
+    /// Every connected entity's outgoing channel, process-wide, regardless
+    /// of which zone it's currently in (#152) — backs the plugin
+    /// `send-message` host function, since a plugin instance is now
+    /// shared across every zone and needs to reach a target entity no
+    /// matter where they are. Distinct from each zone's own `Sessions`
+    /// (`zone.sessions`, used for that zone's broadcast/roster) — an
+    /// entry here is added once at initial join and removed once at
+    /// final disconnect; it's untouched by `ZoneChanged` zone-hops, since
+    /// the same connection/`outgoing_tx` carries straight through those.
+    pub global_sessions: Sessions,
 }
 
 pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Result<()> {
@@ -222,6 +232,10 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
         .collect();
 
     zone.sessions
+        .lock()
+        .unwrap()
+        .insert(entity_id, outgoing_tx.clone());
+    deps.global_sessions
         .lock()
         .unwrap()
         .insert(entity_id, outgoing_tx.clone());
@@ -374,7 +388,8 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
                         }
                     }
                 }
-                if sink.send(envelope).await.is_err() {
+                let send_result = sink.send(envelope).await;
+                if send_result.is_err() {
                     break;
                 }
             }
@@ -395,6 +410,7 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
     let final_position = zone.world.position_of(entity_id).await;
     zone.world.despawn(entity_id);
     zone.sessions.lock().unwrap().remove(&entity_id);
+    deps.global_sessions.lock().unwrap().remove(&entity_id);
     deps.entity_characters.lock().unwrap().remove(&entity_id);
     deps.entity_roles.lock().unwrap().remove(&entity_id);
     // Character-scope (and any leftover entity-scope) cache entries for

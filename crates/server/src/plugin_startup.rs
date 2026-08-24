@@ -252,12 +252,23 @@ impl HostCallbacks for PluginCallbacks {
 /// callers drain this shared queue instead; see `PluginCallbacks`' docs
 /// for why `spawn_npc` only ever records rather than spawning directly).
 pub struct PluginRuntime {
+    /// Free-form, from `plugin.toml`'s `plugin.name` — used only in log
+    /// messages (`world_actor`'s per-plugin warnings on a failed hook
+    /// call) now that more than one plugin can be loaded at once (#152).
+    pub name: String,
     pub plugin: LoadedPlugin,
     pub message_types: Vec<u16>,
     /// Command names (without the leading `/`) declared in `plugin.toml`
     /// — routed to `on-chat-command` instead of published as ordinary
     /// chat (#57).
     pub chat_commands: Vec<String>,
+    /// Which hooks (`plugin_host::manifest::KNOWN_HOOKS`) this plugin
+    /// declared — `world_actor`'s dispatch only calls a hook if it's
+    /// listed here (#152); `on-message`/`on-chat-command` are the
+    /// exception, routed on `message_types`/`chat_commands` membership
+    /// alone (declaring either already states interest, see
+    /// `plugin_host::manifest::PluginDeclaration::hooks`'s doc comment).
+    pub hooks: Vec<String>,
     pending_spawns: Arc<Mutex<Vec<String>>>,
     pending_stat_deltas: Arc<Mutex<Vec<(String, String, i64)>>>,
     pending_moves: Arc<Mutex<Vec<(String, f64, f64)>>>,
@@ -324,26 +335,51 @@ impl PluginRuntime {
     pub fn drain_pending_respawns(&self) -> Vec<String> {
         std::mem::take(&mut self.pending_respawns.lock().unwrap())
     }
+
+    /// Whether this plugin declared `hook` in `plugin.toml`'s `hooks`
+    /// list — the gate `world_actor`'s dispatch checks before calling
+    /// any hook except `on-message`/`on-chat-command` (#152).
+    pub fn wants(&self, hook: &str) -> bool {
+        self.hooks.iter().any(|h| h == hook)
+    }
 }
 
-/// Loads the plugin at `wasm_path` (checked against `manifest_path`'s
-/// declared `host_api_version` and `message_types` first) and runs its
-/// `on_load` hook. Returns the still-alive plugin — the caller is
-/// responsible for keeping it running; dropping it tears it down — plus
-/// the spawn-table ids it requested via `spawn-npc` during `on_load`, in
-/// call order (any requested during a later `on_message` call are left
-/// for the caller to drain via `PluginRuntime::drain_pending_spawns`).
-pub fn load_and_run_on_load(
-    manifest_path: &Path,
+/// Loads one plugin instance from an already-parsed, already-validated
+/// `manifest` (`main` discovers and validates every manifest in the
+/// plugins directory up front — individually via `check_compatible` and
+/// collectively via `check_no_collisions` — before any of them are ever
+/// instantiated, #152) plus its compiled `wasm_path`, and runs its
+/// `on_load` hook if (and only if) the manifest declared `"on-load"` in
+/// its `hooks` list — same opt-in gate every other hook goes through,
+/// applied here since `on_load` is otherwise a special unconditional
+/// case. Returns the still-alive plugin — the caller is responsible for
+/// keeping it running; dropping it tears it down — plus the spawn-table
+/// ids it requested via `spawn-npc` during `on_load`, in call order (any
+/// requested during a later hook call are left for the caller to drain
+/// via `PluginRuntime::drain_pending_spawns`).
+///
+/// Called once per plugin **per zone-service** it's attached to (#152) —
+/// every zone gets its own live instance (its own `wasmtime::Store`),
+/// never a single instance shared across zones, matching
+/// docs/specs/Plugin_API.md's "instantiated for a zone-service" wording.
+/// `host` is shared across every plugin attached to the same zone-service
+/// (`main` constructs one `PluginHost` per zone and passes it to every
+/// `load_plugin` call for that zone) — `PluginHost`'s own doc comment:
+/// "compiling/loading is the expensive part, the engine itself is cheap
+/// to share." A zone with multiple plugins attached previously created a
+/// separate `wasmtime::Engine` per plugin; #152 fixed that.
+pub fn load_plugin(
+    manifest: &PluginManifest,
     wasm_path: &Path,
+    host: &PluginHost,
     sessions: Sessions,
     entity_roles: EntityRoles,
     plugin_state_cache: PluginStateCache,
 ) -> Result<(PluginRuntime, Vec<String>)> {
-    let manifest = PluginManifest::from_file(manifest_path)?;
+    let name = manifest.plugin.name.clone();
     let message_types = manifest.plugin.message_types.clone();
     let chat_commands = manifest.plugin.chat_commands.clone();
-    let host = PluginHost::new();
+    let hooks = manifest.plugin.hooks.clone();
     let pending_spawns = Arc::new(Mutex::new(Vec::new()));
     let pending_stat_deltas = Arc::new(Mutex::new(Vec::new()));
     let pending_moves = Arc::new(Mutex::new(Vec::new()));
@@ -368,14 +404,18 @@ pub fn load_and_run_on_load(
         pending_respawns: pending_respawns.clone(),
     };
 
-    let mut plugin = host.load(&manifest, wasm_path, Box::new(callbacks))?;
-    plugin.on_load()?;
+    let mut plugin = host.load(manifest, wasm_path, Box::new(callbacks))?;
+    if hooks.iter().any(|h| h == "on-load") {
+        plugin.on_load()?;
+    }
 
     let on_load_spawns = std::mem::take(&mut *pending_spawns.lock().unwrap());
     let runtime = PluginRuntime {
+        name,
         plugin,
         message_types,
         chat_commands,
+        hooks,
         pending_spawns,
         pending_stat_deltas,
         pending_moves,

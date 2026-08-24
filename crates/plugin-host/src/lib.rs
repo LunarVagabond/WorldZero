@@ -6,5 +6,5 @@ mod bindings;
 pub mod manifest;
 pub mod runtime;
 
-pub use manifest::{HOST_API_VERSION, PluginManifest};
+pub use manifest::{HOST_API_VERSION, PluginManifest, check_no_collisions};
 pub use runtime::{HostCallbacks, LoadedPlugin, PluginHost, PluginStateScope};

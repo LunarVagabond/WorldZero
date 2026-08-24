@@ -3,7 +3,7 @@
 # or config/stats.schema.yaml). See docs/specs/Plugin_API.md.
 [plugin]
 name = "example-plugin"
-host_api_version = "0.7.0"
+host_api_version = "0.8.0"
 # This plugin calls spawn-npc, send-message, move-entity,
 # apply-stat-delta, and grant-item — all five gated capabilities
 # (docs/specs/Plugin_API.md's "Capability gating") — so it declares all
@@ -17,3 +17,19 @@ message_types = [1000]
 # "wave": routed to on-chat-command instead of published as an ordinary
 # chat message — send "/wave" in chat and this plugin replies.
 chat_commands = ["wave"]
+# Every hook this plugin actually implements meaningfully (#152) —
+# on-message/on-chat-command route on message_types/chat_commands above
+# instead and don't need to appear here too.
+hooks = [
+    "on-zone-loaded",
+    "on-player-join-zone",
+    "on-player-leave-zone",
+    "on-interact",
+    "on-damage-calc",
+    "on-death",
+    "on-respawn",
+    "on-npc-tick",
+    "on-npc-interact",
+    "on-item-acquire",
+    "on-item-use",
+]

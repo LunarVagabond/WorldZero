@@ -66,7 +66,10 @@ quickstart:
 	$(CARGO) build --manifest-path $(EXAMPLE_PLUGIN_DIR)/Cargo.toml --target wasm32-wasip2 --release
 	$(CARGO) build -p server
 	$(CARGO) run -p common --bin migrate -- up
-	WZ_PLUGIN_MANIFEST_PATH=$(EXAMPLE_PLUGIN_DIR)/plugin.toml WZ_PLUGIN_WASM_PATH=$(EXAMPLE_PLUGIN_WASM) $(CARGO) run -p server
+	@mkdir -p config/plugins/example-plugin
+	@[ -f config/plugins/example-plugin/plugin.toml ] || cp $(EXAMPLE_PLUGIN_DIR)/plugin.toml config/plugins/example-plugin/plugin.toml
+	cp $(EXAMPLE_PLUGIN_WASM) config/plugins/example-plugin/example_plugin.wasm
+	$(CARGO) run -p server
 
 start:
 	@mkdir -p $(PID_DIR) $(LOG_DIR)

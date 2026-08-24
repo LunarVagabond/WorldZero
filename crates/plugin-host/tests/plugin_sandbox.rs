@@ -35,7 +35,7 @@ fn manifest() -> PluginManifest {
         r#"
 [plugin]
 name = "test-plugin"
-host_api_version = "0.7.0"
+host_api_version = "0.8.0"
 capabilities = ["spawning", "movement", "combat", "economy", "messaging"]
 message_types = [1000]
 "#,
@@ -53,7 +53,7 @@ fn restricted_manifest() -> PluginManifest {
         r#"
 [plugin]
 name = "test-plugin"
-host_api_version = "0.7.0"
+host_api_version = "0.8.0"
 capabilities = ["messaging"]
 message_types = [1000]
 "#,
@@ -221,13 +221,16 @@ fn a_well_behaved_plugin_spawns_an_npc_and_responds_to_interaction() {
         .expect("failed to load the well-behaved test plugin");
 
     plugin.on_load().expect("on_load should succeed");
+    plugin
+        .on_zone_loaded("test-zone")
+        .expect("on_zone_loaded should succeed");
     assert_eq!(
         callbacks.spawned.lock().unwrap().as_slice(),
         ["wolf-pack-01"]
     );
 
     plugin
-        .on_interact("forest-entrance", "actor-1")
+        .on_interact("test-zone", "forest-entrance", "actor-1")
         .expect("on_interact should succeed");
     {
         let messages = callbacks.messages.lock().unwrap();
@@ -237,7 +240,7 @@ fn a_well_behaved_plugin_spawns_an_npc_and_responds_to_interaction() {
     }
 
     plugin
-        .on_message(1000, "actor-1", b"hello")
+        .on_message("test-zone", 1000, "actor-1", b"hello")
         .expect("on_message should succeed");
     let messages = callbacks.messages.lock().unwrap();
     assert_eq!(messages.len(), 2);
@@ -258,7 +261,7 @@ fn a_plugin_computes_damage_ticks_a_route_and_handles_a_chat_command() {
         .expect("failed to load the well-behaved test plugin");
 
     plugin
-        .on_damage_calc("attacker-1", "target-1", "hp", 12)
+        .on_damage_calc("test-zone", "attacker-1", "target-1", "hp", 12)
         .expect("on_damage_calc should succeed");
     assert_eq!(
         callbacks.stat_deltas.lock().unwrap().as_slice(),
@@ -267,6 +270,7 @@ fn a_plugin_computes_damage_ticks_a_route_and_handles_a_chat_command() {
 
     plugin
         .on_npc_tick(
+            "test-zone",
             "npc-1",
             0.0,
             0.0,
@@ -282,7 +286,7 @@ fn a_plugin_computes_damage_ticks_a_route_and_handles_a_chat_command() {
     );
 
     plugin
-        .on_chat_command("roll", "2d6", "actor-1")
+        .on_chat_command("test-zone", "roll", "2d6", "actor-1")
         .expect("on_chat_command should succeed");
     let messages = callbacks.messages.lock().unwrap();
     // messages[0] is on_damage_calc's own confirmation to the attacker.
@@ -304,7 +308,7 @@ fn a_plugin_grants_removes_items_and_modifies_currency() {
         .expect("failed to load the well-behaved test plugin");
 
     plugin
-        .on_chat_command("give", "torch", "actor-1")
+        .on_chat_command("test-zone", "give", "torch", "actor-1")
         .expect("on_chat_command should succeed");
     assert_eq!(
         callbacks.item_grants.lock().unwrap().as_slice(),
@@ -312,7 +316,7 @@ fn a_plugin_grants_removes_items_and_modifies_currency() {
     );
 
     plugin
-        .on_item_use("actor-1", "torch")
+        .on_item_use("test-zone", "actor-1", "torch")
         .expect("on_item_use should succeed");
     assert_eq!(
         callbacks.item_removals.lock().unwrap().as_slice(),
@@ -336,7 +340,7 @@ fn a_plugin_handles_npc_interaction_and_reports_death_and_respawn() {
         .expect("failed to load the well-behaved test plugin");
 
     plugin
-        .on_npc_interact("npc-1", "actor-1")
+        .on_npc_interact("test-zone", "npc-1", "actor-1")
         .expect("on_npc_interact should succeed");
     {
         let messages = callbacks.messages.lock().unwrap();
@@ -349,23 +353,25 @@ fn a_plugin_handles_npc_interaction_and_reports_death_and_respawn() {
     // client asked via on-message) and reports it — the resulting
     // on-death/on-respawn call back is what actually confirms it.
     plugin
-        .on_message(1000, "actor-1", b"die")
+        .on_message("test-zone", 1000, "actor-1", b"die")
         .expect("on_message should succeed");
     assert_eq!(
         callbacks.deaths.lock().unwrap().as_slice(),
         ["actor-1".to_string()]
     );
 
-    plugin.on_death("actor-1").expect("on_death should succeed");
     plugin
-        .on_message(1000, "actor-1", b"respawn")
+        .on_death("test-zone", "actor-1")
+        .expect("on_death should succeed");
+    plugin
+        .on_message("test-zone", 1000, "actor-1", b"respawn")
         .expect("on_message should succeed");
     assert_eq!(
         callbacks.respawns.lock().unwrap().as_slice(),
         ["actor-1".to_string()]
     );
     plugin
-        .on_respawn("actor-1")
+        .on_respawn("test-zone", "actor-1")
         .expect("on_respawn should succeed");
 
     let messages = callbacks.messages.lock().unwrap();
@@ -393,7 +399,7 @@ fn a_plugin_lacking_a_capability_has_its_host_function_call_rejected() {
     // it ever reaches the real callback, through the real sandboxed call
     // boundary (#153).
     plugin
-        .on_chat_command("give", "torch", "actor-1")
+        .on_chat_command("test-zone", "give", "torch", "actor-1")
         .expect("on_chat_command itself should still succeed — the plugin caught the error");
     assert!(
         callbacks.item_grants.lock().unwrap().is_empty(),
@@ -423,7 +429,7 @@ fn a_plugin_with_the_declared_capability_succeeds() {
     // `manifest()` declares "economy" — same call as the restricted test
     // above, this time it actually reaches the real callback.
     plugin
-        .on_chat_command("give", "torch", "actor-1")
+        .on_chat_command("test-zone", "give", "torch", "actor-1")
         .expect("on_chat_command should succeed");
     assert_eq!(
         callbacks.item_grants.lock().unwrap().as_slice(),
@@ -448,7 +454,7 @@ fn a_plugin_remembers_and_recalls_state_through_the_real_sandbox_boundary() {
 
     // Nothing remembered yet.
     plugin
-        .on_chat_command("recall", "", "actor-1")
+        .on_chat_command("test-zone", "recall", "", "actor-1")
         .expect("on_chat_command should succeed");
     {
         let messages = callbacks.messages.lock().unwrap();
@@ -460,10 +466,10 @@ fn a_plugin_remembers_and_recalls_state_through_the_real_sandbox_boundary() {
     }
 
     plugin
-        .on_chat_command("remember", "the sky is blue", "actor-1")
+        .on_chat_command("test-zone", "remember", "the sky is blue", "actor-1")
         .expect("on_chat_command should succeed");
     plugin
-        .on_chat_command("recall", "", "actor-1")
+        .on_chat_command("test-zone", "recall", "", "actor-1")
         .expect("on_chat_command should succeed");
     let messages = callbacks.messages.lock().unwrap();
     assert_eq!(messages.len(), 2);
@@ -486,7 +492,7 @@ fn a_plugin_queries_the_caller_role() {
         .expect("failed to load the well-behaved test plugin");
 
     plugin
-        .on_chat_command("whoami", "", "actor-1")
+        .on_chat_command("test-zone", "whoami", "", "actor-1")
         .expect("on_chat_command should succeed");
     let messages = callbacks.messages.lock().unwrap();
     assert_eq!(messages.len(), 1);
@@ -507,7 +513,7 @@ fn a_plugin_acquires_an_item() {
         .expect("failed to load the well-behaved test plugin");
 
     plugin
-        .on_item_acquire("actor-1", "torch", 3)
+        .on_item_acquire("test-zone", "actor-1", "torch", 3)
         .expect("on_item_acquire should succeed");
     let messages = callbacks.messages.lock().unwrap();
     assert_eq!(messages.len(), 1);
@@ -528,7 +534,7 @@ fn a_plugin_greets_on_join_and_applies_a_farewell_bonus_on_leave() {
         .expect("failed to load the well-behaved test plugin");
 
     plugin
-        .on_player_join_zone("actor-1")
+        .on_player_join_zone("test-zone", "actor-1")
         .expect("on_player_join_zone should succeed");
     {
         let messages = callbacks.messages.lock().unwrap();
@@ -538,7 +544,7 @@ fn a_plugin_greets_on_join_and_applies_a_farewell_bonus_on_leave() {
     }
 
     plugin
-        .on_player_leave_zone("actor-1")
+        .on_player_leave_zone("test-zone", "actor-1")
         .expect("on_player_leave_zone should succeed");
     assert_eq!(
         callbacks.stat_deltas.lock().unwrap().as_slice(),

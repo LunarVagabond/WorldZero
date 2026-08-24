@@ -2,7 +2,7 @@
 
 Corresponds to [Plugin System](../PROPOSAL.md#plugin-system) in the proposal.
 
-**Status:** the v0 slice below is real and implemented (`plugin-host`, #37/#38, extended by #95, #116, #57, #124, #149, #155, #154, and #153) — one WIT world with fifteen hooks and twelve host functions: #38's original NPC-spawn-plus-interaction slice, #116's combat/NPC-patrol/chat-command hooks, #57's inventory/economy hooks and host functions (#112 supplied the core storage these write through), #124's `caller-role` (the account-roles decision, #114), #149's `plugin-state-get`/`plugin-state-set` (the Plugin-Scoped Data Store), #155's `on-player-join-zone`/`on-player-leave-zone`, #154's real client-protocol call sites for `on-damage-calc`/`on-item-use`/`on-npc-interact` plus `report-death`/`report-respawn` (the plugin-owned trigger for `on-death`/`on-respawn`), and #153's real capability gating. See "Beyond this v0 slice" below for what's still not here.
+**Status:** the v0 slice below is real and implemented (`plugin-host`, #37/#38, extended by #95, #116, #57, #124, #149, #155, #154, #153, and #152) — one WIT world with sixteen hooks and twelve host functions: #38's original NPC-spawn-plus-interaction slice, #116's combat/NPC-patrol/chat-command hooks, #57's inventory/economy hooks and host functions (#112 supplied the core storage these write through), #124's `caller-role` (the account-roles decision, #114), #149's `plugin-state-get`/`plugin-state-set` (the Plugin-Scoped Data Store), #155's `on-player-join-zone`/`on-player-leave-zone`, #154's real client-protocol call sites for `on-damage-calc`/`on-item-use`/`on-npc-interact` plus `report-death`/`report-respawn` (the plugin-owned trigger for `on-death`/`on-respawn`), #153's real capability gating, and #152's real multi-plugin support (process-wide loading, per-hook opt-in, `on-zone-loaded`). See "Beyond this v0 slice" below for what's still not here.
 
 ## Interface technology
 
@@ -15,7 +15,7 @@ WASM Component Model + WIT (docs/PROPOSAL.md, "Interface Technology") — the ac
 ## The `plugin` world (v0)
 
 ```wit
-package worldzero:plugin@0.7.0;
+package worldzero:plugin@0.8.0;
 
 interface host {
     spawn-npc: func(spawn-table-id: string) -> result<string, string>;
@@ -42,19 +42,20 @@ interface host {
 interface hooks {
     on-load: func();
     on-unload: func();
-    on-entity-spawn: func(entity-id: string, entity-type: string);
-    on-player-join-zone: func(entity-id: string);
-    on-player-leave-zone: func(entity-id: string);
-    on-interact: func(trigger-id: string, actor-entity-id: string);
-    on-message: func(message-type: u16, sender-entity-id: string, payload: list<u8>);
-    on-damage-calc: func(attacker-entity-id: string, target-entity-id: string, stat-key: string, base-amount: s64);
-    on-death: func(entity-id: string);
-    on-respawn: func(entity-id: string);
-    on-npc-tick: func(entity-id: string, x: f64, y: f64, route-waypoints: list<tuple<f64, f64>>, route-loop: bool, route-speed: f64, dt: f64);
-    on-npc-interact: func(npc-entity-id: string, actor-entity-id: string);
-    on-chat-command: func(command: string, args: string, sender-entity-id: string);
-    on-item-acquire: func(entity-id: string, item-type: string, new-quantity: s64);
-    on-item-use: func(entity-id: string, item-type: string);
+    on-zone-loaded: func(zone-id: string);
+    on-entity-spawn: func(zone-id: string, entity-id: string, entity-type: string);
+    on-player-join-zone: func(zone-id: string, entity-id: string);
+    on-player-leave-zone: func(zone-id: string, entity-id: string);
+    on-interact: func(zone-id: string, trigger-id: string, actor-entity-id: string);
+    on-message: func(zone-id: string, message-type: u16, sender-entity-id: string, payload: list<u8>);
+    on-damage-calc: func(zone-id: string, attacker-entity-id: string, target-entity-id: string, stat-key: string, base-amount: s64);
+    on-death: func(zone-id: string, entity-id: string);
+    on-respawn: func(zone-id: string, entity-id: string);
+    on-npc-tick: func(zone-id: string, entity-id: string, x: f64, y: f64, route-waypoints: list<tuple<f64, f64>>, route-loop: bool, route-speed: f64, dt: f64);
+    on-npc-interact: func(zone-id: string, npc-entity-id: string, actor-entity-id: string);
+    on-chat-command: func(zone-id: string, command: string, args: string, sender-entity-id: string);
+    on-item-acquire: func(zone-id: string, entity-id: string, item-type: string, new-quantity: s64);
+    on-item-use: func(zone-id: string, entity-id: string, item-type: string);
 }
 
 world plugin {
@@ -64,7 +65,7 @@ world plugin {
 }
 ```
 
-`worldzero:plugin@0.7.0` is the actual versioning mechanism (docs/PROPOSAL.md, "Interface Technology": WIT "worlds" give real interface versioning). A breaking change to this interface bumps the package version and/or introduces a new world; a plugin manifest declares which `host_api_version` it targets (`plugin.toml` below), and `plugin-host` refuses to instantiate a plugin declaring a version it doesn't implement (`crates/plugin-host/src/manifest.rs::PluginManifest::check_compatible`) — it never silently links a plugin against an interface shape it wasn't built for. `0.2.0` added `on-message` (#95); `0.3.0` added the combat/NPC-patrol/chat-command hooks and `apply-stat-delta`/`move-entity` (#116); `0.4.0` added the inventory/economy hooks and host functions below (#57); `0.5.0` added `caller-role` (#124); `0.6.0` added `on-player-join-zone`/`on-player-leave-zone` (#155); `0.7.0` added `report-death`/`report-respawn` and real client-protocol call sites for the three hooks below that previously had none (#154). A plugin declaring an older version is refused, not silently linked against the new shape.
+`worldzero:plugin@0.8.0` is the actual versioning mechanism (docs/PROPOSAL.md, "Interface Technology": WIT "worlds" give real interface versioning). A breaking change to this interface bumps the package version and/or introduces a new world; a plugin manifest declares which `host_api_version` it targets (`plugin.toml` below), and `plugin-host` refuses to instantiate a plugin declaring a version it doesn't implement (`crates/plugin-host/src/manifest.rs::PluginManifest::check_compatible`) — it never silently links a plugin against an interface shape it wasn't built for. `0.2.0` added `on-message` (#95); `0.3.0` added the combat/NPC-patrol/chat-command hooks and `apply-stat-delta`/`move-entity` (#116); `0.4.0` added the inventory/economy hooks and host functions below (#57); `0.5.0` added `caller-role` (#124); `0.6.0` added `on-player-join-zone`/`on-player-leave-zone` (#155); `0.7.0` added `report-death`/`report-respawn` and real client-protocol call sites for the three hooks below that previously had none (#154); `0.8.0` added `on-zone-loaded` and a `zone-id` parameter to every other zone-specific hook (#152 — see "Multi-plugin support" below for why). A plugin declaring an older version is refused, not silently linked against the new shape.
 
 ### Why `include wasi:cli/imports`
 
@@ -74,23 +75,24 @@ A `wasm32-wasip2` Rust binary needs baseline WASI Preview 2 imports (clocks, ran
 
 | Hook | Signature | Fires when |
 |---|---|---|
-| `on-load` | `func()` | The plugin is instantiated for a zone-service. |
-| `on-unload` | `func()` | Before the plugin is torn down. |
-| `on-entity-spawn` | `func(entity-id, entity-type)` | Any entity enters the zone's simulation (`entity-type` matches `content::manifest::SpawnTable`'s `entity_type`, e.g. `"npc.wolf"`; empty for a player). |
-| `on-player-join-zone` | `func(entity-id)` | **Live (#155).** Fires once a player's connection has fully joined a zone — after roster delivery, so a `send-message` call made from inside this hook reaches a client that's actually ready. Fires for every zone a player is ever in, regardless of which zone(s) the loaded plugin is itself attached to; a zone-service with no plugin configured never calls this at all. |
-| `on-player-leave-zone` | `func(entity-id)` | **Live (#155).** Fires on a player's clean disconnect, same entity id. `server::session` awaits this hook (and any pending effects it triggers) actually running before it clears that entity from its own bookkeeping, so the plugin can still resolve the departing entity's character (e.g. to `apply-stat-delta`) from inside the handler. |
-| `on-interact` | `func(trigger-id, actor-entity-id)` | A player's entity enters a trigger volume whose manifest `event` is an interact-style event (`content::manifest::Trigger`). |
-| `on-message` | `func(message-type, sender-entity-id, payload)` | The gateway receives an envelope whose `message_type` matches one of this plugin's declared `message_types` (below) — `sender-entity-id` is the sending connection's own entity, `payload` is the envelope's opaque bytes (#95). |
-| `on-damage-calc` | `func(attacker-entity-id, target-entity-id, stat-key, base-amount)` | **Live (#154).** Fires when a client sends an `Attack` action (`server::session_protocol`) naming another entity — the server confirms the target actually exists in this zone (`world::Zone::kind_of`) before ever calling this, an unknown/vanished target is dropped, never passed through. `base-amount` is always `0` — the core never invents a damage number (docs/PROPOSAL.md, "v0 Hooks": "core has no notion of HP or a death condition"); the plugin owns the whole mitigation formula and must call `apply-stat-delta` itself, this hook alone changes nothing. `stat-key` is whatever the client requested, an opaque game-defined string like every other `stat-key` in this interface. |
-| `on-death` | `func(entity-id)` | **Live (#154).** Fires once a `report-death` request this plugin made is actually applied (below) — the plugin decided this entity died and reported it; this hook is the host's confirmation callback, not a request for the plugin to decide anything. |
-| `on-respawn` | `func(entity-id)` | **Live (#154).** Same shape as `on-death`, fired after a `report-respawn` request is applied. |
-| `on-npc-tick` | `func(entity-id, x, y, route-waypoints, route-loop, route-speed, dt)` | **Live.** Called once per tick, per NPC entity whose spawn table declared a `route_id` (`content::manifest::SpawnTable`/`Route`) — `world::world_actor` drives this. The host never moves the NPC itself; the plugin decides the next position and calls `move-entity`. |
-| `on-npc-interact` | `func(npc-entity-id, actor-entity-id)` | **Live (#154).** Fires when a client sends an `InteractNpc` action naming a specific NPC entity — distinct from the generic trigger-volume `on-interact` above. The server confirms the target actually is a currently-spawned NPC (`world::Zone::kind_of`) before ever calling this. |
-| `on-chat-command` | `func(command, args, sender-entity-id)` | **Live.** Fires when a chat `Send`'s body starts with `/command` and `command` (without the slash) matches one of this plugin's declared `chat_commands` (`plugin.toml` below) — `server::session` matches before the message ever reaches `chat_session`/gets published as ordinary chat. |
-| `on-item-acquire` | `func(entity-id, item-type, new-quantity)` | **Live.** Fires after a `grant-item` call this same plugin made is actually applied — `world::world_actor` calls this itself right after a queued grant lands, so (unlike most of this interface) a plugin can treat this as real confirmation, not just "the call was queued." `new-quantity` is the item type's new total, not the delta granted. |
-| `on-item-use` | `func(entity-id, item-type)` | **Live (#154).** Fires when a client sends a `UseItem` action naming `item-type` (an opaque string). The server never validates ownership itself — the plugin decides what using it does, typically by calling `remove-item` itself in response. |
+| `on-load` | `func()` | The plugin is instantiated, once for the whole `server` process (#152 — see "Multi-plugin support" below). Zero-arg: nothing zone-specific has happened yet. |
+| `on-unload` | `func()` | Before the plugin is torn down, once for the whole process. |
+| `on-zone-loaded` | `func(zone-id)` | **Live (#152).** Fires once per zone-service as it starts — the per-zone equivalent of `on-load` (e.g. seeding that zone's NPCs via `spawn-npc`), since `on-load` itself no longer has a zone to act on. |
+| `on-entity-spawn` | `func(zone-id, entity-id, entity-type)` | Any entity enters `zone-id`'s simulation (`entity-type` matches `content::manifest::SpawnTable`'s `entity_type`, e.g. `"npc.wolf"`; empty for a player). |
+| `on-player-join-zone` | `func(zone-id, entity-id)` | **Live (#155).** Fires once a player's connection has fully joined `zone-id` — after roster delivery, so a `send-message` call made from inside this hook reaches a client that's actually ready. Fires for every zone a player is ever in, regardless of what the plugin actually does with `zone-id`; a zone-service with no plugin configured never calls this at all. |
+| `on-player-leave-zone` | `func(zone-id, entity-id)` | **Live (#155).** Fires on a player's clean disconnect from `zone-id`, same entity id. `server::session` awaits this hook (and any pending effects it triggers) actually running before it clears that entity from its own bookkeeping, so the plugin can still resolve the departing entity's character (e.g. to `apply-stat-delta`) from inside the handler. |
+| `on-interact` | `func(zone-id, trigger-id, actor-entity-id)` | A player's entity enters a trigger volume in `zone-id` whose manifest `event` is an interact-style event (`content::manifest::Trigger`). |
+| `on-message` | `func(zone-id, message-type, sender-entity-id, payload)` | The gateway receives an envelope whose `message_type` matches one of this plugin's declared `message_types` (below) — `zone-id` is the sending connection's current zone, `sender-entity-id` is its own entity, `payload` is the envelope's opaque bytes (#95). |
+| `on-damage-calc` | `func(zone-id, attacker-entity-id, target-entity-id, stat-key, base-amount)` | **Live (#154).** Fires when a client sends an `Attack` action (`server::session_protocol`) naming another entity — the server confirms the target actually exists in `zone-id` (`world::Zone::kind_of`) before ever calling this, an unknown/vanished target is dropped, never passed through. `base-amount` is always `0` — the core never invents a damage number (docs/PROPOSAL.md, "v0 Hooks": "core has no notion of HP or a death condition"); the plugin owns the whole mitigation formula and must call `apply-stat-delta` itself, this hook alone changes nothing. `stat-key` is whatever the client requested, an opaque game-defined string like every other `stat-key` in this interface. |
+| `on-death` | `func(zone-id, entity-id)` | **Live (#154).** Fires once a `report-death` request this plugin made is actually applied (below) — the plugin decided this entity died and reported it; this hook is the host's confirmation callback, not a request for the plugin to decide anything. |
+| `on-respawn` | `func(zone-id, entity-id)` | **Live (#154).** Same shape as `on-death`, fired after a `report-respawn` request is applied. |
+| `on-npc-tick` | `func(zone-id, entity-id, x, y, route-waypoints, route-loop, route-speed, dt)` | **Live.** Called once per tick, per NPC entity in `zone-id` whose spawn table declared a `route_id` (`content::manifest::SpawnTable`/`Route`) — `world::world_actor` drives this. The host never moves the NPC itself; the plugin decides the next position and calls `move-entity`. |
+| `on-npc-interact` | `func(zone-id, npc-entity-id, actor-entity-id)` | **Live (#154).** Fires when a client sends an `InteractNpc` action naming a specific NPC entity in `zone-id` — distinct from the generic trigger-volume `on-interact` above. The server confirms the target actually is a currently-spawned NPC (`world::Zone::kind_of`) before ever calling this. |
+| `on-chat-command` | `func(zone-id, command, args, sender-entity-id)` | **Live.** Fires when a chat `Send`'s body starts with `/command` and `command` (without the slash) matches one of this plugin's declared `chat_commands` (`plugin.toml` below) — `server::session` matches before the message ever reaches `chat_session`/gets published as ordinary chat. |
+| `on-item-acquire` | `func(zone-id, entity-id, item-type, new-quantity)` | **Live.** Fires after a `grant-item` call this same plugin made is actually applied — `world::world_actor` calls this itself right after a queued grant lands, so (unlike most of this interface) a plugin can treat this as real confirmation, not just "the call was queued." `new-quantity` is the item type's new total, not the delta granted. |
+| `on-item-use` | `func(zone-id, entity-id, item-type)` | **Live (#154).** Fires when a client sends a `UseItem` action naming `item-type` (an opaque string). The server never validates ownership itself — the plugin decides what using it does, typically by calling `remove-item` itself in response. |
 
-Every plugin exports all fifteen — a WIT world's exports aren't individually optional, so there's no per-plugin "I don't implement this hook" declaration in this v0 slice (contrast with the richer, deferred story in "Beyond this v0 slice" below).
+Every plugin *exports* all sixteen — a WIT world's exports aren't individually optional, so the interface itself has no per-hook opt-out. What a plugin actually wants *called* is a manifest-level concern instead: see `plugin.toml`'s `hooks` field below.
 
 ### Host functions (plugin calls out to the host)
 
@@ -129,7 +131,19 @@ Only `caller-role`, `plugin-state-get`, and `plugin-state-set` are **ungated** r
 
 **The default is strict.** `capabilities = []` (the same default every manifest already had before this) grants *none* of the five gated groups — not all of them. This is a deliberate v0.7.0 behavior tightening: before #153 the field was parsed and carried but checked against nothing, so every plugin had full access regardless of what it declared; every existing manifest in this repo (`config/plugin.example.toml`, `examples/example-plugin/plugin.toml`, test fixtures) was updated to explicitly list the capabilities it actually uses.
 
-This is the real trust boundary for running a less-trusted, third-party-authored plugin alongside an operator's own trusted "core" plugin: grant the operator's own plugin every capability it needs, restrict a community-authored add-on to just what it actually needs (e.g. `messaging`-only plus whatever `message_types`/`chat_commands` it declares) without needing separate infrastructure. Multi-plugin loading itself isn't built yet (#152) — this is the isolation half of that story, landed first since it doesn't depend on it.
+This is the real trust boundary for running a less-trusted, third-party-authored plugin alongside an operator's own trusted "core" plugin: grant the operator's own plugin every capability it needs, restrict a community-authored add-on to just what it actually needs (e.g. `messaging`-only plus whatever `message_types`/`chat_commands` it declares) without needing separate infrastructure. See "Multi-plugin support" below for how more than one plugin actually loads at once (#152).
+
+### Multi-plugin support (#152)
+
+**One plugin instance, process-wide.** A plugin is loaded exactly once per `server` process — never once per zone-service. Every zone-specific hook (everything in the table above except `on-load`/`on-unload`) takes an explicit `zone-id` first parameter instead: a plugin that only cares about certain zones checks `zone-id` itself inside its own hook body, rather than the host filtering events by zone on the plugin's behalf. `on-zone-loaded(zone-id)` is the per-zone setup hook — e.g. seeding that zone's NPCs — since `on-load` no longer has a zone to act on. This replaced an earlier per-zone-instance design during implementation; a plugin is additive to the engine's flows, not an object the engine attaches to individual zones.
+
+**`plugins_dir` discovery, not a single manifest path.** `WZ_PLUGINS_DIR` (default `<config_dir>/plugins`) names a directory of `<name>/{plugin.toml,*.wasm}` subdirectories — every subdirectory found there is auto-discovered and loaded at startup, replacing the old single `WZ_PLUGIN_MANIFEST_PATH`/`WZ_PLUGIN_WASM_PATH` env-var pair. Each manifest is checked individually (`PluginManifest::check_compatible`) and the whole set collectively (`check_no_collisions`, below) before any plugin is instantiated.
+
+**Per-hook opt-in via `plugin.toml`'s `hooks` field**, not a WIT-level mechanism (the interface's exports aren't individually optional — see above). The host only calls a hook for a plugin whose manifest lists it in `hooks`; every hook not listed is simply never invoked for that plugin. `on-message`/`on-chat-command` are the exception — routed by `message_types`/`chat_commands` membership alone (below), since declaring interest in a specific message type or command name already states the same intent `hooks` would.
+
+**Cross-plugin collision checking.** `plugin_host::check_no_collisions` refuses to start the server if two loaded plugins declare the same `message_type` or the same `chat_command` — there's no arbitration between colliding claims, just a load-time refusal so the conflict is caught before either plugin runs. Every other hook fans out to *every* plugin that declared it, independently, in discovery order — the core never picks a winner.
+
+**A process-wide `send-message` needs a process-wide session map.** Since a plugin instance isn't tied to one zone's connections, `send-message` resolves `target-entity-id` against every connected entity in the process, not just the caller's own zone — an entity stays reachable across a `ZoneChanged` zone-hop without the plugin needing to know it happened.
 
 ### The Plugin-Scoped Data Store (`plugin-state-get`/`plugin-state-set`, #149)
 
@@ -159,25 +173,27 @@ Same convention as the content manifest and dev-config files elsewhere in the pr
 ```toml
 [plugin]
 name = "example-plugin"
-host_api_version = "0.7.0"
+host_api_version = "0.8.0"
 capabilities = []
 message_types = []
 chat_commands = []
+hooks = []
 ```
 
 | Field | Type | Notes |
 |---|---|---|
 | `plugin.name` | string | Free-form, used in error/log messages. |
-| `plugin.host_api_version` | string | Must equal `plugin_host::HOST_API_VERSION` (currently `"0.7.0"`, matching the WIT package version above) or the plugin is refused before instantiation. |
-| `plugin.capabilities` | list of strings, optional | Gates which host functions this plugin may call (#153) — see "Capability gating" above. Strict default: `[]` grants none of the four gated groups. An unknown capability name, or the same one declared twice, is refused at load time. |
-| `plugin.message_types` | list of `u16`, optional | Gateway `message_type` values (docs/specs/Networking_Spec.md) routed to this plugin's `on-message` hook (#95). Each must be `>= 1000` (0-999 is core-reserved) and appear at most once, checked by `PluginManifest::check_compatible` before the plugin is instantiated. |
-| `plugin.chat_commands` | list of strings, optional | Chat command names, without the leading `/` (#57). Each must be non-empty, have no leading `/`, and appear at most once, checked the same way as `message_types`. A matched command is routed to `on-chat-command` instead of published as ordinary chat. |
+| `plugin.host_api_version` | string | Must equal `plugin_host::HOST_API_VERSION` (currently `"0.8.0"`, matching the WIT package version above) or the plugin is refused before instantiation. |
+| `plugin.capabilities` | list of strings, optional | Gates which host functions this plugin may call (#153) — see "Capability gating" above. Strict default: `[]` grants none of the five gated groups. An unknown capability name, or the same one declared twice, is refused at load time. |
+| `plugin.message_types` | list of `u16`, optional | Gateway `message_type` values (docs/specs/Networking_Spec.md) routed to this plugin's `on-message` hook (#95). Each must be `>= 1000` (0-999 is core-reserved) and appear at most once, checked by `PluginManifest::check_compatible` before the plugin is instantiated, and collectively across every loaded plugin by `check_no_collisions` (#152). |
+| `plugin.chat_commands` | list of strings, optional | Chat command names, without the leading `/` (#57). Each must be non-empty, have no leading `/`, and appear at most once, checked the same way as `message_types` (including the cross-plugin collision check, #152). A matched command is routed to `on-chat-command` instead of published as ordinary chat. |
+| `plugin.hooks` | list of strings, optional | Which of the sixteen hooks (except `on-message`/`on-chat-command`, routed by the two fields above instead) the host should actually call for this plugin (#152) — see "Multi-plugin support" above. Strict default: `[]` means none are called. An unknown hook name is refused at load time (`plugin_host::manifest::KNOWN_HOOKS`). |
 
 ## Sandbox guarantees
 
 - **No ambient capability.** A plugin gets nothing beyond the two `host` functions above — no direct DB access, no raw network access, no filesystem access, ever (docs/PROPOSAL.md, "Plugin System"). Verified by `plugin_sandbox.rs`.
 - **A trap doesn't crash the host.** A panicking/trapping plugin surfaces as an ordinary `Err` from whichever hook call triggered it (`LoadedPlugin::on_load`/etc. return `common::Result<()>`) — the zone-service keeps running. Verified by `plugin_sandbox.rs`'s `a_plugin_panic_does_not_crash_the_host_process`.
-- **One `wasmtime::Engine` per zone-service**, shared across every loaded plugin (`PluginHost`) — compiling/loading a component is the expensive part; the engine itself is designed to be shared.
+- **One `wasmtime::Engine` for the whole process** (`PluginHost`, constructed once in `main`), shared across every loaded plugin — compiling/loading a component is the expensive part; the engine itself is designed to be shared. This is a natural consequence of #152's process-wide plugin instances, not a separate decision: there's no longer a "per zone-service" to scope an engine to.
 
 ## Beyond this v0 slice
 
@@ -185,9 +201,9 @@ Real design from docs/PROPOSAL.md's "Plugin System" section, deliberately not bu
 
 - **`on_tick(zone, dt)`** (the zone-wide tick hook, distinct from #116's per-NPC `on-npc-tick`) — `world`'s tick loop has the call site (`world::zone::Zone::run`'s `on_tick` callback parameter), just not wired to a real plugin call yet.
 - **A true synchronous "query" host function against `character`'s live storage** — `item-quantity`/`currency-balance`-style reads that hand a value straight back to the plugin. Still deliberately not built: `PluginCallbacks` is called synchronously from inside `wasmtime`, while `character::CharacterStore` is async-only (`sqlx`); reads would need either a new blocking-call mechanism (`tokio::task::block_in_place`, not used anywhere else in this codebase) or an eventually-consistent cache, and neither was worth the complexity for v0 — a plugin that needs to know a quantity/balance can track it itself from `on-item-acquire`/its own bookkeeping. `caller-role` (#124) sidesteps this exact constraint for account roles specifically, not by adding blocking DB calls, but by having `server::session` populate an in-memory cache at join time (`session::EntityRoles`) that `caller-role` reads synchronously — a pattern this general query problem could reuse later if a case for it emerges, but wasn't generalized here.
-- **Per-plugin optional hooks** — with fifteen hooks now, most plugins won't want all of them; a real WIT world for that likely needs either per-hook opt-in at the manifest level with the host only calling what's declared, or restructuring hooks as several smaller worlds/interfaces a plugin composes from.
-- **Cross-plugin RPC, hot-reload, plugin-defined persistent schema (structured tables beyond the opaque blob store)** — explicit v0 non-goals per the proposal, not accidentally missing. The opaque-blob-store half of that story *is* now in (#149, `plugin-state-get`/`plugin-state-set` above) — the non-goal is specifically anything beyond it (a plugin declaring its own real DB schema). (Plugin-declared gateway message types/custom packets *are* now in — `on-message`, #95 — cross-plugin collision checking for them is still deferred; see docs/specs/Networking_Spec.md.)
+- **Cross-plugin RPC, hot-reload, plugin-defined persistent schema (structured tables beyond the opaque blob store)** — explicit v0 non-goals per the proposal, not accidentally missing. The opaque-blob-store half of that story *is* now in (#149, `plugin-state-get`/`plugin-state-set` above) — the non-goal is specifically anything beyond it (a plugin declaring its own real DB schema). (Plugin-declared gateway message types/custom packets *are* now in — `on-message`, #95, with cross-plugin collision checking since #152.)
 - ~~**Account roles for dev/admin-only commands**~~ — decided in #114, implemented in #124: see the `caller-role` host function above and docs/specs/Auth_Spec.md's "Account roles" section.
 - ~~**Player session** (`on_player_join_zone`, `on_player_leave_zone`)~~ — implemented in #155: see the `on-player-join-zone`/`on-player-leave-zone` hooks above.
 - ~~**Live call sites for `on-damage-calc`/`on-death`/`on-respawn`/`on-npc-interact`/`on-item-use`**~~ — implemented in #154: see each hook's row above and `report-death`/`report-respawn` in the host functions table.
 - ~~**Real capability gating**~~ — implemented in #153: see "Capability gating" above.
+- ~~**Per-plugin optional hooks / multi-plugin loading**~~ — implemented in #152: see "Multi-plugin support" above.

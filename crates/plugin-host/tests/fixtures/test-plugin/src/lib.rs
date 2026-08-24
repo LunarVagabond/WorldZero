@@ -32,18 +32,24 @@ impl Guest for Plugin {
                 panic!("sandbox escape: read a file with no preopened filesystem access");
             }
         }
+    }
 
+    fn on_unload() {}
+
+    // One plugin instance now serves every zone (#152) — spawning
+    // "wolf-pack-01" moved here from on_load, since on_load no longer has
+    // any zone context. This fixture doesn't care which zone; a real
+    // plugin would check zone_id if it only wanted this for specific zones.
+    fn on_zone_loaded(_zone_id: String) {
         #[cfg(not(any(feature = "panic_on_load", feature = "escape_attempt")))]
         {
             let _ = worldzero::plugin::host::spawn_npc("wolf-pack-01");
         }
     }
 
-    fn on_unload() {}
+    fn on_entity_spawn(_zone_id: String, _entity_id: String, _entity_type: String) {}
 
-    fn on_entity_spawn(_entity_id: String, _entity_type: String) {}
-
-    fn on_player_join_zone(entity_id: String) {
+    fn on_player_join_zone(_zone_id: String, entity_id: String) {
         let _ = worldzero::plugin::host::send_message(&entity_id, &format!("welcome, {entity_id}"));
     }
 
@@ -54,24 +60,24 @@ impl Guest for Plugin {
     // (#149) — the only way a black-box, network-only end-to-end test can
     // observe this hook fired for real, since the departing connection
     // itself is gone by the time it would receive any reply.
-    fn on_player_leave_zone(entity_id: String) {
+    fn on_player_leave_zone(zone_id: String, entity_id: String) {
         let _ =
             worldzero::plugin::host::apply_stat_delta(&entity_id, "reputation.ironclad_guild", 1);
         let _ = worldzero::plugin::host::plugin_state_set(
-            &worldzero::plugin::host::PluginStateScope::Zone("test-zone".to_string()),
+            &worldzero::plugin::host::PluginStateScope::Zone(zone_id),
             "last-left-entity",
             entity_id.as_bytes(),
         );
     }
 
-    fn on_interact(trigger_id: String, actor_entity_id: String) {
+    fn on_interact(_zone_id: String, trigger_id: String, actor_entity_id: String) {
         let _ = worldzero::plugin::host::send_message(
             &actor_entity_id,
             &format!("you interacted with {trigger_id}"),
         );
     }
 
-    fn on_message(message_type: u16, sender_entity_id: String, payload: Vec<u8>) {
+    fn on_message(zone_id: String, message_type: u16, sender_entity_id: String, payload: Vec<u8>) {
         let body = String::from_utf8_lossy(&payload);
         // Reads back what `on_player_leave_zone` recorded (#155) — the
         // only way a black-box, network-only test can observe that hook
@@ -79,7 +85,7 @@ impl Guest for Plugin {
         // time it would receive a reply of its own.
         if body == "last-left" {
             let value = worldzero::plugin::host::plugin_state_get(
-                &worldzero::plugin::host::PluginStateScope::Zone("test-zone".to_string()),
+                &worldzero::plugin::host::PluginStateScope::Zone(zone_id),
                 "last-left-entity",
             )
             .ok()
@@ -112,6 +118,7 @@ impl Guest for Plugin {
     }
 
     fn on_damage_calc(
+        _zone_id: String,
         attacker_entity_id: String,
         target_entity_id: String,
         stat_key: String,
@@ -128,15 +135,16 @@ impl Guest for Plugin {
         );
     }
 
-    fn on_death(entity_id: String) {
+    fn on_death(_zone_id: String, entity_id: String) {
         let _ = worldzero::plugin::host::send_message(&entity_id, "you died");
     }
 
-    fn on_respawn(entity_id: String) {
+    fn on_respawn(_zone_id: String, entity_id: String) {
         let _ = worldzero::plugin::host::send_message(&entity_id, "you respawned");
     }
 
     fn on_npc_tick(
+        _zone_id: String,
         entity_id: String,
         _x: f64,
         _y: f64,
@@ -150,14 +158,14 @@ impl Guest for Plugin {
         }
     }
 
-    fn on_npc_interact(npc_entity_id: String, actor_entity_id: String) {
+    fn on_npc_interact(_zone_id: String, npc_entity_id: String, actor_entity_id: String) {
         let _ = worldzero::plugin::host::send_message(
             &actor_entity_id,
             &format!("you interacted with npc {npc_entity_id}"),
         );
     }
 
-    fn on_chat_command(command: String, args: String, sender_entity_id: String) {
+    fn on_chat_command(zone_id: String, command: String, args: String, sender_entity_id: String) {
         if command == "give" {
             // Reports a capability rejection (#153) back to the client —
             // the only way a black-box/host-side test can observe a
@@ -188,7 +196,7 @@ impl Guest for Plugin {
         // just a host-side fake.
         if command == "remember" {
             let _ = worldzero::plugin::host::plugin_state_set(
-                &worldzero::plugin::host::PluginStateScope::Zone("test-zone".to_string()),
+                &worldzero::plugin::host::PluginStateScope::Zone(zone_id),
                 "note",
                 args.as_bytes(),
             );
@@ -196,7 +204,7 @@ impl Guest for Plugin {
         }
         if command == "recall" {
             let value = worldzero::plugin::host::plugin_state_get(
-                &worldzero::plugin::host::PluginStateScope::Zone("test-zone".to_string()),
+                &worldzero::plugin::host::PluginStateScope::Zone(zone_id),
                 "note",
             )
             .ok()
@@ -215,7 +223,7 @@ impl Guest for Plugin {
         );
     }
 
-    fn on_item_acquire(entity_id: String, item_type: String, new_quantity: i64) {
+    fn on_item_acquire(_zone_id: String, entity_id: String, item_type: String, new_quantity: i64) {
         let _ = worldzero::plugin::host::send_message(
             &entity_id,
             &format!("acquired {item_type}, now have {new_quantity}"),
@@ -225,7 +233,7 @@ impl Guest for Plugin {
     // "Using" an item removes it and pays out a bit of currency — a
     // minimal but real exercise of remove-item/modify-currency, not
     // meant to model an actual game economy.
-    fn on_item_use(entity_id: String, item_type: String) {
+    fn on_item_use(_zone_id: String, entity_id: String, item_type: String) {
         let _ = worldzero::plugin::host::remove_item(&entity_id, &item_type, 1);
         let _ = worldzero::plugin::host::modify_currency(&entity_id, 5);
         let _ = worldzero::plugin::host::send_message(&entity_id, &format!("used {item_type}"));
