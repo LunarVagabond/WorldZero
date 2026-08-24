@@ -436,6 +436,53 @@ mod tests {
 
     #[tokio::test]
     #[ignore]
+    async fn granting_a_non_positive_quantity_is_rejected() {
+        let (store, character_id) = store_with_character().await;
+        for bad_quantity in [0, -1] {
+            let err = store
+                .grant_item(character_id, "torch", bad_quantity)
+                .await
+                .unwrap_err();
+            assert!(err.to_string().contains("must be positive"), "{err}");
+        }
+        // Never created a stack at all — not a zero-quantity row.
+        assert_eq!(store.item_quantity(character_id, "torch").await.unwrap(), 0);
+        assert!(store.list_items(character_id).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn removing_a_non_positive_quantity_is_rejected() {
+        let (store, character_id) = store_with_character().await;
+        store.grant_item(character_id, "torch", 5).await.unwrap();
+        for bad_quantity in [0, -1] {
+            let err = store
+                .remove_item(character_id, "torch", bad_quantity)
+                .await
+                .unwrap_err();
+            assert!(err.to_string().contains("must be positive"), "{err}");
+        }
+        // Untouched by either rejected call.
+        assert_eq!(store.item_quantity(character_id, "torch").await.unwrap(), 5);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn list_items_returns_every_distinct_stack() {
+        let (store, character_id) = store_with_character().await;
+        store.grant_item(character_id, "torch", 3).await.unwrap();
+        store.grant_item(character_id, "shield", 1).await.unwrap();
+
+        let mut items = store.list_items(character_id).await.unwrap();
+        items.sort();
+        assert_eq!(
+            items,
+            vec![("shield".to_string(), 1), ("torch".to_string(), 3)]
+        );
+    }
+
+    #[tokio::test]
+    #[ignore]
     async fn a_new_character_starts_with_zero_currency() {
         let (store, character_id) = store_with_character().await;
         assert_eq!(store.currency_balance(character_id).await.unwrap(), 0);
@@ -456,5 +503,22 @@ mod tests {
         store.modify_currency(character_id, 50).await.unwrap();
         assert!(store.modify_currency(character_id, -100).await.is_err());
         assert_eq!(store.currency_balance(character_id).await.unwrap(), 50);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn modify_currency_overflow_is_rejected_and_unapplied() {
+        let (store, character_id) = store_with_character().await;
+        store.modify_currency(character_id, i64::MAX).await.unwrap();
+
+        let err = store
+            .modify_currency(character_id, i64::MAX)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("overflowed"), "{err}");
+        assert_eq!(
+            store.currency_balance(character_id).await.unwrap(),
+            i64::MAX
+        );
     }
 }

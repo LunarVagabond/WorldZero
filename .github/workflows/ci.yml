@@ -7,15 +7,59 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Matches the postgres/redis `services:` containers below — these are
+  # ordinary WZ_POSTGRES_*/WZ_REDIS_* vars `common::config` already reads
+  # at runtime, not CI-specific plumbing.
+  WZ_POSTGRES_HOST: localhost
+  WZ_POSTGRES_PORT: 5432
+  WZ_POSTGRES_USER: wz
+  WZ_POSTGRES_PASSWORD: wz
+  WZ_POSTGRES_DATABASE: wz
+  WZ_REDIS_HOST: localhost
+  WZ_REDIS_PORT: 6379
 
 jobs:
   build-test-lint:
     runs-on: ubuntu-latest
+    # Real Postgres/Redis so the `#[ignore]`d integration suites
+    # (`postgres_store.rs`-style tests across auth/character/chat,
+    # `server/tests/server_smoke.rs`, `auth::session`) actually run here
+    # instead of being silently skipped by every `cargo test` invocation
+    # — previously the single biggest gap in this repo's test coverage:
+    # the most convincing, full-stack tests existed but nothing ever ran
+    # them. See docs/specs/Observability_Spec.md-style "pre-Phase-2
+    # cleanup" note in the commit that added this.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: wz
+          POSTGRES_PASSWORD: wz
+          POSTGRES_DB: wz
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U wz"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v7
 
       - name: Install pinned toolchain (rust-toolchain.toml)
         run: rustup show
+
+      - name: Install wasm32-wasip2 target (plugin-host sandbox test fixtures)
+        run: rustup target add wasm32-wasip2
 
       - uses: Swatinem/rust-cache@v2
 
@@ -28,5 +72,25 @@ jobs:
       - name: Build
         run: cargo build --workspace --all-targets
 
-      - name: Test
-        run: cargo test --workspace
+      - name: Apply database migrations
+        run: cargo run -p common --bin migrate -- up
+
+      # `test-plugin` is its own standalone Cargo workspace (see its
+      # Cargo.toml), deliberately excluded from the main one — see
+      # crates/plugin-host/tests/plugin_sandbox.rs's module doc comment
+      # for why these three variants exist. Building it here is also
+      # what lets server_smoke.rs's plugin-related assertions run (it
+      # looks for this exact built path and no-ops if it's missing).
+      - name: Build plugin-host wasm test fixtures
+        working-directory: crates/plugin-host/tests/fixtures/test-plugin
+        run: |
+          cargo build --target wasm32-wasip2 --release
+          cargo build --target wasm32-wasip2 --release --features panic_on_load --target-dir target/panic
+          cargo build --target wasm32-wasip2 --release --features escape_attempt --target-dir target/escape
+
+      # `--include-ignored` rather than a separate `-- --ignored` pass —
+      # one run covers both the always-on unit tests and the
+      # infra-dependent integration suites now that real Postgres/Redis
+      # and the wasm fixtures above exist.
+      - name: Test (including previously-#[ignore]d integration suites)
+        run: cargo test --workspace -- --include-ignored

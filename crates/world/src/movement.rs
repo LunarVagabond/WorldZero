@@ -192,6 +192,27 @@ collision:
     }
 
     #[test]
+    fn a_move_exactly_at_the_speed_cap_is_accepted() {
+        // 10 m/s * 0.05s = exactly 0.5m allowed — the `>` (not `>=`)
+        // boundary in `validate_movement`'s speed check, previously
+        // untested at the exact edge.
+        let manifest = square_manifest();
+        let index = crate::spatial::GridIndex::new(10.0);
+        let mover = EntityId::new();
+
+        let result = validate_movement(
+            &manifest,
+            &index,
+            mover,
+            10.0,
+            0.05,
+            (10.0, 10.0),
+            (10.5, 10.0),
+        );
+        assert_eq!(result, Ok(()));
+    }
+
+    #[test]
     fn moving_onto_another_entity_is_blocked() {
         let manifest = square_manifest();
         let mut index = crate::spatial::GridIndex::new(10.0);

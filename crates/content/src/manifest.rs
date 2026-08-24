@@ -91,6 +91,80 @@ pub struct ZoneManifest {
     pub triggers: Vec<Trigger>,
 }
 
+/// A link edge point must lie within this many meters of the declared
+/// `bounds` boundary polygon to count as "on the boundary" — real
+/// manifests are hand-authored/generated from map data, so an exact
+/// floating-point match isn't realistic, but a link edge floating tens
+/// of meters from the actual zone shape is almost certainly an authoring
+/// mistake (wrong coordinates copy-pasted, wrong zone's edge, ...).
+const LINK_EDGE_BOUNDARY_TOLERANCE_METERS: f64 = 1.0;
+
+/// A polygon whose absolute shoelace-formula area is below this is
+/// treated as degenerate (collinear points, or points that otherwise
+/// cancel out to ~zero enclosed area) rather than a real shape.
+const DEGENERATE_POLYGON_AREA_EPSILON: f64 = 1e-6;
+
+/// Shoelace-formula signed area — used only to detect a degenerate
+/// (near-zero-area) polygon below, not for its sign.
+fn polygon_signed_area(points: &[Point]) -> f64 {
+    let n = points.len();
+    let mut area = 0.0;
+    for i in 0..n {
+        let (x1, y1) = points[i];
+        let (x2, y2) = points[(i + 1) % n];
+        area += x1 * y2 - x2 * y1;
+    }
+    area / 2.0
+}
+
+/// Ray-casting point-in-polygon test — a private duplicate of
+/// `world::movement`'s identical check. `world` depends on `content`
+/// (not the other way around), so this can't be shared without
+/// restructuring; small and stable enough that duplicating it here was
+/// judged cheaper than that restructuring.
+fn point_in_polygon(point: Point, polygon: &[Point]) -> bool {
+    let (px, py) = point;
+    let mut inside = false;
+
+    let n = polygon.len();
+    for i in 0..n {
+        let (xi, yi) = polygon[i];
+        let (xj, yj) = polygon[(i + n - 1) % n];
+
+        let crosses = (yi > py) != (yj > py);
+        if crosses {
+            let x_intersect = xj + (py - yj) / (yi - yj) * (xi - xj);
+            if px < x_intersect {
+                inside = !inside;
+            }
+        }
+    }
+
+    inside
+}
+
+fn distance_point_to_segment(point: Point, a: Point, b: Point) -> f64 {
+    let (px, py) = point;
+    let (ax, ay) = a;
+    let (bx, by) = b;
+    let (dx, dy) = (bx - ax, by - ay);
+    let len_sq = dx * dx + dy * dy;
+    let t = if len_sq > 0.0 {
+        (((px - ax) * dx + (py - ay) * dy) / len_sq).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let (cx, cy) = (ax + t * dx, ay + t * dy);
+    ((px - cx).powi(2) + (py - cy).powi(2)).sqrt()
+}
+
+fn distance_to_polygon_boundary(point: Point, polygon: &[Point]) -> f64 {
+    let n = polygon.len();
+    (0..n)
+        .map(|i| distance_point_to_segment(point, polygon[i], polygon[(i + 1) % n]))
+        .fold(f64::INFINITY, f64::min)
+}
+
 impl ZoneManifest {
     pub fn from_yaml(input: &str) -> Result<Self> {
         let manifest: Self = serde_yaml::from_str(input)
@@ -149,7 +223,18 @@ impl ZoneManifest {
                 "bounds.points: needs at least 3 points, has {}",
                 self.bounds.points.len()
             ));
+        } else if polygon_signed_area(&self.bounds.points).abs() < DEGENERATE_POLYGON_AREA_EPSILON {
+            problems.push(
+                "bounds.points: describes a degenerate polygon (~zero enclosed area — likely collinear points)"
+                    .to_string(),
+            );
         }
+        // Every in-bounds/on-boundary check below only makes sense
+        // against a real, non-degenerate polygon — skip them rather than
+        // pile on confusing follow-on errors when `bounds` itself is
+        // already broken.
+        let bounds_are_usable = self.bounds.points.len() >= 3
+            && polygon_signed_area(&self.bounds.points).abs() >= DEGENERATE_POLYGON_AREA_EPSILON;
 
         if !is_valid_asset_ref(&self.collision.asset_ref) {
             problems.push(format!(
@@ -170,6 +255,15 @@ impl ZoneManifest {
                     "links[{i}].edge: needs exactly 2 points, has {}",
                     link.edge.len()
                 ));
+            } else if bounds_are_usable {
+                for (j, point) in link.edge.iter().enumerate() {
+                    let distance = distance_to_polygon_boundary(*point, &self.bounds.points);
+                    if distance > LINK_EDGE_BOUNDARY_TOLERANCE_METERS {
+                        problems.push(format!(
+                            "links[{i}].edge[{j}]: {point:?} is {distance:.1}m from the declared bounds boundary (must lie on/near it)"
+                        ));
+                    }
+                }
             }
         }
 
@@ -200,6 +294,14 @@ impl ZoneManifest {
         for (i, spawn_table) in self.spawn_tables.iter().enumerate() {
             if spawn_table.points.is_empty() {
                 problems.push(format!("spawn_tables[{i}].points: needs at least 1 point"));
+            } else if bounds_are_usable {
+                for (j, point) in spawn_table.points.iter().enumerate() {
+                    if !point_in_polygon(*point, &self.bounds.points) {
+                        problems.push(format!(
+                            "spawn_tables[{i}].points[{j}]: {point:?} lies outside bounds"
+                        ));
+                    }
+                }
             }
             if let Some(route_id) = &spawn_table.route_id
                 && !route_ids.contains(route_id.as_str())
@@ -223,6 +325,12 @@ impl ZoneManifest {
                 problems.push(format!(
                     "triggers[{i}].shape.radius: must be > 0, got {}",
                     trigger.shape.radius
+                ));
+            }
+            if bounds_are_usable && !point_in_polygon(trigger.shape.center, &self.bounds.points) {
+                problems.push(format!(
+                    "triggers[{i}].shape.center: {:?} lies outside bounds",
+                    trigger.shape.center
                 ));
             }
         }
@@ -364,6 +472,60 @@ triggers:
         let message = err.to_string();
         assert!(message.contains("bounds.points"), "{message}");
         assert!(message.contains("routes[0].speed"), "{message}");
+    }
+
+    #[test]
+    fn a_degenerate_collinear_bounds_polygon_is_rejected() {
+        let yaml = example_manifest().replace(
+            "points: [[0,0], [500,0], [500,500], [0,500]]",
+            "points: [[0,0], [250,0], [500,0]]",
+        );
+        let err = ZoneManifest::from_yaml(&yaml).unwrap_err();
+        assert!(err.to_string().contains("degenerate polygon"), "{err}");
+    }
+
+    #[test]
+    fn a_spawn_point_outside_bounds_is_rejected() {
+        let yaml = example_manifest().replace(
+            "points: [[120,80], [140,95]]",
+            "points: [[120,80], [9999,9999]]",
+        );
+        let err = ZoneManifest::from_yaml(&yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("spawn_tables[0].points[1]"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_trigger_center_outside_bounds_is_rejected() {
+        let yaml = example_manifest().replace("center: [10,10]", "center: [9999,9999]");
+        let err = ZoneManifest::from_yaml(&yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("triggers[0].shape.center"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_link_edge_far_from_the_boundary_is_rejected() {
+        let yaml = example_manifest().replace(
+            "edge: [[500,200], [500,260]]",
+            "edge: [[9999,200], [9999,260]]",
+        );
+        let err = ZoneManifest::from_yaml(&yaml).unwrap_err();
+        assert!(err.to_string().contains("links[0].edge[0]"), "{err}");
+    }
+
+    #[test]
+    fn a_link_edge_exactly_on_the_boundary_is_accepted() {
+        // The proposal's example manifest already places its link edge
+        // exactly on the bounds polygon's right edge (x=500) — this is
+        // the same assertion as `parses_the_proposals_example_manifest`,
+        // just naming explicitly that the boundary-distance check (added
+        // alongside the far-edge rejection above) doesn't false-positive
+        // on a legitimately-placed edge.
+        assert!(ZoneManifest::from_yaml(example_manifest()).is_ok());
     }
 
     #[test]

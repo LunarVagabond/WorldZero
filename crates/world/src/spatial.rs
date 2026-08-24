@@ -193,6 +193,24 @@ mod tests {
     }
 
     #[test]
+    fn re_inserting_without_remove_does_not_leave_the_entity_in_two_cells() {
+        // `insert`'s own cleanup (not `update`'s, which always goes
+        // through `insert` anyway) — a second `insert` call for the same
+        // entity with no `remove` in between, the real path
+        // `Zone::spawn`/`spawn_npc_with_route` take (they call
+        // `index.insert` directly, so a double-spawn without an
+        // intervening despawn is a real caller scenario, not hypothetical).
+        let mut index = GridIndex::new(10.0);
+        let entity = EntityId::new();
+        index.insert(entity, (1.0, 1.0));
+        index.insert(entity, (500.0, 500.0));
+
+        assert!(index.query_radius((1.0, 1.0), 5.0).is_empty());
+        assert_eq!(index.query_radius((500.0, 500.0), 5.0), vec![entity]);
+        assert_eq!(index.position_of(entity), Some((500.0, 500.0)));
+    }
+
+    #[test]
     fn remove_clears_the_entity_from_its_cell() {
         let mut index = GridIndex::new(10.0);
         let entity = EntityId::new();

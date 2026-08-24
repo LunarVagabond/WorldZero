@@ -433,6 +433,62 @@ stats:
 
     #[tokio::test]
     #[ignore]
+    async fn apply_stat_delta_overflow_is_rejected_and_unapplied() {
+        // An unbounded stat (no min/max declared) so the schema's own
+        // bounds check can't be what rejects this — isolates the
+        // `checked_add` overflow guard itself, which `hp`'s [0,100]
+        // bounds (used everywhere else in this suite) would always mask.
+        let unbounded_schema = AttributeSchema::from_yaml(
+            r#"
+schema_version: 1
+stats:
+  - key: score
+    type: int
+    default: 0
+"#,
+        )
+        .unwrap();
+
+        let config = PostgresConfig::from_env().expect("WZ_POSTGRES_* env vars set");
+        let pool = postgres_pool(&config, PoolOptions::default())
+            .await
+            .unwrap();
+        let account_id = AccountId::new();
+        sqlx::query("INSERT INTO accounts (id, username, password_hash) VALUES ($1, $2, 'unused')")
+            .bind(account_id.as_uuid())
+            .bind(format!("stat-overflow-test-{account_id}"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        let store = CharacterStore::new(pool, unbounded_schema, Default::default());
+        let character_id = store
+            .create(
+                account_id,
+                "Test Character",
+                RealmId::new(),
+                "greenwood-forest",
+            )
+            .await
+            .unwrap();
+
+        store
+            .apply_stat_delta(character_id, "score", i64::MAX)
+            .await
+            .unwrap();
+
+        let err = store
+            .apply_stat_delta(character_id, "score", i64::MAX)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("overflowed"), "{err}");
+        assert_eq!(
+            store.get_stat(character_id, "score").await.unwrap(),
+            i64::MAX
+        );
+    }
+
+    #[tokio::test]
+    #[ignore]
     async fn unknown_key_write_is_rejected() {
         let (store, character_id) = store_with_character().await;
         let err = store

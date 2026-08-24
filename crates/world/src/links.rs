@@ -77,4 +77,30 @@ mod tests {
     fn no_links_never_crosses() {
         assert!(crossed_link(&[], (0.0, 0.0), (100.0, 100.0)).is_none());
     }
+
+    #[test]
+    fn a_link_with_fewer_than_two_edge_points_never_matches() {
+        // Defensive branch — `content::manifest::Link::edge` is validated
+        // to be exactly 2 points before a manifest ever loads, but this
+        // function stays defensive rather than assuming that always held
+        // (doc comment above `crossed_link`). Directly exercises that
+        // branch rather than trusting it's unreachable.
+        let degenerate = Link {
+            target_zone: "next-zone".to_string(),
+            edge: vec![(10.0, 0.0)],
+            bidirectional: true,
+        };
+        let links = vec![degenerate];
+        assert!(crossed_link(&links, (9.0, 5.0), (11.0, 5.0)).is_none());
+    }
+
+    #[test]
+    fn the_first_matching_link_in_declaration_order_wins() {
+        let links = vec![
+            link("zone-a", [(10.0, 0.0), (10.0, 10.0)]),
+            link("zone-b", [(10.0, 0.0), (10.0, 10.0)]),
+        ];
+        let crossed = crossed_link(&links, (9.0, 5.0), (11.0, 5.0));
+        assert_eq!(crossed.map(|l| l.target_zone.as_str()), Some("zone-a"));
+    }
 }

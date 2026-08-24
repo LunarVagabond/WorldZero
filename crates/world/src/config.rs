@@ -167,4 +167,48 @@ mod tests {
             unsafe { std::env::remove_var("WZ_WORLD_GRID_CELL_SIZE_METERS") };
         });
     }
+
+    // A zero/negative value parses fine as a number (0 is a valid u32,
+    // -1.0 a valid f64) — these three checks are what actually stop it
+    // from reaching `GridIndex::new` (which asserts and panics on a
+    // non-positive cell size) or `tick_interval` (which would divide by
+    // zero). Previously untested — the exact scenario each check exists
+    // to catch had never been exercised.
+
+    #[test]
+    fn a_zero_tick_rate_is_rejected() {
+        with_clean_env(|| {
+            unsafe { std::env::set_var("WZ_WORLD_TICK_RATE_HZ", "0") };
+            let err = WorldConfig::from_env().unwrap_err();
+            assert!(err.to_string().contains("WZ_WORLD_TICK_RATE_HZ"), "{err}");
+            unsafe { std::env::remove_var("WZ_WORLD_TICK_RATE_HZ") };
+        });
+    }
+
+    #[test]
+    fn a_non_positive_grid_cell_size_is_rejected() {
+        with_clean_env(|| {
+            for bad_value in ["0", "-5"] {
+                unsafe { std::env::set_var("WZ_WORLD_GRID_CELL_SIZE_METERS", bad_value) };
+                let err = WorldConfig::from_env().unwrap_err();
+                assert!(
+                    err.to_string().contains("WZ_WORLD_GRID_CELL_SIZE_METERS"),
+                    "{err}"
+                );
+            }
+            unsafe { std::env::remove_var("WZ_WORLD_GRID_CELL_SIZE_METERS") };
+        });
+    }
+
+    #[test]
+    fn a_non_positive_max_speed_is_rejected() {
+        with_clean_env(|| {
+            for bad_value in ["0", "-1"] {
+                unsafe { std::env::set_var("WZ_WORLD_MAX_SPEED_MPS", bad_value) };
+                let err = WorldConfig::from_env().unwrap_err();
+                assert!(err.to_string().contains("WZ_WORLD_MAX_SPEED_MPS"), "{err}");
+            }
+            unsafe { std::env::remove_var("WZ_WORLD_MAX_SPEED_MPS") };
+        });
+    }
 }

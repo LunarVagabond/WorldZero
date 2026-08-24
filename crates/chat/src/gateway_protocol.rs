@@ -229,6 +229,53 @@ mod tests {
     }
 
     #[test]
+    fn server_message_chat_round_trips_through_an_envelope() {
+        // Only `ClientMessage` got a round-trip test before — `ServerMessage`
+        // (Joined/Left/Chat/Error) had zero `into_envelope`/`from_envelope`
+        // coverage, unlike `auth::gateway_protocol` which tests both
+        // directions. A field added to `Chat` without updating both the
+        // `From`/`TryFrom` impls would have gone uncaught here.
+        let channel_id = ChannelId::new();
+        let message = ServerMessage::Chat {
+            channel_id,
+            channel: "trade".to_string(),
+            sender: "alice".to_string(),
+            body: "hello".to_string(),
+        };
+        let envelope = message.into_envelope().unwrap();
+        assert_eq!(envelope.message_type, CHAT_MESSAGE_TYPE);
+        let decoded = ServerMessage::from_envelope(&envelope).unwrap();
+        assert!(matches!(
+            decoded,
+            ServerMessage::Chat { channel_id: decoded_id, channel, sender, body }
+                if decoded_id == channel_id && channel == "trade" && sender == "alice" && body == "hello"
+        ));
+    }
+
+    #[test]
+    fn server_message_joined_and_error_round_trip_through_an_envelope() {
+        let channel_id = ChannelId::new();
+        let joined = ServerMessage::Joined {
+            channel_id,
+            channel: "trade".to_string(),
+        };
+        let decoded = ServerMessage::from_envelope(&joined.into_envelope().unwrap()).unwrap();
+        assert!(matches!(
+            decoded,
+            ServerMessage::Joined { channel_id: decoded_id, channel }
+                if decoded_id == channel_id && channel == "trade"
+        ));
+
+        let error = ServerMessage::Error {
+            message: "something broke".to_string(),
+        };
+        let decoded = ServerMessage::from_envelope(&error.into_envelope().unwrap()).unwrap();
+        assert!(
+            matches!(decoded, ServerMessage::Error { message } if message == "something broke")
+        );
+    }
+
+    #[test]
     fn send_round_trips_a_channel_id() {
         let channel_id = ChannelId::new();
         let message = ClientMessage::Send {

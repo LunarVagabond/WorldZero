@@ -101,4 +101,95 @@ system_channels:
         assert_eq!(config.system_channels[0].scope, ChannelScope::Global);
         assert_eq!(config.system_channels[2].scope, ChannelScope::Zone);
     }
+
+    #[test]
+    fn rejects_malformed_yaml() {
+        let err = SystemChannelConfig::from_yaml("not: [valid, chat.yaml").unwrap_err();
+        assert!(
+            err.to_string().contains("failed to parse chat.yaml"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn rejects_an_unrecognized_scope_value() {
+        let err = SystemChannelConfig::from_yaml(
+            r#"
+schema_version: 1
+system_channels:
+  - category: trade
+    scope: realm
+"#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("failed to parse chat.yaml"),
+            "{err}"
+        );
+    }
+
+    // `ensure_channels` — the actual global-vs-per-zone reconciliation
+    // logic — had zero coverage before, not even ignored, unlike
+    // everything else in `chat` that touches the DB. Real Postgres, set
+    // WZ_POSTGRES_* and run with `-- --ignored`.
+
+    async fn channel_store() -> crate::store::ChannelStore {
+        use common::config::PostgresConfig;
+        use common::pool::{PoolOptions, postgres_pool};
+
+        let config = PostgresConfig::from_env().expect("WZ_POSTGRES_* env vars set");
+        let pool = postgres_pool(&config, PoolOptions::default())
+            .await
+            .unwrap();
+        crate::store::ChannelStore::new(pool)
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn ensure_channels_creates_one_global_and_one_per_declared_zone() {
+        let store = channel_store().await;
+        let config = SystemChannelConfig::from_yaml(
+            r#"
+schema_version: 1
+system_channels:
+  - category: trade
+    scope: global
+  - category: local
+    scope: zone
+"#,
+        )
+        .unwrap();
+
+        let ids = config
+            .ensure_channels(&store, &["zone-a".to_string(), "zone-b".to_string()])
+            .await
+            .unwrap();
+
+        // One global "trade" channel, plus one "local" channel per zone.
+        assert_eq!(ids.len(), 3);
+        assert_eq!(
+            ids.iter().collect::<std::collections::HashSet<_>>().len(),
+            3,
+            "expected 3 distinct channel ids, got {ids:?}"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn ensure_channels_is_idempotent_across_calls() {
+        let store = channel_store().await;
+        let config = SystemChannelConfig::from_yaml(
+            r#"
+schema_version: 1
+system_channels:
+  - category: trade
+    scope: global
+"#,
+        )
+        .unwrap();
+
+        let first = config.ensure_channels(&store, &[]).await.unwrap();
+        let second = config.ensure_channels(&store, &[]).await.unwrap();
+        assert_eq!(first, second);
+    }
 }

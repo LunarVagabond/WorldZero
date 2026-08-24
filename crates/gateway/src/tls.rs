@@ -7,6 +7,7 @@ use std::path::Path;
 use common::{Error, Result};
 use sha2::{Digest, Sha256};
 
+#[derive(Debug)]
 pub struct CertMaterial {
     pub cert_der: Vec<u8>,
     pub key_der: Vec<u8>,
@@ -124,5 +125,105 @@ mod tests {
         assert_eq!(first.fingerprint_sha256_hex.len(), 64);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // Real production deployments go through `load_from_files`
+    // (`WZ_TLS_CERT_PATH`/`WZ_TLS_KEY_PATH`), not the self-signed
+    // convenience path above — this had zero coverage before, which is
+    // backwards risk-wise given it's what actual deployments use.
+
+    fn temp_file(label: &str, contents: &[u8]) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+
+        let path = std::env::temp_dir().join(format!(
+            "wz-gateway-tls-test-{}-{label}-{n}",
+            std::process::id(),
+        ));
+        std::fs::write(&path, contents).unwrap();
+        path
+    }
+
+    #[test]
+    fn load_from_files_reads_a_real_cert_and_key() {
+        let generated = rcgen::generate_simple_self_signed(["localhost".to_string()]).unwrap();
+        let cert_der = generated.cert.der().to_vec();
+        let key_der = generated.signing_key.serialize_der();
+
+        let cert_pem = pem::Pem::new("CERTIFICATE", cert_der.clone()).to_string();
+        let key_pem = pem::Pem::new("PRIVATE KEY", key_der.clone()).to_string();
+
+        let cert_path = temp_file("cert", cert_pem.as_bytes());
+        let key_path = temp_file("key", key_pem.as_bytes());
+
+        let material = load_from_files(&cert_path, &key_path).unwrap();
+        assert_eq!(material.cert_der, cert_der);
+        assert_eq!(material.key_der, key_der);
+        assert_eq!(material.fingerprint_sha256_hex.len(), 64);
+
+        std::fs::remove_file(&cert_path).ok();
+        std::fs::remove_file(&key_path).ok();
+    }
+
+    #[test]
+    fn load_from_files_falls_back_to_the_rsa_private_key_label() {
+        // `pem_to_der` only extracts the DER payload from the labeled PEM
+        // block — it never parses the bytes as a real key — so arbitrary
+        // bytes are enough to prove the "PRIVATE KEY" -> "RSA PRIVATE KEY"
+        // label fallback (line 50) actually engages, without needing a
+        // real RSA key on hand.
+        let generated = rcgen::generate_simple_self_signed(["localhost".to_string()]).unwrap();
+        let cert_pem = pem::Pem::new("CERTIFICATE", generated.cert.der().to_vec()).to_string();
+        let fake_rsa_key_der = vec![1, 2, 3, 4, 5];
+        let key_pem = pem::Pem::new("RSA PRIVATE KEY", fake_rsa_key_der.clone()).to_string();
+
+        let cert_path = temp_file("cert-rsa", cert_pem.as_bytes());
+        let key_path = temp_file("key-rsa", key_pem.as_bytes());
+
+        let material = load_from_files(&cert_path, &key_path).unwrap();
+        assert_eq!(material.key_der, fake_rsa_key_der);
+
+        std::fs::remove_file(&cert_path).ok();
+        std::fs::remove_file(&key_path).ok();
+    }
+
+    #[test]
+    fn load_from_files_rejects_non_pem_content() {
+        let cert_path = temp_file("cert-garbage", b"this is not PEM at all");
+        let key_path = temp_file("key-garbage", b"neither is this");
+
+        let err = load_from_files(&cert_path, &key_path).unwrap_err();
+        assert!(err.to_string().contains("not valid PEM"), "{err}");
+
+        std::fs::remove_file(&cert_path).ok();
+        std::fs::remove_file(&key_path).ok();
+    }
+
+    #[test]
+    fn load_from_files_rejects_a_pem_with_the_wrong_label() {
+        // A cert file that's valid PEM, but not a CERTIFICATE block (e.g.
+        // someone swapped the cert/key paths) must error clearly rather
+        // than silently loading the wrong material.
+        let wrong_label_pem = pem::Pem::new("EC PRIVATE KEY", vec![9, 9, 9]).to_string();
+        let cert_path = temp_file("cert-wrong-label", wrong_label_pem.as_bytes());
+        let key_path = temp_file("key-wrong-label", wrong_label_pem.as_bytes());
+
+        let err = load_from_files(&cert_path, &key_path).unwrap_err();
+        assert!(err.to_string().contains("CERTIFICATE"), "{err}");
+
+        std::fs::remove_file(&cert_path).ok();
+        std::fs::remove_file(&key_path).ok();
+    }
+
+    #[test]
+    fn load_from_files_missing_file_errors_clearly() {
+        let missing = std::env::temp_dir().join(format!(
+            "wz-gateway-tls-test-does-not-exist-{}",
+            std::process::id()
+        ));
+
+        let err = load_from_files(&missing, &missing).unwrap_err();
+        assert!(err.to_string().contains("WZ_TLS_CERT_PATH"), "{err}");
     }
 }

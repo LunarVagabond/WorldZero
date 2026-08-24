@@ -157,6 +157,15 @@ stats:
     }
 
     #[test]
+    fn a_write_exactly_at_the_declared_bounds_is_accepted() {
+        // The `<`/`>` (not `<=`/`>=`) boundary in `validate_write` —
+        // previously only tested clearly-inside and clearly-outside
+        // values, never the exact min/max themselves.
+        assert!(example_schema().validate_write("hp", 0).is_ok());
+        assert!(example_schema().validate_write("hp", 100).is_ok());
+    }
+
+    #[test]
     fn write_with_no_declared_bounds_accepts_any_value() {
         assert!(
             example_schema()
