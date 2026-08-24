@@ -3973,6 +3973,15 @@ dependencies = [
 [[package]]
 name = "transfer"
 version = "0.1.0"
+dependencies = [
+ "character",
+ "common",
+ "realm-directory",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "uuid",
+]
 
 [[package]]
 name = "try-lock"
