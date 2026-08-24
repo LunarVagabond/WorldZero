@@ -2778,6 +2778,7 @@ dependencies = [
 name = "realm-directory"
 version = "0.1.0"
 dependencies = [
+ "character",
  "common",
  "sqlx",
  "tokio",

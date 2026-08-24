@@ -5,9 +5,11 @@
 
 pub mod inventory;
 pub mod schema;
+pub mod session_lease;
 pub mod store;
 
 pub use schema::{AttributeSchema, StatDeclaration, StatType};
+pub use session_lease::{CharacterSessionLease, LeaseOutcome};
 pub use store::{CharacterStore, CharacterSummary};
 
 pub fn postgres_config() -> common::Result<common::config::PostgresConfig> {

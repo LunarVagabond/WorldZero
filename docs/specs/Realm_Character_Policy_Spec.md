@@ -4,13 +4,13 @@ Corresponds to [Realm & Character Policy Model](../PROPOSAL.md#realm--character-
 
 ## The flag
 
-Open-vs-bound is stored per realm, not per deployment or per character. `realm-directory`'s registry (#47, implemented — `RealmStore` in `crates/realm-directory/src/store.rs`, schema in docs/specs/Data_Model_Spec.md) carries an `open_or_bound` field on every realm record — `open` or `bound` — from the moment realm CRUD exists, even though enforcement of it (#51) lands later. A deployment can mix models across realm groups; there is no global switch anywhere in `common::config`.
+Open-vs-bound is stored per realm, not per deployment or per character. `realm-directory`'s registry (#47, implemented — `RealmStore` in `crates/realm-directory/src/store.rs`, schema in docs/specs/Data_Model_Spec.md) carries an `open_or_bound` field on every realm record — `open` or `bound` — from the moment realm CRUD exists. Enforcement (#51, `realm-directory::LoginPolicy` in `crates/realm-directory/src/login_policy.rs`) is real and tested now too, though not yet wired into `server` — see "Managing realms today" below. A deployment can mix models across realm groups; there is no global switch anywhere in `common::config`.
 
 A character's own row does not duplicate this flag. Whether a given character can log into a given realm is derived by looking up that realm's `open_or_bound` value at connect time (`gateway` → `realm-directory`), not stored redundantly on the character. Storing it twice would let the two disagree after a realm's policy changes.
 
 ### Managing realms today
 
-`realm-directory` isn't wired into `server` yet (that's #50/#51), so there's no in-game or admin-API flow for this — the only way to create/inspect/manage a realm right now is `realm-directory`'s own CLI:
+`realm-directory` isn't wired into `server` yet (that's #50), so there's no in-game or admin-API flow for this — the only way to create/inspect/manage a realm right now is `realm-directory`'s own CLI:
 
 ```sh
 make realm ARGS="create MyRealm open"      # prints the new realm's id
@@ -65,8 +65,8 @@ This satisfies #53's "no partial-transfer state" and "failed transfer leaves the
 
 | Question | Answer | Where enforced |
 |---|---|---|
-| Where does open/bound live? | Per-realm field on the `realm-directory` registry | #47 (field exists), #51 (enforced) |
-| How is open-realm split-brain prevented? | A `character_sessions` lease table, checked at login/reconnect only | `character`, consumed by #47/#51 |
+| Where does open/bound live? | Per-realm field on the `realm-directory` registry | #47 (field exists), #51 (enforced, not yet wired into `server`) |
+| How is open-realm split-brain prevented? | A `character_sessions` lease table, checked at login/reconnect only | `character::CharacterSessionLease`, consumed by `realm-directory::LoginPolicy` (#51) |
 | Do bound realms need the lease? | No — skipped entirely | `character` |
 | Is a transfer atomic? | Yes — one Postgres transaction, no distributed/saga logic | #53 |
 | Can an open-realm character be transferred? | No — rejected as a validation error | #53 |

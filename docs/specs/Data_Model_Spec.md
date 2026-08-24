@@ -63,7 +63,23 @@ CREATE TABLE realm_zones (
 
 **`realm_zones.zone_id` is its own primary key, not `(realm_id, zone_id)`** — a zone-service instance (identified the same way everywhere else in this codebase, `content::manifest::ZoneManifest.id`, a content-defined slug, never a DB foreign key) belongs to at most one realm at a time. Reassigning an already-assigned zone moves it (`ON CONFLICT (zone_id) DO UPDATE`) rather than erroring or creating a second mapping.
 
-**Not wired into `server`'s combined process yet.** This registry is real and tested, but nothing in `server::main` reads from it — Phase 1's `placeholder_realm_id()` (a nil UUID) is still what every character gets. Consuming this for real (resolving a connection's realm at login, enforcing `open_or_bound`) is #50 (dynamic layer assignment) and #51 (open/bound enforcement)'s job, not this one. Until then, managing realms is `make realm ARGS="..."` (a small CLI over `RealmStore`, `crates/realm-directory/src/bin/realm.rs`) — see docs/specs/Realm_Character_Policy_Spec.md's "Managing realms today" for full usage.
+**Not wired into `server`'s combined process yet.** This registry is real and tested, but nothing in `server::main` reads from it — Phase 1's `placeholder_realm_id()` (a nil UUID) is still what every character gets. #51's `realm-directory::LoginPolicy` (below) is real and tested too, but has no caller in `server` either — resolving a connection's realm at login for real is #50 (dynamic layer assignment)'s job, alongside wiring both of these in. Until then, managing realms is `make realm ARGS="..."` (a small CLI over `RealmStore`, `crates/realm-directory/src/bin/realm.rs`) — see docs/specs/Realm_Character_Policy_Spec.md's "Managing realms today" for full usage.
+
+## `character_sessions` table: the open-realm concurrency lease (#21, enforced by #51)
+
+```sql
+CREATE TABLE character_sessions (
+    character_id UUID PRIMARY KEY REFERENCES characters(id) ON DELETE CASCADE,
+    realm_id UUID NOT NULL REFERENCES realms(id) ON DELETE CASCADE,
+    zone_service_id TEXT NOT NULL,
+    leased_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at TIMESTAMPTZ NOT NULL
+);
+```
+
+`character::CharacterSessionLease` (`crates/character/src/session_lease.rs`) is the one write path — `acquire`/`renew`/`release`, per docs/specs/Realm_Character_Policy_Spec.md's "Open realms: concurrency control". At most one row per currently-online character; a second zone-service instance can't acquire an unexpired lease, and letting a lease's `expires_at` lapse (a crash, not a clean disconnect) is itself the failure-detection mechanism — no separate liveness check. Bound realms never write to this table at all, since the split-brain scenario it exists to prevent can't occur there — see the spec's "Bound realms" section.
+
+`realm-directory::LoginPolicy` (`crates/realm-directory/src/login_policy.rs`) is #51's single enforcement point: given a character's home realm and a target realm, it rejects a bound-realm mismatch outright, and for an open realm, acquires this lease as part of the same authorization call.
 
 ## Currency: one balance, not a ledger table
 
