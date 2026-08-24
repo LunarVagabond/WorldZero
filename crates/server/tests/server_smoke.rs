@@ -42,6 +42,7 @@ const CHAT_DISABLED_ADDR: &str = "127.0.0.1:7912";
 const ZONE_TRANSITION_ADDR: &str = "127.0.0.1:7913";
 const LAYER_ADDR: &str = "127.0.0.1:7918";
 const LAYER_DISABLED_ADDR: &str = "127.0.0.1:7919";
+const PLAYER_SESSION_ADDR: &str = "127.0.0.1:7920";
 
 struct ServerProcess {
     child: Child,
@@ -445,13 +446,13 @@ async fn connect_register_move_and_persist_across_reconnect() {
 async fn player_join_and_leave_hooks_fire_for_real() {
     let config_dir = setup_config_dir("player-session");
 
-    let _server = start_server(&config_dir, ADDR);
-    wait_for_port(ADDR).await;
+    let _server = start_server(&config_dir, PLAYER_SESSION_ADDR);
+    wait_for_port(PLAYER_SESSION_ADDR).await;
 
     let username = format!("smoke-{}", uuid::Uuid::now_v7());
     let password = "hunter2";
 
-    let mut stream = connect(&config_dir, ADDR).await;
+    let mut stream = connect(&config_dir, PLAYER_SESSION_ADDR).await;
     send_auth(
         &mut stream,
         &AuthClientMessage::Register {
@@ -488,7 +489,7 @@ async fn player_join_and_leave_hooks_fire_for_real() {
     // on-player-leave-zone before the second connection asks about it.
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let mut stream = connect(&config_dir, ADDR).await;
+    let mut stream = connect(&config_dir, PLAYER_SESSION_ADDR).await;
     send_auth(
         &mut stream,
         &AuthClientMessage::Register {
@@ -817,11 +818,17 @@ async fn chat_disabled_returns_a_clear_error() {
         .await
         .unwrap();
 
-    match recv_world(&mut stream).await {
-        ServerMessage::Error { message } => {
-            assert!(message.contains("chat is disabled"), "{message}");
+    loop {
+        match recv_world(&mut stream).await {
+            ServerMessage::Error { message } => {
+                assert!(message.contains("chat is disabled"), "{message}");
+                break;
+            }
+            // The configured plugin's own on-player-join-zone greeting
+            // (#155) — unrelated to this test, drain past it.
+            ServerMessage::PluginMessage { .. } => {}
+            other => panic!("expected an Error, got {other:?}"),
         }
-        other => panic!("expected an Error, got {other:?}"),
     }
 }
 
