@@ -63,7 +63,7 @@ CREATE TABLE realm_zones (
 
 **`realm_zones.zone_id` is its own primary key, not `(realm_id, zone_id)`** — a zone-service instance (identified the same way everywhere else in this codebase, `content::manifest::ZoneManifest.id`, a content-defined slug, never a DB foreign key) belongs to at most one realm at a time. Reassigning an already-assigned zone moves it (`ON CONFLICT (zone_id) DO UPDATE`) rather than erroring or creating a second mapping.
 
-**Not wired into `server`'s combined process yet.** This registry is real and tested, but nothing in `server::main` reads from it — Phase 1's `placeholder_realm_id()` (a nil UUID) is still what every character gets. Consuming this for real (resolving a connection's realm at login, enforcing `open_or_bound`) is #50 (dynamic layer assignment) and #51 (open/bound enforcement)'s job, not this one.
+**Not wired into `server`'s combined process yet.** This registry is real and tested, but nothing in `server::main` reads from it — Phase 1's `placeholder_realm_id()` (a nil UUID) is still what every character gets. Consuming this for real (resolving a connection's realm at login, enforcing `open_or_bound`) is #50 (dynamic layer assignment) and #51 (open/bound enforcement)'s job, not this one. Until then, managing realms is `make realm ARGS="..."` (a small CLI over `RealmStore`, `crates/realm-directory/src/bin/realm.rs`) — see docs/specs/Realm_Character_Policy_Spec.md's "Managing realms today" for full usage.
 
 ## Currency: one balance, not a ledger table
 

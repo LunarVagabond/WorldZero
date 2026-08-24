@@ -8,6 +8,22 @@ Open-vs-bound is stored per realm, not per deployment or per character. `realm-d
 
 A character's own row does not duplicate this flag. Whether a given character can log into a given realm is derived by looking up that realm's `open_or_bound` value at connect time (`gateway` → `realm-directory`), not stored redundantly on the character. Storing it twice would let the two disagree after a realm's policy changes.
 
+### Managing realms today
+
+`realm-directory` isn't wired into `server` yet (that's #50/#51), so there's no in-game or admin-API flow for this — the only way to create/inspect/manage a realm right now is `realm-directory`'s own CLI:
+
+```sh
+make realm ARGS="create MyRealm open"      # prints the new realm's id
+make realm ARGS="list"                     # id, policy, name — one per line
+make realm ARGS="get <realm-id>"           # realm details + its assigned zones
+make realm ARGS="update <realm-id> NewName bound"
+make realm ARGS="delete <realm-id>"
+make realm ARGS="assign-zone <realm-id> greenwood-forest"
+make realm ARGS="unassign-zone greenwood-forest"
+```
+
+Needs `WZ_POSTGRES_*` (`.env`, loaded automatically by `make`) and migration `0007_create_realms` applied (`make migrate`). Run `make realm` with no `ARGS` for the full command list. Same hand-rolled-CLI convention as `make migrate`/`content`'s `validate` bin — see `crates/realm-directory/src/bin/realm.rs`.
+
 ## Open realms: concurrency control
 
 **The problem this section exists to answer:** `docs/PROPOSAL.md` says open-realm character state needs "appropriate locking/versioning" without saying what that is. This is that design.
