@@ -58,7 +58,7 @@ The point of reserving `ERROR` is operational, not stylistic: once alerting exis
 
 ## Log export/aggregation (decision: #120)
 
-Core ships the fixed stdout format above and nothing more — no pluggable log-sink abstraction, no bundled/blessed Loki+Grafana or DataDog integration. The format is already portable enough that any mainstream shipper (Promtail, Filebeat, DataDog Agent, Vector) can tail it without WorldZero doing anything else. What ships beyond this is docs-only — example shipper configs, "reference, not maintained product," same framing already used for the Grafana dashboard (#59/#68) — tracked separately, not in this crate.
+Core ships the fixed stdout format above and nothing more — no pluggable log-sink abstraction, no bundled/blessed Loki+Grafana or DataDog integration. The format is already portable enough that any mainstream shipper (Promtail, Filebeat, DataDog Agent, Vector) can tail it without WorldZero doing anything else. What ships beyond this is docs-only — example shipper configs, "reference, not maintained product," same framing already used for the Grafana dashboard (#59/#68) — see [Log Export/Aggregation Cookbook](Log_Export_Cookbook.md) (#122) for worked examples, including how to filter/tag log output by crate.
 
 ## Tracing and the admin API
 
