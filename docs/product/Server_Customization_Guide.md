@@ -122,7 +122,7 @@ For a real certificate:
 
 ## Step 5 — Plugins: your actual gameplay logic (`plugin-host`)
 
-Configuration data models (Steps 1–2) describe *what exists*; plugins are *what happens*. This is where NPC behavior, custom interactions, and your own message types live.
+Configuration data models (Steps 1–2) describe *what exists*; plugins are *what happens*. This is where NPC behavior, custom interactions, and your own message types live. See [`Plugin_Development_Guide.md`](Plugin_Development_Guide.md) for the full write-it/build-it/deploy-it workflow (what language, how it gets built, how `server` picks it up) — this section is just the config surface.
 
 A plugin is a `wasmtime`-sandboxed WASM component plus a manifest, [`config/plugin.example.toml`](../../config/plugin.example.toml):
 
