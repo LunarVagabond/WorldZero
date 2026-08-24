@@ -46,4 +46,6 @@ A `server` process listening on `127.0.0.1:7900`, running one zone ("Greenwood F
 
 ## Everything else
 
+Ready to turn this into your own game? [`Server_Customization_Guide.md`](Server_Customization_Guide.md) is the step-by-step walkthrough of every crate's own configuration — your stats schema, world tuning, auth, plugins, and more — in the order you'd actually touch them.
+
 Once you're past first boot: [`docs/specs/`](../specs) covers each service's wire protocol and data model in depth, and [`docs/architecture/System_Architecture.md`](../architecture/System_Architecture.md) covers cross-service design (e.g. how optional services like `chat` get toggled). `examples/example-plugin` is a real, if minimal, starting point for writing your own plugin — copy it and go from there.
