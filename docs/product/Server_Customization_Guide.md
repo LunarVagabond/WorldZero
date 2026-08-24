@@ -141,7 +141,7 @@ message_types = []
 chat_commands = []
 ```
 
-- `capabilities`: gates which host functions your plugin may call (`docs/specs/Plugin_API.md`'s "Capability gating") — `spawning` (`spawn-npc`), `movement` (`move-entity`), `combat` (`apply-stat-delta`/`report-death`/`report-respawn`), `economy` (`grant-item`/`remove-item`/`modify-currency`). **The default is strict**: an empty list grants none of these — `send-message`/`caller-role`/`plugin-state-get`/`plugin-state-set` are always available regardless of what's declared. List only what your plugin actually needs; this is the real mechanism for running a less-trusted, third-party-authored plugin alongside your own trusted one.
+- `capabilities`: gates which host functions your plugin may call (`docs/specs/Plugin_API.md`'s "Capability gating") — `spawning` (`spawn-npc`), `movement` (`move-entity`), `combat` (`apply-stat-delta`/`report-death`/`report-respawn`), `economy` (`grant-item`/`remove-item`/`modify-currency`), `messaging` (`send-message`). **The default is strict**: an empty list grants none of these — `caller-role`/`plugin-state-get`/`plugin-state-set` are the only host functions always available regardless of what's declared. List only what your plugin actually needs; this is the real mechanism for running a less-trusted, third-party-authored plugin alongside your own trusted one.
 - `message_types`: which gateway-routed message type IDs get delivered to your plugin's `on-message` hook. **Must each be ≥ 1000** — 0–999 is core-reserved (see [`docs/specs/Networking_Spec.md`](../specs/Networking_Spec.md)'s message catalog).
 - `chat_commands`: command names (no leading `/`) routed to `on-chat-command` instead of published as ordinary chat.
 

@@ -39,6 +39,12 @@ pub const CAPABILITY_MOVEMENT: &str = "movement";
 pub const CAPABILITY_COMBAT: &str = "combat";
 /// Grants `grant-item`/`remove-item`/`modify-currency`.
 pub const CAPABILITY_ECONOMY: &str = "economy";
+/// Grants `send-message` — kept as its own capability, not folded into
+/// "ungated," because it lets a plugin message *any* connected entity by
+/// id, not just the one a hook call was actually about (docs/PROPOSAL.md
+/// lists "Messaging" as its own v0 host-function group, separate from
+/// entity control, for the same reason).
+pub const CAPABILITY_MESSAGING: &str = "messaging";
 
 /// Every capability name this build recognizes — a manifest declaring
 /// anything outside this set is refused at load time (`check_capabilities`
@@ -50,6 +56,7 @@ pub const KNOWN_CAPABILITIES: &[&str] = &[
     CAPABILITY_MOVEMENT,
     CAPABILITY_COMBAT,
     CAPABILITY_ECONOMY,
+    CAPABILITY_MESSAGING,
 ];
 
 #[derive(Debug, Clone, Deserialize)]
@@ -66,10 +73,10 @@ pub struct PluginDeclaration {
     /// list (the pre-#153 default in every existing manifest) grants
     /// *none* of the gated capabilities, not all of them — a plugin only
     /// gets a gated host function if it explicitly declares the
-    /// capability that covers it. A handful of host functions
-    /// (`send-message`, `caller-role`, `plugin-state-get`/`-set`) are
-    /// ungated regardless of `capabilities` — see
-    /// `runtime::CapabilityGatedCallbacks` for why those specifically.
+    /// capability that covers it. Only `caller-role` and
+    /// `plugin-state-get`/`-set` are ungated regardless of `capabilities`
+    /// — see `runtime::CapabilityGatedCallbacks` for why those
+    /// specifically (read-only / self-scoped).
     #[serde(default)]
     pub capabilities: Vec<String>,
     /// `message_type` values (docs/specs/Networking_Spec.md) this plugin

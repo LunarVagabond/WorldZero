@@ -109,11 +109,11 @@ Every plugin exports all fifteen — a WIT world's exports aren't individually o
 | `report-death` | `func(entity-id: string) -> result<_, string>` | Reports that `entity-id` has died (#154) — the plugin decides what "died" means for its own game (docs/PROPOSAL.md: "core has no notion of HP or a death condition") and calls this itself. Queued, applied on the zone's next tick drain, fires `on-death` back to the caller once applied — same "queued, not synchronously confirmed" shape as `apply-stat-delta`. |
 | `report-respawn` | `func(entity-id: string) -> result<_, string>` | Same shape as `report-death`, for the respawn case — fires `on-respawn` once applied. |
 
-Eight of the twelve are gated by `plugin.toml`'s `capabilities` — see "Capability gating" below. `grant-item`/`remove-item`/`modify-currency` only resolve for player entities — an NPC entity id is rejected, since NPCs have no character-backed storage (no NPC item/currency ownership exists, only players own items/currency).
+Nine of the twelve are gated by `plugin.toml`'s `capabilities` — see "Capability gating" below. `grant-item`/`remove-item`/`modify-currency` only resolve for player entities — an NPC entity id is rejected, since NPCs have no character-backed storage (no NPC item/currency ownership exists, only players own items/currency).
 
 ### Capability gating (`plugin.toml`'s `capabilities`, #153)
 
-Four named groups, each covering a fixed subset of host functions:
+Five named groups, each covering a fixed subset of host functions:
 
 | Capability | Grants |
 |---|---|
@@ -121,14 +121,15 @@ Four named groups, each covering a fixed subset of host functions:
 | `movement` | `move-entity` |
 | `combat` | `apply-stat-delta`, `report-death`, `report-respawn` |
 | `economy` | `grant-item`, `remove-item`, `modify-currency` |
+| `messaging` | `send-message` |
 
-`send-message`, `caller-role`, `plugin-state-get`, and `plugin-state-set` are **ungated** regardless of declared capabilities — a plugin that can't reply to anyone is useless for almost any purpose, `caller-role` is a read-only answer from a cache already scoped to the calling connection, and `plugin-state-get`/`-set` only ever touch the plugin's own storage. Every gated function reaches *across* an entity boundary (moving/damaging/granting-to another entity, spawning a new one) — that's the actual dividing line, not an arbitrary split.
+Only `caller-role`, `plugin-state-get`, and `plugin-state-set` are **ungated** regardless of declared capabilities — `caller-role` is a read-only answer from a cache already scoped to the calling connection, and `plugin-state-get`/`-set` only ever touch the plugin's own storage. Every gated function reaches *across* an entity boundary — moving/damaging/granting-to/messaging another entity, spawning a new one — that's the actual dividing line, not an arbitrary split. `send-message` is gated (not folded into "ungated") specifically because it can target *any* connected entity by id, not just the one a hook call was actually about — matching docs/PROPOSAL.md's own "v0 Host Functions" list, which already treats messaging as its own capability group, separate from entity control.
 
 **Enforcement is per-call, not load-time refusal.** `plugin-host::PluginHost::load` wraps every plugin's `HostCallbacks` in a capability-checking layer (`runtime::CapabilityGatedCallbacks`) before instantiation — a call to a host function outside what the manifest declared returns an ordinary `Err` string back to the plugin (never a trap/panic), the same shape every other host-function failure already takes. Per-call rather than refuse-to-load because a plugin's declared hooks/message types are still valid and useful even if one gated call would fail — the plugin (or its author, reading the error during development) decides what to do about it, same as any other host-function error.
 
-**The default is strict.** `capabilities = []` (the same default every manifest already had before this) grants *none* of the four gated groups — not all of them. This is a deliberate v0.7.0 behavior tightening: before #153 the field was parsed and carried but checked against nothing, so every plugin had full access regardless of what it declared; every existing manifest in this repo (`config/plugin.example.toml`, `examples/example-plugin/plugin.toml`, test fixtures) was updated to explicitly list the capabilities it actually uses.
+**The default is strict.** `capabilities = []` (the same default every manifest already had before this) grants *none* of the five gated groups — not all of them. This is a deliberate v0.7.0 behavior tightening: before #153 the field was parsed and carried but checked against nothing, so every plugin had full access regardless of what it declared; every existing manifest in this repo (`config/plugin.example.toml`, `examples/example-plugin/plugin.toml`, test fixtures) was updated to explicitly list the capabilities it actually uses.
 
-This is the real trust boundary for running a less-trusted, third-party-authored plugin alongside an operator's own trusted "core" plugin: grant the operator's own plugin every capability it needs, restrict a community-authored add-on to just `chat`-adjacent behavior (ungated `send-message`/`plugin-state-*` plus whatever `message_types`/`chat_commands` it declares) without needing separate infrastructure. Multi-plugin loading itself isn't built yet (#152) — this is the isolation half of that story, landed first since it doesn't depend on it.
+This is the real trust boundary for running a less-trusted, third-party-authored plugin alongside an operator's own trusted "core" plugin: grant the operator's own plugin every capability it needs, restrict a community-authored add-on to just what it actually needs (e.g. `messaging`-only plus whatever `message_types`/`chat_commands` it declares) without needing separate infrastructure. Multi-plugin loading itself isn't built yet (#152) — this is the isolation half of that story, landed first since it doesn't depend on it.
 
 ### The Plugin-Scoped Data Store (`plugin-state-get`/`plugin-state-set`, #149)
 

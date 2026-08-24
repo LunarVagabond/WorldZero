@@ -135,20 +135,23 @@ pub trait HostCallbacks: Send + 'static {
 }
 
 /// Which capability (`manifest::KNOWN_CAPABILITIES`) a host function
-/// requires, `None` for the handful that are ungated regardless of what
-/// a plugin declared (#153): `send-message` (a plugin that can't reply
-/// to anyone is useless for almost any purpose), `caller-role` (read-only,
-/// answers from a cache already scoped to the calling connection),
+/// requires, `None` for the two that are ungated regardless of what a
+/// plugin declared (#153): `caller-role` (read-only, answers from a
+/// cache already scoped to the calling connection) and
 /// `plugin-state-get`/`-set` (self-scoped storage — a plugin reading or
 /// writing its own state can't affect another entity/plugin). Every
-/// other host function reaches across entity boundaries (moving/damaging/
-/// granting-to another entity, spawning a new one) and is gated.
+/// other host function reaches across entity boundaries — moving/
+/// damaging/granting-to/messaging another entity, spawning a new one —
+/// and is gated, `send-message` included: it can target *any* connected
+/// entity by id, not just the one a hook call was actually about.
 fn required_capability(function: &str) -> Option<&'static str> {
     use crate::manifest::{
-        CAPABILITY_COMBAT, CAPABILITY_ECONOMY, CAPABILITY_MOVEMENT, CAPABILITY_SPAWNING,
+        CAPABILITY_COMBAT, CAPABILITY_ECONOMY, CAPABILITY_MESSAGING, CAPABILITY_MOVEMENT,
+        CAPABILITY_SPAWNING,
     };
     match function {
         "spawn-npc" => Some(CAPABILITY_SPAWNING),
+        "send-message" => Some(CAPABILITY_MESSAGING),
         "move-entity" => Some(CAPABILITY_MOVEMENT),
         "apply-stat-delta" | "report-death" | "report-respawn" => Some(CAPABILITY_COMBAT),
         "grant-item" | "remove-item" | "modify-currency" => Some(CAPABILITY_ECONOMY),
@@ -200,6 +203,7 @@ impl HostCallbacks for CapabilityGatedCallbacks {
         target_entity_id: &str,
         body: &str,
     ) -> std::result::Result<(), String> {
+        self.check("send-message")?;
         self.inner.send_message(target_entity_id, body)
     }
 
@@ -764,7 +768,6 @@ mod tests {
     #[test]
     fn ungated_functions_always_succeed_with_no_capabilities_declared() {
         let mut callbacks = gated(&[]);
-        assert!(callbacks.send_message("e1", "hi").is_ok());
         assert!(callbacks.caller_role("e1").is_ok());
         assert!(
             callbacks
@@ -782,6 +785,7 @@ mod tests {
     fn each_gated_function_is_rejected_without_its_capability_and_allowed_with_it() {
         let mut none = gated(&[]);
         assert!(none.spawn_npc("table").is_err());
+        assert!(none.send_message("e1", "hi").is_err());
         assert!(none.move_entity("e1", 0.0, 0.0).is_err());
         assert!(none.apply_stat_delta("e1", "hp", -1).is_err());
         assert!(none.report_death("e1").is_err());
@@ -793,6 +797,10 @@ mod tests {
         let mut spawning = gated(&["spawning"]);
         assert!(spawning.spawn_npc("table").is_ok());
         assert!(spawning.move_entity("e1", 0.0, 0.0).is_err());
+
+        let mut messaging = gated(&["messaging"]);
+        assert!(messaging.send_message("e1", "hi").is_ok());
+        assert!(messaging.spawn_npc("table").is_err());
 
         let mut movement = gated(&["movement"]);
         assert!(movement.move_entity("e1", 0.0, 0.0).is_ok());

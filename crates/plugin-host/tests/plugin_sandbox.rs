@@ -36,21 +36,25 @@ fn manifest() -> PluginManifest {
 [plugin]
 name = "test-plugin"
 host_api_version = "0.7.0"
-capabilities = ["spawning", "movement", "combat", "economy"]
+capabilities = ["spawning", "movement", "combat", "economy", "messaging"]
 message_types = [1000]
 "#,
     )
     .unwrap()
 }
 
-/// Declares no capabilities at all — used to prove a gated host function
-/// call is actually rejected, not just parsed-and-ignored (#153).
+/// Declares "messaging" only (not "economy") — used to prove a gated
+/// host function call is actually rejected, not just parsed-and-ignored
+/// (#153). Needs "messaging" so the fixture's own `send-message` call
+/// reporting the rejected `grant-item` call can still get through —
+/// otherwise the test would have no way to observe the rejection at all.
 fn restricted_manifest() -> PluginManifest {
     PluginManifest::from_toml(
         r#"
 [plugin]
 name = "test-plugin"
 host_api_version = "0.7.0"
+capabilities = ["messaging"]
 message_types = [1000]
 "#,
     )

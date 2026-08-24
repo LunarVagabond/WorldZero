@@ -4,11 +4,12 @@
 [plugin]
 name = "example-plugin"
 host_api_version = "0.7.0"
-# This plugin calls spawn-npc, move-entity, apply-stat-delta, and
-# grant-item — all four gated capabilities (docs/specs/Plugin_API.md's
-# "Capability gating") — so it declares all four. A real third-party
-# plugin an operator trusts less would typically declare fewer.
-capabilities = ["spawning", "movement", "combat", "economy"]
+# This plugin calls spawn-npc, send-message, move-entity,
+# apply-stat-delta, and grant-item — all five gated capabilities
+# (docs/specs/Plugin_API.md's "Capability gating") — so it declares all
+# five. A real third-party plugin an operator trusts less would
+# typically declare fewer.
+capabilities = ["spawning", "movement", "combat", "economy", "messaging"]
 # 1000: echoed back by on-message below (docs/specs/Networking_Spec.md's
 # plugin-declared floor is >= 1000) — send this message_type over the
 # gateway and this plugin replies. See docs/product/Getting_Started_Developers.md.
