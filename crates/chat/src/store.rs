@@ -136,7 +136,13 @@ impl ChannelStore {
 
     /// Idempotent — ensures `(zone_id, category)` has exactly one channel,
     /// relying on the migration's unique index to stay correct even under
-    /// concurrent callers.
+    /// concurrent callers. That index needs `NULLS NOT DISTINCT`
+    /// (`db/migrations/0006_chat_channels_zone_category_nulls_not_distinct/`)
+    /// for this to actually hold for *global*-scope channels (`zone_id`
+    /// `NULL`) — plain SQL unique indexes treat every `NULL` as distinct
+    /// from every other `NULL`, so without it two concurrent callers
+    /// ensuring the same global category could each pass the conflict
+    /// check and create a duplicate channel.
     pub async fn ensure_zone_channel(
         &self,
         zone_id: Option<&str>,

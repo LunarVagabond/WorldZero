@@ -144,20 +144,33 @@ system_channels:
         crate::store::ChannelStore::new(pool)
     }
 
+    // Categories are uniquified per test run (same pattern
+    // `store.rs`'s own ignored tests use) — not just to avoid leftover
+    // data between runs, but because these tests run in parallel against
+    // one shared real Postgres instance, and a literal shared category
+    // like "trade" across two test functions is exactly the scenario
+    // that surfaced a real bug: two concurrent global-scope `ensure`
+    // calls for the *same* category didn't converge on one channel
+    // before `db/migrations/0006_.../up.sql`'s `NULLS NOT DISTINCT` fix
+    // (`crate::store::ChannelStore::ensure_zone_channel`'s doc comment
+    // has the full explanation). Keeping these uniquified is about
+    // proper test isolation going forward, not about relying on that fix.
+
     #[tokio::test]
     #[ignore]
     async fn ensure_channels_creates_one_global_and_one_per_declared_zone() {
         let store = channel_store().await;
-        let config = SystemChannelConfig::from_yaml(
+        let category = format!("trade-{}", common::id::ChannelId::new());
+        let config = SystemChannelConfig::from_yaml(&format!(
             r#"
 schema_version: 1
 system_channels:
-  - category: trade
+  - category: {category}
     scope: global
-  - category: local
+  - category: local-{category}
     scope: zone
-"#,
-        )
+"#
+        ))
         .unwrap();
 
         let ids = config
@@ -165,7 +178,7 @@ system_channels:
             .await
             .unwrap();
 
-        // One global "trade" channel, plus one "local" channel per zone.
+        // One global channel, plus one zone-scoped channel per zone.
         assert_eq!(ids.len(), 3);
         assert_eq!(
             ids.iter().collect::<std::collections::HashSet<_>>().len(),
@@ -178,14 +191,15 @@ system_channels:
     #[ignore]
     async fn ensure_channels_is_idempotent_across_calls() {
         let store = channel_store().await;
-        let config = SystemChannelConfig::from_yaml(
+        let category = format!("trade-{}", common::id::ChannelId::new());
+        let config = SystemChannelConfig::from_yaml(&format!(
             r#"
 schema_version: 1
 system_channels:
-  - category: trade
+  - category: {category}
     scope: global
-"#,
-        )
+"#
+        ))
         .unwrap();
 
         let first = config.ensure_channels(&store, &[]).await.unwrap();
