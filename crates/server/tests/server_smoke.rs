@@ -117,9 +117,18 @@ fn start_server_with_env(
     let plugin_wasm = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
         "../plugin-host/tests/fixtures/test-plugin/target/wasm32-wasip2/release/test_plugin.wasm",
     );
-    if plugin_wasm.exists() {
+    let plugin_manifest_path = config_dir.join("plugin.toml");
+    // Gated on *this test's own* config dir actually declaring a
+    // plugin.toml, not just on the wasm fixture existing somewhere on
+    // disk — `setup_content_pack_config_dir`'s tests (e.g. the
+    // zone-transition test) deliberately have no plugin.toml, and
+    // wiring WZ_PLUGIN_MANIFEST_PATH at them anyway made the spawned
+    // server panic trying to read a file that was never written. Only
+    // possible once the wasm fixture is actually built (previously never
+    // true in CI, so this path was never exercised there before).
+    if plugin_wasm.exists() && plugin_manifest_path.exists() {
         command
-            .env("WZ_PLUGIN_MANIFEST_PATH", config_dir.join("plugin.toml"))
+            .env("WZ_PLUGIN_MANIFEST_PATH", plugin_manifest_path)
             .env("WZ_PLUGIN_WASM_PATH", plugin_wasm);
     }
 
