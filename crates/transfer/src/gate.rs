@@ -30,7 +30,9 @@ pub enum TransferGate {
 }
 
 impl TransferGate {
-    fn as_db_type(&self) -> &'static str {
+    /// Also used by [`crate::audit`] to record which gate type was in
+    /// effect for a given transfer attempt.
+    pub(crate) fn as_db_type(&self) -> &'static str {
         match self {
             TransferGate::Open => "open",
             TransferGate::TicketItem { .. } => "ticket_item",

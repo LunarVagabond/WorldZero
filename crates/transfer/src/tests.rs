@@ -7,6 +7,7 @@ use common::pool::{PoolOptions, postgres_pool};
 use realm_directory::{OpenOrBound, RealmStore};
 use sqlx::PgPool;
 
+use crate::audit::{TransferAuditLog, TransferOutcome};
 use crate::execute::{TransferExecutor, TransferRequest};
 use crate::gate::{PurchaseVerifier, TransferGate, TransferGateStore};
 
@@ -72,7 +73,8 @@ async fn executor(pool: PgPool) -> TransferExecutor {
     TransferExecutor::new(
         pool.clone(),
         RealmStore::new(pool.clone()),
-        TransferGateStore::new(pool),
+        TransferGateStore::new(pool.clone()),
+        TransferAuditLog::new(pool),
     )
 }
 
@@ -106,6 +108,7 @@ async fn a_successful_transfer_moves_the_realm_and_migrates_stats() {
             character_id,
             destination_realm_id,
             destination_schema: &destination_schema,
+            initiated_by: account_id,
         })
         .await
         .unwrap();
@@ -155,6 +158,7 @@ async fn transferring_an_open_realm_character_is_rejected() {
             character_id,
             destination_realm_id,
             destination_schema: &destination_schema,
+            initiated_by: account_id,
         })
         .await
         .unwrap_err();
@@ -187,6 +191,7 @@ async fn a_failed_transfer_leaves_the_character_unchanged_on_the_source_realm() 
             character_id,
             destination_realm_id: common::id::RealmId::new(),
             destination_schema: &destination_schema,
+            initiated_by: account_id,
         })
         .await
         .unwrap_err();
@@ -228,6 +233,7 @@ async fn transferring_into_an_open_realm_is_rejected() {
             character_id,
             destination_realm_id: open_destination_id,
             destination_schema: &destination_schema,
+            initiated_by: account_id,
         })
         .await
         .unwrap_err();
@@ -250,12 +256,13 @@ async fn create_character(
     pool: &PgPool,
     store: &CharacterStore,
     realm_id: common::id::RealmId,
-) -> CharacterId {
+) -> (CharacterId, AccountId) {
     let account_id = create_account(pool).await;
-    store
+    let character_id = store
         .create(account_id, "Aria", realm_id, "greenwood-forest")
         .await
-        .unwrap()
+        .unwrap();
+    (character_id, account_id)
 }
 
 #[tokio::test]
@@ -276,7 +283,7 @@ async fn a_ticket_item_gate_is_consumed_on_a_successful_transfer() {
         .unwrap();
 
     let store = CharacterStore::new(pool.clone(), source_schema(), Default::default());
-    let character_id = create_character(&pool, &store, source_realm_id).await;
+    let (character_id, account_id) = create_character(&pool, &store, source_realm_id).await;
     store
         .grant_item(character_id, "realm_transfer_ticket", 1)
         .await
@@ -289,6 +296,7 @@ async fn a_ticket_item_gate_is_consumed_on_a_successful_transfer() {
             character_id,
             destination_realm_id,
             destination_schema: &destination_schema,
+            initiated_by: account_id,
         })
         .await
         .unwrap();
@@ -320,7 +328,7 @@ async fn a_ticket_item_gate_without_the_item_is_rejected_and_nothing_is_consumed
         .unwrap();
 
     let store = CharacterStore::new(pool.clone(), source_schema(), Default::default());
-    let character_id = create_character(&pool, &store, source_realm_id).await;
+    let (character_id, account_id) = create_character(&pool, &store, source_realm_id).await;
     // Owns a different item, but not the one the gate requires.
     store
         .grant_item(character_id, "unrelated_item", 3)
@@ -334,6 +342,7 @@ async fn a_ticket_item_gate_without_the_item_is_rejected_and_nothing_is_consumed
             character_id,
             destination_realm_id,
             destination_schema: &destination_schema,
+            initiated_by: account_id,
         })
         .await
         .unwrap_err();
@@ -373,7 +382,7 @@ async fn a_purchase_gate_with_no_verifier_configured_denies_by_default() {
         .unwrap();
 
     let store = CharacterStore::new(pool.clone(), source_schema(), Default::default());
-    let character_id = create_character(&pool, &store, source_realm_id).await;
+    let (character_id, account_id) = create_character(&pool, &store, source_realm_id).await;
 
     let destination_schema = destination_schema();
     let err = executor(pool.clone())
@@ -382,6 +391,7 @@ async fn a_purchase_gate_with_no_verifier_configured_denies_by_default() {
             character_id,
             destination_realm_id,
             destination_schema: &destination_schema,
+            initiated_by: account_id,
         })
         .await
         .unwrap_err();
@@ -419,7 +429,7 @@ async fn a_purchase_gate_succeeds_once_a_verifier_confirms_it() {
         .unwrap();
 
     let store = CharacterStore::new(pool.clone(), source_schema(), Default::default());
-    let character_id = create_character(&pool, &store, source_realm_id).await;
+    let (character_id, account_id) = create_character(&pool, &store, source_realm_id).await;
 
     let destination_schema = destination_schema();
     executor(pool.clone())
@@ -429,6 +439,7 @@ async fn a_purchase_gate_succeeds_once_a_verifier_confirms_it() {
             character_id,
             destination_realm_id,
             destination_schema: &destination_schema,
+            initiated_by: account_id,
         })
         .await
         .unwrap();
@@ -449,7 +460,7 @@ async fn an_unconfigured_gate_defaults_to_open() {
     // Deliberately no `gates.set(...)` call — no row at all for this pair.
 
     let store = CharacterStore::new(pool.clone(), source_schema(), Default::default());
-    let character_id = create_character(&pool, &store, source_realm_id).await;
+    let (character_id, account_id) = create_character(&pool, &store, source_realm_id).await;
 
     let destination_schema = destination_schema();
     executor(pool.clone())
@@ -458,7 +469,116 @@ async fn an_unconfigured_gate_defaults_to_open() {
             character_id,
             destination_realm_id,
             destination_schema: &destination_schema,
+            initiated_by: account_id,
         })
         .await
         .unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_successful_transfer_records_a_success_audit_entry() {
+    let pool = pool().await;
+    let (_realms, source_realm_id, destination_realm_id) = source_and_destination(&pool).await;
+    let store = CharacterStore::new(pool.clone(), source_schema(), Default::default());
+    let (character_id, account_id) = create_character(&pool, &store, source_realm_id).await;
+
+    let destination_schema = destination_schema();
+    executor(pool.clone())
+        .await
+        .transfer(TransferRequest {
+            character_id,
+            destination_realm_id,
+            destination_schema: &destination_schema,
+            initiated_by: account_id,
+        })
+        .await
+        .unwrap();
+
+    let audit = TransferAuditLog::new(pool);
+    let history = audit.history_for_character(character_id).await.unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].character_id, character_id);
+    assert_eq!(history[0].source_realm_id, Some(source_realm_id));
+    assert_eq!(history[0].destination_realm_id, destination_realm_id);
+    assert_eq!(history[0].gate_type.as_deref(), Some("open"));
+    assert_eq!(history[0].initiated_by, account_id);
+    assert_eq!(history[0].outcome, TransferOutcome::Success);
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_failed_transfer_records_a_failure_audit_entry_with_the_reason() {
+    let pool = pool().await;
+    let (_realms, source_realm_id, _destination_realm_id) = source_and_destination(&pool).await;
+    let store = CharacterStore::new(pool.clone(), source_schema(), Default::default());
+    let (character_id, account_id) = create_character(&pool, &store, source_realm_id).await;
+
+    let destination_schema = destination_schema();
+    let nonexistent_destination = common::id::RealmId::new();
+    executor(pool.clone())
+        .await
+        .transfer(TransferRequest {
+            character_id,
+            destination_realm_id: nonexistent_destination,
+            destination_schema: &destination_schema,
+            initiated_by: account_id,
+        })
+        .await
+        .unwrap_err();
+
+    let audit = TransferAuditLog::new(pool);
+    let history = audit.history_for_character(character_id).await.unwrap();
+    assert_eq!(history.len(), 1);
+    // source_realm_id was already known (the character row loaded fine)
+    // even though the attempt failed on the *destination* — a partial,
+    // honest record of what was actually determined.
+    assert_eq!(history[0].source_realm_id, Some(source_realm_id));
+    assert_eq!(history[0].destination_realm_id, nonexistent_destination);
+    match &history[0].outcome {
+        TransferOutcome::Failed { reason } => {
+            assert!(reason.contains("no realm with id"), "{reason}");
+        }
+        other => panic!("expected a Failed outcome, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn history_for_character_only_returns_that_characters_own_attempts() {
+    let pool = pool().await;
+    let (_realms, source_realm_id, destination_realm_id) = source_and_destination(&pool).await;
+    let store = CharacterStore::new(pool.clone(), source_schema(), Default::default());
+    let (character_a, account_a) = create_character(&pool, &store, source_realm_id).await;
+    let (character_b, account_b) = create_character(&pool, &store, source_realm_id).await;
+
+    let destination_schema = destination_schema();
+    executor(pool.clone())
+        .await
+        .transfer(TransferRequest {
+            character_id: character_a,
+            destination_realm_id,
+            destination_schema: &destination_schema,
+            initiated_by: account_a,
+        })
+        .await
+        .unwrap();
+
+    let audit = TransferAuditLog::new(pool);
+    assert_eq!(
+        audit
+            .history_for_character(character_a)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        audit
+            .history_for_character(character_b)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let _ = account_b;
 }
