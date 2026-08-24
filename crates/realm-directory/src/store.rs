@@ -5,12 +5,11 @@
 //!
 //! Phase 1 ran a single implicit realm with no registry at all — this is
 //! the first point a deployment can define more than one. Not wired into
-//! `server`'s combined process yet: that's #50 (dynamic layer
-//! assignment) and #51 (open/bound enforcement)'s job, consuming this
-//! store for real. `open_or_bound` is carried on every realm record from
-//! here on even though enforcement doesn't land until #51 — see this
-//! spec's "The flag" section for why storing it now avoids a schema
-//! change later.
+//! `server`'s combined process yet — that's #136's job, consuming both
+//! this store and #51's `login_policy` for real. `open_or_bound` is
+//! carried on every realm record from here on even though enforcement
+//! (#51) has no caller in `server` yet either — see this spec's "The
+//! flag" section for why storing it now avoids a schema change later.
 
 use common::id::RealmId;
 use common::{Error, Result};

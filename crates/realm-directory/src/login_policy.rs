@@ -7,7 +7,7 @@
 //! still uses one placeholder realm (`placeholder_realm_id`), so there's
 //! nothing to enforce there today. This is the policy engine itself,
 //! real and tested, ready for whenever `server` resolves a connection's
-//! target realm for real (alongside #50).
+//! target realm for real — tracked as #136.
 
 use std::time::Duration;
 

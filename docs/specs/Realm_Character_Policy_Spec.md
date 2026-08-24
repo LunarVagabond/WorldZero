@@ -10,7 +10,7 @@ A character's own row does not duplicate this flag. Whether a given character ca
 
 ### Managing realms today
 
-`realm-directory` isn't wired into `server` yet (that's #50), so there's no in-game or admin-API flow for this — the only way to create/inspect/manage a realm right now is `realm-directory`'s own CLI:
+`realm-directory` isn't wired into `server` yet (that's #136), so there's no in-game or admin-API flow for this — the only way to create/inspect/manage a realm right now is `realm-directory`'s own CLI:
 
 ```sh
 make realm ARGS="create MyRealm open"      # prints the new realm's id
