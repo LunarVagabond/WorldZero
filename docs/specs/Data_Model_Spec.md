@@ -128,6 +128,15 @@ Every stat read/write goes through `character`'s API, validated against the sche
 - **Read, key missing from the stored `stats` blob:** returns the schema's declared `default` — not `null`, not an error. This is what makes adding a new stat key to a live game a zero-migration change (proposal, "Evolving the schema over time"): every existing character implicitly already has the new key, at its default, until it's written.
 - **Read, key not in the declared schema:** rejected the same way an invalid write is — there's nothing sensible to return for a key the game never declared.
 
+## Realm population reporting (#137)
+
+Two independent numbers, both exposed as plain counts — no `low`/`med`/`high` bucketing computed by the core, that's left to whoever displays them:
+
+- **Character census** — `character::CharacterStore::count_for_realm` (`crates/character/src/store.rs`), a plain `COUNT(*)` against `characters.realm_id`. Durable, Postgres-backed.
+- **Live connections** — `realm-directory::RealmPresence` (`crates/realm-directory/src/population.rs`), a Redis sorted set per realm (`realm:<realm_id>:connections`, member = a per-connection id, score = expiry). `connect`/`disconnect` are the write path; re-calling `connect` for the same connection id is also the heartbeat/renewal call. `count` prunes expired members before counting, so a crashed connection (never cleanly disconnected) self-heals out of the count the next time anything asks — same TTL-expiry discipline as `character::CharacterSessionLease` (#21), and a deliberately separate mechanism from it: `character_sessions` only ever holds *open*-realm rows, but a live-connection count needs to work for bound realms too.
+
+`RealmPresence::population` combines both into one `RealmPopulation { character_count, live_connections }` for callers that want both numbers together. Real and tested, not yet wired into `server` (nothing calls `connect`/`disconnect` from a real connection lifecycle yet) — same status as #47/#51/#52, tracked under #136.
+
 ## NPCs and items: same pattern, separate files
 
 The proposal is explicit that this same declared-schema mechanism is the intended answer for NPC and item properties too, not just character stats. Each entity type gets **its own schema file** (`stats.schema.yaml` for characters, and the equivalent — e.g. `npc_stats.schema.yaml`, `item_stats.schema.yaml` — for the others) rather than one shared file covering every entity type. Different entity types genuinely have different stat sets (a sword has no HP), so one shared file would either bloat into an every-entity union or need per-entity-type sections reinventing the same problem. `character` implements the loader/validator for its own file now; `world`'s NPC/item work (later phases) is expected to reuse the identical pattern, not invent a second one.

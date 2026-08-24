@@ -147,6 +147,20 @@ impl CharacterStore {
         Ok(row.map(row_to_character_summary))
     }
 
+    /// Total character count for `realm_id`, regardless of whether any
+    /// of them are currently online — the durable "census" half of
+    /// #137's realm population reporting. Deliberately returns a plain
+    /// count, not a `low`/`med`/`high` bucket: bucketing is a caller/
+    /// display decision (see #137), not something this crate should
+    /// bake in.
+    pub async fn count_for_realm(&self, realm_id: RealmId) -> Result<i64> {
+        sqlx::query_scalar("SELECT COUNT(*) FROM characters WHERE realm_id = $1")
+            .bind(realm_id.as_uuid())
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| Error::wrap("character", "failed to count characters for realm", e))
+    }
+
     /// Persists a character's current simulated position — called on
     /// disconnect (and is safe to call periodically) so a reconnect finds
     /// the character where it actually was, not where it started
@@ -389,6 +403,27 @@ stats:
                 .unwrap(),
             None
         );
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn count_for_realm_only_counts_that_realms_characters() {
+        let (store, account_id, realm_id) = store_with_account().await;
+        assert_eq!(store.count_for_realm(realm_id).await.unwrap(), 0);
+
+        store
+            .create(account_id, "Aria", realm_id, "greenwood-forest")
+            .await
+            .unwrap();
+        assert_eq!(store.count_for_realm(realm_id).await.unwrap(), 1);
+
+        // A second character on a different realm must not be counted
+        // against this one.
+        store
+            .create(account_id, "Bram", RealmId::new(), "greenwood-forest")
+            .await
+            .unwrap();
+        assert_eq!(store.count_for_realm(realm_id).await.unwrap(), 1);
     }
 
     /// Real (Postgres-persisted) `open`/`bound` realm rows, unlike

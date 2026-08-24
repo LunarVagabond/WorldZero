@@ -2780,6 +2780,7 @@ version = "0.1.0"
 dependencies = [
  "character",
  "common",
+ "deadpool-redis",
  "sqlx",
  "tokio",
  "uuid",
