@@ -372,6 +372,7 @@ async fn load_or_create_character(
     Ok(character::CharacterSummary {
         id,
         name: username.to_string(),
+        realm_id: deps.realm_id,
         zone_id: deps.default_zone_id.clone(),
         position: (0.0, 0.0, 0.0),
     })
