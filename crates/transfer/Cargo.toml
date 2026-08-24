@@ -13,7 +13,8 @@ common = { version = "0.1.0", path = "../common" }
 realm-directory = { version = "0.1.0", path = "../realm-directory" }
 serde_json = "1.0.151"
 sqlx = { version = "0.9.0", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls-aws-lc-rs", "uuid", "json"] }
+tracing = "0.1.44"
+uuid = { version = "1.25.0", features = ["v7"] }
 
 [dev-dependencies]
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros"] }
-uuid = "1.25.0"

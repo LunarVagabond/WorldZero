@@ -7,16 +7,19 @@
 //!
 //! Gating (#54, [`crate::gate`]) is enforced inline below, inside the
 //! same transaction as the realm move — see [`TransferExecutor::transfer`].
-//! The audit trail (#55) isn't built yet.
+//! Every attempt, successful or failed, is recorded via the audit trail
+//! (#55, [`crate::audit`]).
 
 use std::sync::Arc;
 
 use character::AttributeSchema;
-use common::id::{CharacterId, RealmId};
+use common::id::{AccountId, CharacterId, RealmId};
 use common::{Error, Result};
 use realm_directory::{OpenOrBound, RealmStore};
 use sqlx::{PgPool, Row};
+use uuid::Uuid;
 
+use crate::audit::{TransferAuditLog, TransferLogEntry, TransferOutcome};
 use crate::gate::{DenyAllPurchaseVerifier, PurchaseVerifier, TransferGate, TransferGateStore};
 
 /// Everything one transfer attempt needs. `destination_schema` is the
@@ -24,17 +27,31 @@ use crate::gate::{DenyAllPurchaseVerifier, PurchaseVerifier, TransferGate, Trans
 /// the destination realm's deployment declares) — this crate has no
 /// opinion on *how* a deployment maps a realm to its schema, the same
 /// "given as an input, not resolved here" shape #51/#52's `LoginPolicy`
-/// already uses for realm resolution.
+/// already uses for realm resolution. `initiated_by` is whoever asked
+/// for this transfer — usually the character's own account, but not
+/// necessarily (an admin acting on a player's behalf); recorded as-is in
+/// the audit trail, never inferred from `character_id`.
 pub struct TransferRequest<'a> {
     pub character_id: CharacterId,
     pub destination_realm_id: RealmId,
     pub destination_schema: &'a AttributeSchema,
+    pub initiated_by: AccountId,
+}
+
+/// What [`TransferExecutor::transfer`] has learned so far, threaded
+/// through so a failure partway can still be audited with whatever was
+/// actually determined before it failed — not a best-guess backfill.
+#[derive(Default)]
+struct AuditContext {
+    source_realm_id: Option<RealmId>,
+    gate_type: Option<&'static str>,
 }
 
 pub struct TransferExecutor {
     pool: PgPool,
     realms: RealmStore,
     gates: TransferGateStore,
+    audit: TransferAuditLog,
     purchase_verifier: Arc<dyn PurchaseVerifier>,
 }
 
@@ -43,11 +60,17 @@ impl TransferExecutor {
     /// until [`Self::with_purchase_verifier`] swaps in a real one — see
     /// that type's own doc comment for why that's the safe default
     /// rather than silently letting purchase-gated transfers through.
-    pub fn new(pool: PgPool, realms: RealmStore, gates: TransferGateStore) -> Self {
+    pub fn new(
+        pool: PgPool,
+        realms: RealmStore,
+        gates: TransferGateStore,
+        audit: TransferAuditLog,
+    ) -> Self {
         Self {
             pool,
             realms,
             gates,
+            audit,
             purchase_verifier: Arc::new(DenyAllPurchaseVerifier),
         }
     }
@@ -94,7 +117,48 @@ impl TransferExecutor {
     ///   transaction, so a transfer that fails *after* consuming the
     ///   item is impossible — the whole point of doing it here rather
     ///   than as a separate step before the transaction opens.
+    ///
+    /// Every attempt is recorded in the audit trail (#55) regardless of
+    /// outcome — a success's record is written inside the same
+    /// transaction as the realm-move (so "committed" and "audited" are
+    /// one atomic fact); a failure's record is a best-effort standalone
+    /// write after the fact, since by then the transaction that would
+    /// have carried it has already rolled back or never opened. A
+    /// failure to write the audit record itself never replaces or masks
+    /// the real transfer error returned to the caller.
     pub async fn transfer(&self, request: TransferRequest<'_>) -> Result<()> {
+        let mut ctx = AuditContext::default();
+        let result = self.transfer_inner(&request, &mut ctx).await;
+
+        if let Err(e) = &result {
+            let entry = TransferLogEntry {
+                id: Uuid::now_v7(),
+                character_id: request.character_id,
+                source_realm_id: ctx.source_realm_id,
+                destination_realm_id: request.destination_realm_id,
+                gate_type: ctx.gate_type,
+                initiated_by: request.initiated_by,
+                outcome: &TransferOutcome::Failed {
+                    reason: e.to_string(),
+                },
+            };
+            if let Err(audit_err) = self.audit.record(&self.pool, &entry).await {
+                tracing::error!(
+                    error = %audit_err,
+                    transfer_error = %e,
+                    "failed to write transfer audit record for a failed transfer"
+                );
+            }
+        }
+
+        result
+    }
+
+    async fn transfer_inner(
+        &self,
+        request: &TransferRequest<'_>,
+        ctx: &mut AuditContext,
+    ) -> Result<()> {
         let mut tx = self
             .pool
             .begin()
@@ -113,6 +177,7 @@ impl TransferExecutor {
                 )
             })?;
         let source_realm_id = RealmId::from_uuid(row.get("realm_id"));
+        ctx.source_realm_id = Some(source_realm_id);
         let stats: serde_json::Value = row.get("stats");
 
         let source_realm = self.realms.get(source_realm_id).await?.ok_or_else(|| {
@@ -175,11 +240,13 @@ impl TransferExecutor {
         // a transfer that fails after consuming the item would leave
         // the item gone with nothing to show for it, violating #54's
         // "does NOT consume it if the transfer fails" criterion.
-        match self
+        let gate = self
             .gates
             .get(source_realm_id, request.destination_realm_id)
-            .await?
-        {
+            .await?;
+        ctx.gate_type = Some(gate.as_db_type());
+
+        match gate {
             TransferGate::Open => {}
             TransferGate::TicketItem { item_type } => {
                 let current: Option<i64> = sqlx::query_scalar(
@@ -250,6 +317,21 @@ impl TransferExecutor {
         .execute(&mut *tx)
         .await
         .map_err(|e| Error::wrap("transfer", "failed to update character realm", e))?;
+
+        self.audit
+            .record(
+                &mut *tx,
+                &TransferLogEntry {
+                    id: Uuid::now_v7(),
+                    character_id: request.character_id,
+                    source_realm_id: ctx.source_realm_id,
+                    destination_realm_id: request.destination_realm_id,
+                    gate_type: ctx.gate_type,
+                    initiated_by: request.initiated_by,
+                    outcome: &TransferOutcome::Success,
+                },
+            )
+            .await?;
 
         tx.commit()
             .await
