@@ -1,0 +1,105 @@
+// Wire schema for `server::session_protocol` — `message_type` 200
+// (docs/specs/Networking_Spec.md's catalog). Source of truth for this
+// message type, decided in #109, implemented in #123 — see
+// `crates/auth/proto/auth.proto`'s header comment for the same note on
+// why `server::session_protocol`'s Rust enum wraps this rather than being
+// generated from it directly.
+//
+// Every id (`entity_id`, `zone_id`) crosses this boundary as a plain
+// `string`, same "opaque id" discipline as `auth.proto`/`chat.proto` —
+// `zone_id` in particular is a content-manifest-declared string, never a
+// UUID, so this was already the natural representation.
+
+syntax = "proto3";
+
+package worldzero.session;
+
+message ClientMessage {
+  oneof kind {
+    Move move = 1;
+  }
+}
+
+// Requests moving this connection's own entity to (x, y) — queued for
+// the next simulation tick, never applied immediately
+// (`world::Zone::request_move`).
+message Move {
+  double x = 1;
+  double y = 2;
+}
+
+message RosterEntry {
+  string entity_id = 1;
+  string entity_type = 2;
+  double x = 3;
+  double y = 4;
+}
+
+message ServerMessage {
+  oneof kind {
+    Joined joined = 1;
+    EntitySpawned entity_spawned = 2;
+    EntityDespawned entity_despawned = 3;
+    ZoneChanged zone_changed = 4;
+    Moved moved = 5;
+    Rejected rejected = 6;
+    Error error = 7;
+    PluginMessage plugin_message = 8;
+  }
+}
+
+// Sent once, right after this connection's own entity is spawned into
+// the zone — see `server::session_protocol::ServerMessage::Joined`'s doc
+// comment for why this is one message rather than several.
+message Joined {
+  string entity_id = 1;
+  double x = 2;
+  double y = 3;
+  repeated RosterEntry roster = 4;
+}
+
+// An entity (never this connection's own) newly exists in the zone.
+message EntitySpawned {
+  string entity_id = 1;
+  string entity_type = 2;
+  double x = 3;
+  double y = 4;
+}
+
+message EntityDespawned {
+  string entity_id = 1;
+}
+
+// Sent to a connection whose entity just crossed a manifest-declared
+// zone link (#45) — same shape as Joined, but for an in-place zone
+// handoff.
+message ZoneChanged {
+  string zone_id = 1;
+  string entity_id = 2;
+  double x = 3;
+  double y = 4;
+  repeated RosterEntry roster = 5;
+}
+
+// An accepted movement update, broadcast to every connected client.
+message Moved {
+  string entity_id = 1;
+  double x = 2;
+  double y = 3;
+}
+
+// A movement update this connection itself requested was rejected — only
+// sent back to the mover, never broadcast.
+message Rejected {
+  string reason = 1;
+}
+
+message Error {
+  string message = 1;
+}
+
+// A message a plugin's send-message host call addressed to this
+// connection's entity (docs/specs/Plugin_API.md).
+message PluginMessage {
+  string body = 1;
+}

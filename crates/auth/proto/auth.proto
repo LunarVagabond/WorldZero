@@ -1,0 +1,49 @@
+// Wire schema for `auth::gateway_protocol` — `message_type` 1
+// (docs/specs/Networking_Spec.md's catalog). Source of truth for this
+// message type, decided in #109, implemented in #123: `auth::gateway_protocol`
+// wraps the generated Rust types from this file in a more ergonomic
+// hand-written enum, but this `.proto` (not that Rust enum) is what a
+// client integrator (Unity/UE5/Godot) generates against.
+//
+// Every id (`account_id`) crosses this boundary as a plain `string` (its
+// UUID text form), not a typed field — same "opaque id, no internal
+// structure exposed" discipline `docs/specs/Plugin_API.md` documents for
+// the plugin ABI's ids.
+
+syntax = "proto3";
+
+package worldzero.auth;
+
+message ClientMessage {
+  oneof kind {
+    Register register = 1;
+    Login login = 2;
+  }
+}
+
+message Register {
+  string username = 1;
+  string password = 2;
+}
+
+message Login {
+  string username = 1;
+  string password = 2;
+}
+
+message ServerMessage {
+  oneof kind {
+    Authenticated authenticated = 1;
+    Error error = 2;
+  }
+}
+
+message Authenticated {
+  string account_id = 1;
+  string username = 2;
+  string session_token = 3;
+}
+
+message Error {
+  string message = 1;
+}

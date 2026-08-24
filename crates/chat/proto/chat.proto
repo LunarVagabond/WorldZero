@@ -1,0 +1,63 @@
+// Wire schema for `chat::gateway_protocol` — `message_type` 100
+// (docs/specs/Networking_Spec.md's catalog). Source of truth for this
+// message type, decided in #109, implemented in #123 — see
+// `crates/auth/proto/auth.proto`'s header comment for the same note on
+// why `chat::gateway_protocol`'s Rust enum wraps this rather than being
+// generated from it directly.
+//
+// `channel_id` crosses this boundary as a plain `string` (its UUID text
+// form), same "opaque id" discipline as `auth.proto`.
+
+syntax = "proto3";
+
+package worldzero.chat;
+
+message ClientMessage {
+  oneof kind {
+    Join join = 1;
+    Leave leave = 2;
+    Send send = 3;
+  }
+}
+
+message Join {
+  string channel = 1;
+}
+
+message Leave {
+  string channel = 1;
+}
+
+message Send {
+  string channel_id = 1;
+  string body = 2;
+}
+
+message ServerMessage {
+  oneof kind {
+    Joined joined = 1;
+    Left left = 2;
+    Chat chat = 3;
+    Error error = 4;
+  }
+}
+
+message Joined {
+  string channel_id = 1;
+  string channel = 2;
+}
+
+message Left {
+  string channel = 1;
+}
+
+message Chat {
+  string channel_id = 1;
+  string channel = 2;
+  string sender = 3;
+  string body = 4;
+}
+
+message Error {
+  string message = 1;
+}
