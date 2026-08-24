@@ -170,6 +170,7 @@ pub fn spawn_world_actor(
     mut plugin: Option<PluginRuntime>,
     character_store: std::sync::Arc<CharacterStore>,
     entity_characters: EntityCharacters,
+    plugin_state_store: std::sync::Arc<crate::plugin_state::PluginStateStore>,
     zone_id: String,
     metrics: Option<std::sync::Arc<Metrics>>,
     on_tick: impl Fn(&Zone, Vec<(EntityId, MovementOutcome)>) + Send + 'static,
@@ -229,9 +230,11 @@ pub fn spawn_world_actor(
                         let item_grants = runtime.drain_pending_item_grants();
                         let item_removals = runtime.drain_pending_item_removals();
                         let currency_deltas = runtime.drain_pending_currency_deltas();
+                        let state_writes = runtime.drain_pending_state_writes();
                         let acquired = apply_plugin_pending_effects(
                             &mut zone, moves, stat_deltas, item_grants, item_removals,
-                            currency_deltas, &character_store, &entity_characters,
+                            currency_deltas, state_writes, &character_store, &entity_characters,
+                            &plugin_state_store,
                         ).await;
                         for (entity_id, item_type, new_quantity) in acquired {
                             if let Err(e) = runtime.plugin.on_item_acquire(&entity_id, &item_type, new_quantity) {
@@ -281,9 +284,11 @@ pub fn spawn_world_actor(
                             let item_grants = runtime.drain_pending_item_grants();
                             let item_removals = runtime.drain_pending_item_removals();
                             let currency_deltas = runtime.drain_pending_currency_deltas();
+                            let state_writes = runtime.drain_pending_state_writes();
                             let acquired = apply_plugin_pending_effects(
                                 &mut zone, moves, stat_deltas, item_grants, item_removals,
-                                currency_deltas, &character_store, &entity_characters,
+                                currency_deltas, state_writes, &character_store, &entity_characters,
+                                &plugin_state_store,
                             ).await;
                             for (entity_id, item_type, new_quantity) in acquired {
                                 if let Err(e) = runtime.plugin.on_item_acquire(&entity_id, &item_type, new_quantity) {
@@ -309,9 +314,11 @@ pub fn spawn_world_actor(
                             let item_grants = runtime.drain_pending_item_grants();
                             let item_removals = runtime.drain_pending_item_removals();
                             let currency_deltas = runtime.drain_pending_currency_deltas();
+                            let state_writes = runtime.drain_pending_state_writes();
                             let acquired = apply_plugin_pending_effects(
                                 &mut zone, moves, stat_deltas, item_grants, item_removals,
-                                currency_deltas, &character_store, &entity_characters,
+                                currency_deltas, state_writes, &character_store, &entity_characters,
+                                &plugin_state_store,
                             ).await;
                             for (entity_id, item_type, new_quantity) in acquired {
                                 if let Err(e) = runtime.plugin.on_item_acquire(&entity_id, &item_type, new_quantity) {
@@ -370,8 +377,10 @@ async fn apply_plugin_pending_effects(
     pending_item_grants: Vec<(String, String, i64)>,
     pending_item_removals: Vec<(String, String, i64)>,
     pending_currency_deltas: Vec<(String, i64)>,
+    pending_state_writes: Vec<(plugin_host::PluginStateScope, String, Vec<u8>)>,
     character_store: &CharacterStore,
     entity_characters: &EntityCharacters,
+    plugin_state_store: &crate::plugin_state::PluginStateStore,
 ) -> Vec<(String, String, i64)> {
     for (entity_id, x, y) in pending_moves {
         match entity_id.parse::<EntityId>() {
@@ -453,6 +462,42 @@ async fn apply_plugin_pending_effects(
         };
         if let Err(e) = character_store.modify_currency(character_id, delta).await {
             tracing::warn!(entity_id, error = %e, "plugin's modify-currency failed");
+        }
+    }
+
+    for (scope, key, value) in pending_state_writes {
+        let result = match &scope {
+            plugin_host::PluginStateScope::Character(entity_id) => {
+                match resolve_character(entity_characters, entity_id) {
+                    Some(character_id) => {
+                        plugin_state_store
+                            .set_character_state(character_id, &key, &value)
+                            .await
+                    }
+                    None => {
+                        tracing::warn!(
+                            entity_id,
+                            key,
+                            "plugin requested a character-state write for an invalid \
+                             entity id, an NPC, or an unknown entity"
+                        );
+                        continue;
+                    }
+                }
+            }
+            plugin_host::PluginStateScope::Zone(zone_id) => {
+                plugin_state_store
+                    .set_zone_state(zone_id, &key, &value)
+                    .await
+            }
+            plugin_host::PluginStateScope::Entity(_) => {
+                // Never queued (see `PluginCallbacks::plugin_state_set`)
+                // — nothing to persist for transient entity scope.
+                continue;
+            }
+        };
+        if let Err(e) = result {
+            tracing::warn!(key, error = %e, "plugin's plugin-state-set failed to persist");
         }
     }
 

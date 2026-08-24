@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use plugin_host::{HostCallbacks, PluginHost, PluginManifest};
+use plugin_host::{HostCallbacks, PluginHost, PluginManifest, PluginStateScope};
 
 fn fixture_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/test-plugin")
@@ -46,6 +46,19 @@ struct RecordingCallbacks {
     item_removals: Arc<Mutex<Vec<(String, String, i64)>>>,
     currency_deltas: Arc<Mutex<Vec<(String, i64)>>>,
     roles: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    state: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+}
+
+/// A plain string discriminating [`PluginStateScope`] variants for this
+/// fake's own in-memory map — real implementations don't need this
+/// (they key their character/zone/entity caches separately), but a
+/// single flat map is all a test fake needs.
+fn state_cache_key(scope: &PluginStateScope, key: &str) -> String {
+    match scope {
+        PluginStateScope::Character(id) => format!("character:{id}:{key}"),
+        PluginStateScope::Entity(id) => format!("entity:{id}:{key}"),
+        PluginStateScope::Zone(id) => format!("zone:{id}:{key}"),
+    }
 }
 
 impl HostCallbacks for RecordingCallbacks {
@@ -130,6 +143,32 @@ impl HostCallbacks for RecordingCallbacks {
             .get(entity_id)
             .cloned()
             .unwrap_or_default())
+    }
+
+    fn plugin_state_get(
+        &mut self,
+        scope: PluginStateScope,
+        key: &str,
+    ) -> Result<Option<Vec<u8>>, String> {
+        Ok(self
+            .state
+            .lock()
+            .unwrap()
+            .get(&state_cache_key(&scope, key))
+            .cloned())
+    }
+
+    fn plugin_state_set(
+        &mut self,
+        scope: PluginStateScope,
+        key: &str,
+        value: Vec<u8>,
+    ) -> Result<(), String> {
+        self.state
+            .lock()
+            .unwrap()
+            .insert(state_cache_key(&scope, key), value);
+        Ok(())
     }
 }
 
@@ -245,6 +284,41 @@ fn a_plugin_grants_removes_items_and_modifies_currency() {
         callbacks.currency_deltas.lock().unwrap().as_slice(),
         [("actor-1".to_string(), 5)]
     );
+}
+
+#[test]
+#[ignore]
+fn a_plugin_remembers_and_recalls_state_through_the_real_sandbox_boundary() {
+    let wasm_path = fixture_dir().join("target/wasm32-wasip2/release/test_plugin.wasm");
+    let callbacks = RecordingCallbacks::default();
+
+    let host = PluginHost::new();
+    let mut plugin = host
+        .load(&manifest(), &wasm_path, Box::new(callbacks.clone()))
+        .expect("failed to load the well-behaved test plugin");
+
+    // Nothing remembered yet.
+    plugin
+        .on_chat_command("recall", "", "actor-1")
+        .expect("on_chat_command should succeed");
+    {
+        let messages = callbacks.messages.lock().unwrap();
+        assert_eq!(messages.len(), 1);
+        assert!(
+            messages[0].1.contains("<nothing remembered>"),
+            "{messages:?}"
+        );
+    }
+
+    plugin
+        .on_chat_command("remember", "the sky is blue", "actor-1")
+        .expect("on_chat_command should succeed");
+    plugin
+        .on_chat_command("recall", "", "actor-1")
+        .expect("on_chat_command should succeed");
+    let messages = callbacks.messages.lock().unwrap();
+    assert_eq!(messages.len(), 2);
+    assert!(messages[1].1.contains("the sky is blue"), "{messages:?}");
 }
 
 #[test]

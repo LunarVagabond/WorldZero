@@ -90,6 +90,12 @@ pub struct SessionDeps {
     /// means metrics are disabled and `worldzero_connection_count` is
     /// never touched, not just excluded from what gets scraped (#48).
     pub metrics: Option<Arc<common::metrics::Metrics>>,
+    /// Backs character-scope `plugin-state-get`/`plugin-state-set`
+    /// (#149) — hydrated into `plugin_state_cache` at join time, same
+    /// "populate a cache at join, never a live DB read from inside a
+    /// sandboxed call" shape `entity_roles` already uses.
+    pub plugin_state_store: Arc<crate::plugin_state::PluginStateStore>,
+    pub plugin_state_cache: crate::plugin_state::PluginStateCache,
 }
 
 pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Result<()> {
@@ -170,6 +176,27 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
         .insert(entity_id, character_id);
     let roles = deps.role_store.roles_for(account_id).await?;
     deps.entity_roles.lock().unwrap().insert(entity_id, roles);
+
+    // Character-scope plugin state (#149), hydrated once here — before
+    // this entity can possibly receive a `plugin-state-get` call — same
+    // shape as `entity_roles` just above.
+    let plugin_state = deps
+        .plugin_state_store
+        .character_state(character_id)
+        .await?;
+    if !plugin_state.is_empty() {
+        let mut cache = deps.plugin_state_cache.lock().unwrap();
+        for (key, value) in plugin_state {
+            cache.insert(
+                crate::plugin_state::cache_key(
+                    &plugin_host::PluginStateScope::Character(entity_id.to_string()),
+                    &key,
+                ),
+                value,
+            );
+        }
+    }
+
     if let Some(metrics) = &deps.metrics {
         metrics.connection_count.inc();
     }
@@ -336,6 +363,16 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
     zone.sessions.lock().unwrap().remove(&entity_id);
     deps.entity_characters.lock().unwrap().remove(&entity_id);
     deps.entity_roles.lock().unwrap().remove(&entity_id);
+    // Character-scope (and any leftover entity-scope) cache entries for
+    // this connection — keeps the shared process-wide cache from growing
+    // unbounded across reconnects (#149). Zone-scope entries are never
+    // touched here; they live for the zone's/process's lifetime.
+    let character_prefix = format!("character:{entity_id}:");
+    let entity_prefix = format!("entity:{entity_id}:");
+    deps.plugin_state_cache
+        .lock()
+        .unwrap()
+        .retain(|k, _| !k.starts_with(&character_prefix) && !k.starts_with(&entity_prefix));
     broadcast(
         &zone.sessions,
         ServerMessage::EntityDespawned {

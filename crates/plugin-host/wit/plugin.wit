@@ -99,6 +99,36 @@ interface host {
     /// resolves for a connected player entity (an NPC entity id, or one
     /// no longer connected, is rejected).
     caller-role: func(entity-id: string) -> result<list<string>, string>;
+
+    /// Which "bucket" a plugin-state key lives in, and which id it's
+    /// scoped to (docs/PROPOSAL.md's "Plugin-Scoped Data Store", #149).
+    /// `character`/`zone` are durable (Postgres); `entity` is transient
+    /// — in-memory only, does not survive a restart. The core never
+    /// looks inside a stored value; it's an opaque blob to the host,
+    /// meaning entirely plugin-owned.
+    variant plugin-state-scope {
+        character(string),
+        entity(string),
+        zone(string),
+    }
+
+    /// Reads a previously-stored blob for `scope`/`key` — `none` if
+    /// nothing has been stored yet, not an error. Answered from an
+    /// in-memory cache (hydrated at the right lifecycle point per scope
+    /// — character state at session join, zone state at zone-actor
+    /// startup), never a live DB read from inside this sandboxed call —
+    /// same "no synchronous DB query from inside a host call" constraint
+    /// `caller-role` documents above.
+    plugin-state-get: func(scope: plugin-state-scope, key: string) -> result<option<list<u8>>, string>;
+
+    /// Stores a blob for `scope`/`key`, overwriting whatever was there.
+    /// Applied to the in-memory cache immediately (a `plugin-state-get`
+    /// right after this call sees it in the same session), and for the
+    /// two durable scopes, queued for the next tick's drain — same
+    /// "queued, not synchronously confirmed" shape as
+    /// `apply-stat-delta`/`grant-item`. `entity` scope has nothing to
+    /// queue — it was never going to be persisted.
+    plugin-state-set: func(scope: plugin-state-scope, key: string, value: list<u8>) -> result<_, string>;
 }
 
 /// What the host calls into the plugin for — a plugin only receives the
