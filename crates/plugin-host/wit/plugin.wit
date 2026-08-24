@@ -5,15 +5,16 @@
 // (split from #57) added combat, NPC route/patrol, and chat-command
 // hooks. #57 added inventory/economy. #124 adds `caller-role`, the
 // account-roles decision (#114) needed to gate dev/admin-only
-// plugin-declared chat commands — see docs/specs/Plugin_API.md, "Beyond
-// this v0 slice" for what's still not here — player-session, per-plugin
-// optional hooks, gated capability groups. A WIT "world" is the actual
-// versioning mechanism (docs/PROPOSAL.md, "Interface Technology"): a
-// breaking change bumps the package version below and/or lands as a new
-// world, rather than silently changing what `plugin` means underneath
-// existing compiled plugins.
+// plugin-declared chat commands. #155 adds `on-player-join-zone`/
+// `on-player-leave-zone` (docs/PROPOSAL.md's "Player session" hook
+// group) — see docs/specs/Plugin_API.md, "Beyond this v0 slice" for what
+// still isn't here — per-plugin optional hooks, gated capability groups.
+// A WIT "world" is the actual versioning mechanism (docs/PROPOSAL.md,
+// "Interface Technology"): a breaking change bumps the package version
+// below and/or lands as a new world, rather than silently changing what
+// `plugin` means underneath existing compiled plugins.
 
-package worldzero:plugin@0.5.0;
+package worldzero:plugin@0.6.0;
 
 /// What the host exposes for a plugin to call out to — nothing crosses
 /// this boundary that isn't listed here (docs/PROPOSAL.md, "Plugin
@@ -148,6 +149,21 @@ interface hooks {
     /// content::manifest::SpawnTable's `entity_type` field for NPCs
     /// (e.g. "npc.wolf"), or is empty for a player entity.
     on-entity-spawn: func(entity-id: string, entity-type: string);
+
+    /// Fired once a player's connection has fully joined a zone — after
+    /// roster delivery, so a `send-message` call made from inside this
+    /// hook reaches a client that's actually ready to receive it
+    /// (docs/PROPOSAL.md's "Player session" hook group,
+    /// `on_player_join_zone`). Fires for every zone a player is ever in,
+    /// regardless of which zone(s) the loaded plugin is itself attached
+    /// to (#45's single-plugin-single-zone scope doesn't restrict which
+    /// events reach it) — a zone-service with no plugin configured never
+    /// calls this at all, it isn't queued or lost.
+    on-player-join-zone: func(entity-id: string);
+
+    /// Fired on a player's clean disconnect — the counterpart to
+    /// `on-player-join-zone` (`on_player_leave_zone`), same entity id.
+    on-player-leave-zone: func(entity-id: string);
 
     /// Fired when a player's entity enters a trigger volume whose
     /// `event` (content::manifest::Trigger) names an interact-style

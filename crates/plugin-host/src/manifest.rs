@@ -22,7 +22,7 @@ use serde::Deserialize;
 /// (`wit/plugin.wit`) — a plugin manifest declaring a different
 /// `host_api_version` is refused at load time rather than instantiated
 /// against an interface it didn't actually target.
-pub const HOST_API_VERSION: &str = "0.5.0";
+pub const HOST_API_VERSION: &str = "0.6.0";
 
 /// `message_type` values below this are core-reserved (auth, chat, world
 /// — see docs/specs/Networking_Spec.md's catalog); a plugin declaring one
@@ -205,7 +205,7 @@ capabilities = ["economy", "combat"]
             r#"
 [plugin]
 name = "example-plugin"
-host_api_version = "0.5.0"
+host_api_version = "0.6.0"
 "#,
         )
         .unwrap();
@@ -232,7 +232,7 @@ host_api_version = "99.0.0"
             r#"
 [plugin]
 name = "example-plugin"
-host_api_version = "0.5.0"
+host_api_version = "0.6.0"
 message_types = [1000, 1001]
 "#,
         )
@@ -248,7 +248,7 @@ message_types = [1000, 1001]
             r#"
 [plugin]
 name = "example-plugin"
-host_api_version = "0.5.0"
+host_api_version = "0.6.0"
 message_types = [200]
 "#,
         )
@@ -264,7 +264,7 @@ message_types = [200]
             r#"
 [plugin]
 name = "example-plugin"
-host_api_version = "0.5.0"
+host_api_version = "0.6.0"
 message_types = [1000, 1000]
 "#,
         )
@@ -280,7 +280,7 @@ message_types = [1000, 1000]
             r#"
 [plugin]
 name = "example-plugin"
-host_api_version = "0.5.0"
+host_api_version = "0.6.0"
 chat_commands = ["roll", "whisper"]
 "#,
         )
@@ -296,7 +296,7 @@ chat_commands = ["roll", "whisper"]
             r#"
 [plugin]
 name = "example-plugin"
-host_api_version = "0.5.0"
+host_api_version = "0.6.0"
 chat_commands = [""]
 "#,
         )
@@ -312,7 +312,7 @@ chat_commands = [""]
             r#"
 [plugin]
 name = "example-plugin"
-host_api_version = "0.5.0"
+host_api_version = "0.6.0"
 chat_commands = ["/roll"]
 "#,
         )
@@ -328,7 +328,7 @@ chat_commands = ["/roll"]
             r#"
 [plugin]
 name = "example-plugin"
-host_api_version = "0.5.0"
+host_api_version = "0.6.0"
 chat_commands = ["roll", "roll"]
 "#,
         )

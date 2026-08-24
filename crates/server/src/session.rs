@@ -247,6 +247,11 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
         },
     );
 
+    // After roster delivery, so a plugin's own `send-message` call made
+    // from inside `on-player-join-zone` reaches a client that's actually
+    // ready to receive it (#155).
+    zone.world.dispatch_player_join(entity_id);
+
     loop {
         tokio::select! {
             maybe_frame = stream.next() => {
@@ -357,6 +362,12 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
     if let Some(metrics) = &deps.metrics {
         metrics.connection_count.dec();
     }
+
+    // Dispatched before `entity_characters`/`entity_roles` are cleared
+    // below, so a plugin's `on-player-leave-zone` handler can still
+    // resolve this entity's character if it makes its own host-function
+    // calls in response (#155).
+    zone.world.dispatch_player_leave(entity_id).await;
 
     let final_position = zone.world.position_of(entity_id).await;
     zone.world.despawn(entity_id);

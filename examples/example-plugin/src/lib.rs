@@ -34,6 +34,19 @@ impl Guest for Plugin {
 
     fn on_entity_spawn(_entity_id: String, _entity_type: String) {}
 
+    // Live: fires once this connection has fully joined the zone (#155).
+    fn on_player_join_zone(entity_id: String) {
+        let _ = worldzero::plugin::host::send_message(
+            &entity_id,
+            "the wolves catch your scent as you arrive",
+        );
+    }
+
+    // Live: fires on clean disconnect (#155).
+    fn on_player_leave_zone(entity_id: String) {
+        let _ = worldzero::plugin::host::send_message(&entity_id, "the wolves watch you go");
+    }
+
     fn on_interact(trigger_id: String, actor_entity_id: String) {
         let _ = worldzero::plugin::host::send_message(
             &actor_entity_id,

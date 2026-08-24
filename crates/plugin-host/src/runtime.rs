@@ -345,6 +345,34 @@ impl LoadedPlugin {
             .map_err(|e| Error::new("plugin-host", format!("on_entity_spawn hook failed: {e:#}")))
     }
 
+    /// Live: `server::session` calls this once a connection's character
+    /// is fully spawned into a zone, after roster delivery (#155).
+    pub fn on_player_join_zone(&mut self, entity_id: &str) -> Result<()> {
+        self.bindings
+            .worldzero_plugin_hooks()
+            .call_on_player_join_zone(&mut self.store, entity_id)
+            .map_err(|e| {
+                Error::new(
+                    "plugin-host",
+                    format!("on_player_join_zone hook failed: {e:#}"),
+                )
+            })
+    }
+
+    /// Live: `server::session` calls this on a connection's clean
+    /// disconnect (#155).
+    pub fn on_player_leave_zone(&mut self, entity_id: &str) -> Result<()> {
+        self.bindings
+            .worldzero_plugin_hooks()
+            .call_on_player_leave_zone(&mut self.store, entity_id)
+            .map_err(|e| {
+                Error::new(
+                    "plugin-host",
+                    format!("on_player_leave_zone hook failed: {e:#}"),
+                )
+            })
+    }
+
     pub fn on_interact(&mut self, trigger_id: &str, actor_entity_id: &str) -> Result<()> {
         self.bindings
             .worldzero_plugin_hooks()

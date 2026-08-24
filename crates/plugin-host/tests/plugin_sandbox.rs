@@ -29,7 +29,7 @@ fn manifest() -> PluginManifest {
         r#"
 [plugin]
 name = "test-plugin"
-host_api_version = "0.5.0"
+host_api_version = "0.6.0"
 message_types = [1000]
 "#,
     )
@@ -365,6 +365,40 @@ fn a_plugin_acquires_an_item() {
     assert_eq!(messages[0].0, "actor-1");
     assert!(messages[0].1.contains("torch"));
     assert!(messages[0].1.contains('3'));
+}
+
+#[test]
+#[ignore]
+fn a_plugin_greets_on_join_and_applies_a_farewell_bonus_on_leave() {
+    let wasm_path = fixture_dir().join("target/wasm32-wasip2/release/test_plugin.wasm");
+    let callbacks = RecordingCallbacks::default();
+
+    let host = PluginHost::new();
+    let mut plugin = host
+        .load(&manifest(), &wasm_path, Box::new(callbacks.clone()))
+        .expect("failed to load the well-behaved test plugin");
+
+    plugin
+        .on_player_join_zone("actor-1")
+        .expect("on_player_join_zone should succeed");
+    {
+        let messages = callbacks.messages.lock().unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].0, "actor-1");
+        assert!(messages[0].1.contains("welcome"), "{:?}", messages[0]);
+    }
+
+    plugin
+        .on_player_leave_zone("actor-1")
+        .expect("on_player_leave_zone should succeed");
+    assert_eq!(
+        callbacks.stat_deltas.lock().unwrap().as_slice(),
+        [(
+            "actor-1".to_string(),
+            "reputation.ironclad_guild".to_string(),
+            1
+        )]
+    );
 }
 
 #[test]
