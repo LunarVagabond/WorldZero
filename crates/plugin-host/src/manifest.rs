@@ -3,15 +3,14 @@
 //! Declaration"). Read and checked *before* a plugin is instantiated
 //! (#37's acceptance criteria), not after.
 //!
-//! The full manifest story in the proposal — per-plugin optional hooks,
-//! gated host-function capability groups (`economy`, `combat`, ...) — is
-//! richer than this v0 slice needs: the fixed `plugin` WIT world (#38)
-//! has exactly four hooks and every plugin must export all of them (a
-//! WIT world's exports aren't individually optional), and the v0 `host`
-//! interface has only two ungated functions, no capability groups yet.
-//! `capabilities` is still parsed and carried here so a real capability
-//! system has a stable place to land later without another manifest
-//! format change — just not enforced against anything yet.
+//! `capabilities` (#153) is real enforcement now, not just a parsed
+//! field — see `KNOWN_CAPABILITIES` below for the defined set and
+//! `runtime::CapabilityGatedCallbacks` for how a declared capability
+//! actually gates the host functions it covers. Per-plugin optional
+//! hooks (the other half of the proposal's richer manifest story) are
+//! still not built — the fixed `plugin` WIT world (#38) has every plugin
+//! export all fifteen hooks unconditionally (a WIT world's exports
+//! aren't individually optional in v0).
 
 use std::path::Path;
 
@@ -29,6 +28,37 @@ pub const HOST_API_VERSION: &str = "0.7.0";
 /// below the floor is refused at load time (#95).
 pub const PLUGIN_MESSAGE_TYPE_FLOOR: u16 = 1000;
 
+/// Grants `spawn-npc` (#153) — the ticket's own worked example names
+/// this exact grouping, so it's kept literally rather than re-derived.
+pub const CAPABILITY_SPAWNING: &str = "spawning";
+/// Grants `move-entity`.
+pub const CAPABILITY_MOVEMENT: &str = "movement";
+/// Grants `apply-stat-delta`/`report-death`/`report-respawn` — grouped
+/// together since all three exist for the same combat-outcome purpose
+/// (docs/PROPOSAL.md's "Combat" hook group).
+pub const CAPABILITY_COMBAT: &str = "combat";
+/// Grants `grant-item`/`remove-item`/`modify-currency`.
+pub const CAPABILITY_ECONOMY: &str = "economy";
+/// Grants `send-message` — kept as its own capability, not folded into
+/// "ungated," because it lets a plugin message *any* connected entity by
+/// id, not just the one a hook call was actually about (docs/PROPOSAL.md
+/// lists "Messaging" as its own v0 host-function group, separate from
+/// entity control, for the same reason).
+pub const CAPABILITY_MESSAGING: &str = "messaging";
+
+/// Every capability name this build recognizes — a manifest declaring
+/// anything outside this set is refused at load time (`check_capabilities`
+/// below), the same "fail loudly on a plugin-authoring mistake" discipline
+/// `check_message_types`/`check_chat_commands` already apply: a typo'd
+/// capability name should never silently grant nothing.
+pub const KNOWN_CAPABILITIES: &[&str] = &[
+    CAPABILITY_SPAWNING,
+    CAPABILITY_MOVEMENT,
+    CAPABILITY_COMBAT,
+    CAPABILITY_ECONOMY,
+    CAPABILITY_MESSAGING,
+];
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct PluginManifest {
     pub plugin: PluginDeclaration,
@@ -38,7 +68,15 @@ pub struct PluginManifest {
 pub struct PluginDeclaration {
     pub name: String,
     pub host_api_version: String,
-    /// Declared, not yet enforced — see module docs.
+    /// Which named capability groups this plugin may call host functions
+    /// from (#153) — `KNOWN_CAPABILITIES` above. Strict default: an empty
+    /// list (the pre-#153 default in every existing manifest) grants
+    /// *none* of the gated capabilities, not all of them — a plugin only
+    /// gets a gated host function if it explicitly declares the
+    /// capability that covers it. Only `caller-role` and
+    /// `plugin-state-get`/`-set` are ungated regardless of `capabilities`
+    /// — see `runtime::CapabilityGatedCallbacks` for why those
+    /// specifically (read-only / self-scoped).
     #[serde(default)]
     pub capabilities: Vec<String>,
     /// `message_type` values (docs/specs/Networking_Spec.md) this plugin
@@ -93,7 +131,37 @@ impl PluginManifest {
             ));
         }
         self.check_message_types()?;
-        self.check_chat_commands()
+        self.check_chat_commands()?;
+        self.check_capabilities()
+    }
+
+    /// Refuses a manifest declaring a capability name outside
+    /// `KNOWN_CAPABILITIES`, or the same one twice — same "fail loudly on
+    /// a typo, don't silently grant nothing" discipline as
+    /// `check_message_types`/`check_chat_commands` (#153).
+    fn check_capabilities(&self) -> Result<()> {
+        let mut seen = std::collections::HashSet::new();
+        for capability in &self.plugin.capabilities {
+            if !KNOWN_CAPABILITIES.contains(&capability.as_str()) {
+                return Err(Error::new(
+                    "plugin-host",
+                    format!(
+                        "plugin {:?} declares unknown capability {capability:?} — known capabilities: {KNOWN_CAPABILITIES:?}",
+                        self.plugin.name
+                    ),
+                ));
+            }
+            if !seen.insert(capability.as_str()) {
+                return Err(Error::new(
+                    "plugin-host",
+                    format!(
+                        "plugin {:?} declares capability {capability:?} more than once",
+                        self.plugin.name
+                    ),
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Refuses a manifest declaring a `message_types` entry below the
@@ -336,5 +404,67 @@ chat_commands = ["roll", "roll"]
 
         let err = manifest.check_compatible().unwrap_err();
         assert!(err.to_string().contains("roll"), "{err}");
+    }
+
+    #[test]
+    fn known_capabilities_are_accepted() {
+        let manifest = PluginManifest::from_toml(
+            r#"
+[plugin]
+name = "example-plugin"
+host_api_version = "0.7.0"
+capabilities = ["spawning", "movement", "combat", "economy"]
+"#,
+        )
+        .unwrap();
+
+        assert!(manifest.check_compatible().is_ok());
+    }
+
+    #[test]
+    fn an_unknown_capability_is_rejected() {
+        let manifest = PluginManifest::from_toml(
+            r#"
+[plugin]
+name = "example-plugin"
+host_api_version = "0.7.0"
+capabilities = ["telekinesis"]
+"#,
+        )
+        .unwrap();
+
+        let err = manifest.check_compatible().unwrap_err();
+        assert!(err.to_string().contains("telekinesis"), "{err}");
+    }
+
+    #[test]
+    fn a_duplicate_capability_is_rejected() {
+        let manifest = PluginManifest::from_toml(
+            r#"
+[plugin]
+name = "example-plugin"
+host_api_version = "0.7.0"
+capabilities = ["economy", "economy"]
+"#,
+        )
+        .unwrap();
+
+        let err = manifest.check_compatible().unwrap_err();
+        assert!(err.to_string().contains("economy"), "{err}");
+    }
+
+    #[test]
+    fn no_declared_capabilities_is_the_strict_default() {
+        let manifest = PluginManifest::from_toml(
+            r#"
+[plugin]
+name = "example-plugin"
+host_api_version = "0.7.0"
+"#,
+        )
+        .unwrap();
+
+        assert!(manifest.plugin.capabilities.is_empty());
+        assert!(manifest.check_compatible().is_ok());
     }
 }

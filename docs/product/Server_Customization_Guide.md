@@ -141,6 +141,7 @@ message_types = []
 chat_commands = []
 ```
 
+- `capabilities`: gates which host functions your plugin may call (`docs/specs/Plugin_API.md`'s "Capability gating") — `spawning` (`spawn-npc`), `movement` (`move-entity`), `combat` (`apply-stat-delta`/`report-death`/`report-respawn`), `economy` (`grant-item`/`remove-item`/`modify-currency`), `messaging` (`send-message`). **The default is strict**: an empty list grants none of these — `caller-role`/`plugin-state-get`/`plugin-state-set` are the only host functions always available regardless of what's declared. List only what your plugin actually needs; this is the real mechanism for running a less-trusted, third-party-authored plugin alongside your own trusted one.
 - `message_types`: which gateway-routed message type IDs get delivered to your plugin's `on-message` hook. **Must each be ≥ 1000** — 0–999 is core-reserved (see [`docs/specs/Networking_Spec.md`](../specs/Networking_Spec.md)'s message catalog).
 - `chat_commands`: command names (no leading `/`) routed to `on-chat-command` instead of published as ordinary chat.
 
@@ -150,7 +151,7 @@ Wire it in:
 |---|---|
 | `WZ_PLUGIN_MANIFEST_PATH` + `WZ_PLUGIN_WASM_PATH` | Both required together. Today attaches to only the *first* zone loaded — real per-zone plugin instantiation is a known gap, not yet built (see `server::zone_registry`'s own doc comment). |
 
-`on-load` (spawn NPCs at startup) and `on-message` are live today; `on-interact`/`on-tick` hooks exist in the host API but aren't wired into a real trigger-volume/tick path yet — see [`docs/specs/Plugin_API.md`](../specs/Plugin_API.md)'s "Beyond this v0 slice." [`examples/example-plugin`](../../examples/example-plugin) is a real, minimal, copyable starting point — start there, not from scratch.
+`on-load`, `on-message`, `on-interact`, `on-chat-command`, `on-player-join-zone`/`on-player-leave-zone`, `on-npc-tick`, `on-item-acquire`, and (as of #154) `on-damage-calc`/`on-item-use`/`on-npc-interact`/`on-death`/`on-respawn` are all live today — only the zone-wide `on-tick` hook still has no real call site, see [`docs/specs/Plugin_API.md`](../specs/Plugin_API.md)'s "Beyond this v0 slice." [`examples/example-plugin`](../../examples/example-plugin) is a real, minimal, copyable starting point — start there, not from scratch.
 
 **Persistent plugin state (`plugin-state-get`/`plugin-state-set`, #149).** Quest flags, NPC memory, per-guild economy counters — anything your plugin needs to remember belongs here, not in a stat (Step 1 is for character stats the core validates against a schema; this is an opaque blob entirely yours). No config of its own — it's two host functions your plugin calls directly, scoped by a `plugin-state-scope` variant:
 

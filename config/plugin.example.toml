@@ -5,6 +5,14 @@
 [plugin]
 name = "example-plugin"
 host_api_version = "0.7.0"
+# Gates which host functions this plugin may call (docs/specs/Plugin_API.md's
+# "Capability gating") — spawning (spawn-npc), movement (move-entity),
+# combat (apply-stat-delta/report-death/report-respawn), economy
+# (grant-item/remove-item/modify-currency), messaging (send-message). An
+# empty list (the strict default) grants none of these —
+# caller-role/plugin-state-* are always available regardless. List only
+# what your plugin actually needs; this is the real trust boundary for
+# running a less-trusted, third-party-authored plugin alongside your own.
 capabilities = []
 # message_type values this plugin wants gateway-routed messages for, via
 # the on-message hook. Must each be >= 1000 (0-999 is core-reserved —

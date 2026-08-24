@@ -2,7 +2,7 @@
 
 Corresponds to [Plugin System](../PROPOSAL.md#plugin-system) in the proposal.
 
-**Status:** the v0 slice below is real and implemented (`plugin-host`, #37/#38, extended by #95, #116, #57, #124, #149, #155, and #154) — one WIT world with fifteen hooks and twelve host functions: #38's original NPC-spawn-plus-interaction slice, #116's combat/NPC-patrol/chat-command hooks, #57's inventory/economy hooks and host functions (#112 supplied the core storage these write through), #124's `caller-role` (the account-roles decision, #114), #149's `plugin-state-get`/`plugin-state-set` (the Plugin-Scoped Data Store), #155's `on-player-join-zone`/`on-player-leave-zone`, and #154's real client-protocol call sites for `on-damage-calc`/`on-item-use`/`on-npc-interact` plus `report-death`/`report-respawn` (the plugin-owned trigger for `on-death`/`on-respawn`). See "Beyond this v0 slice" below for what's still not here.
+**Status:** the v0 slice below is real and implemented (`plugin-host`, #37/#38, extended by #95, #116, #57, #124, #149, #155, #154, and #153) — one WIT world with fifteen hooks and twelve host functions: #38's original NPC-spawn-plus-interaction slice, #116's combat/NPC-patrol/chat-command hooks, #57's inventory/economy hooks and host functions (#112 supplied the core storage these write through), #124's `caller-role` (the account-roles decision, #114), #149's `plugin-state-get`/`plugin-state-set` (the Plugin-Scoped Data Store), #155's `on-player-join-zone`/`on-player-leave-zone`, #154's real client-protocol call sites for `on-damage-calc`/`on-item-use`/`on-npc-interact` plus `report-death`/`report-respawn` (the plugin-owned trigger for `on-death`/`on-respawn`), and #153's real capability gating. See "Beyond this v0 slice" below for what's still not here.
 
 ## Interface technology
 
@@ -109,7 +109,27 @@ Every plugin exports all fifteen — a WIT world's exports aren't individually o
 | `report-death` | `func(entity-id: string) -> result<_, string>` | Reports that `entity-id` has died (#154) — the plugin decides what "died" means for its own game (docs/PROPOSAL.md: "core has no notion of HP or a death condition") and calls this itself. Queued, applied on the zone's next tick drain, fires `on-death` back to the caller once applied — same "queued, not synchronously confirmed" shape as `apply-stat-delta`. |
 | `report-respawn` | `func(entity-id: string) -> result<_, string>` | Same shape as `report-death`, for the respawn case — fires `on-respawn` once applied. |
 
-All twelve are always available to a v0 plugin — no capability gating exists yet (see "Beyond this v0 slice"). `grant-item`/`remove-item`/`modify-currency` only resolve for player entities — an NPC entity id is rejected, since NPCs have no character-backed storage (no NPC item/currency ownership exists, only players own items/currency).
+Nine of the twelve are gated by `plugin.toml`'s `capabilities` — see "Capability gating" below. `grant-item`/`remove-item`/`modify-currency` only resolve for player entities — an NPC entity id is rejected, since NPCs have no character-backed storage (no NPC item/currency ownership exists, only players own items/currency).
+
+### Capability gating (`plugin.toml`'s `capabilities`, #153)
+
+Five named groups, each covering a fixed subset of host functions:
+
+| Capability | Grants |
+|---|---|
+| `spawning` | `spawn-npc` |
+| `movement` | `move-entity` |
+| `combat` | `apply-stat-delta`, `report-death`, `report-respawn` |
+| `economy` | `grant-item`, `remove-item`, `modify-currency` |
+| `messaging` | `send-message` |
+
+Only `caller-role`, `plugin-state-get`, and `plugin-state-set` are **ungated** regardless of declared capabilities — `caller-role` is a read-only answer from a cache already scoped to the calling connection, and `plugin-state-get`/`-set` only ever touch the plugin's own storage. Every gated function reaches *across* an entity boundary — moving/damaging/granting-to/messaging another entity, spawning a new one — that's the actual dividing line, not an arbitrary split. `send-message` is gated (not folded into "ungated") specifically because it can target *any* connected entity by id, not just the one a hook call was actually about — matching docs/PROPOSAL.md's own "v0 Host Functions" list, which already treats messaging as its own capability group, separate from entity control.
+
+**Enforcement is per-call, not load-time refusal.** `plugin-host::PluginHost::load` wraps every plugin's `HostCallbacks` in a capability-checking layer (`runtime::CapabilityGatedCallbacks`) before instantiation — a call to a host function outside what the manifest declared returns an ordinary `Err` string back to the plugin (never a trap/panic), the same shape every other host-function failure already takes. Per-call rather than refuse-to-load because a plugin's declared hooks/message types are still valid and useful even if one gated call would fail — the plugin (or its author, reading the error during development) decides what to do about it, same as any other host-function error.
+
+**The default is strict.** `capabilities = []` (the same default every manifest already had before this) grants *none* of the five gated groups — not all of them. This is a deliberate v0.7.0 behavior tightening: before #153 the field was parsed and carried but checked against nothing, so every plugin had full access regardless of what it declared; every existing manifest in this repo (`config/plugin.example.toml`, `examples/example-plugin/plugin.toml`, test fixtures) was updated to explicitly list the capabilities it actually uses.
+
+This is the real trust boundary for running a less-trusted, third-party-authored plugin alongside an operator's own trusted "core" plugin: grant the operator's own plugin every capability it needs, restrict a community-authored add-on to just what it actually needs (e.g. `messaging`-only plus whatever `message_types`/`chat_commands` it declares) without needing separate infrastructure. Multi-plugin loading itself isn't built yet (#152) — this is the isolation half of that story, landed first since it doesn't depend on it.
 
 ### The Plugin-Scoped Data Store (`plugin-state-get`/`plugin-state-set`, #149)
 
@@ -149,7 +169,7 @@ chat_commands = []
 |---|---|---|
 | `plugin.name` | string | Free-form, used in error/log messages. |
 | `plugin.host_api_version` | string | Must equal `plugin_host::HOST_API_VERSION` (currently `"0.7.0"`, matching the WIT package version above) or the plugin is refused before instantiation. |
-| `plugin.capabilities` | list of strings, optional | Parsed and carried, **not yet enforced against anything** — see below. |
+| `plugin.capabilities` | list of strings, optional | Gates which host functions this plugin may call (#153) — see "Capability gating" above. Strict default: `[]` grants none of the four gated groups. An unknown capability name, or the same one declared twice, is refused at load time. |
 | `plugin.message_types` | list of `u16`, optional | Gateway `message_type` values (docs/specs/Networking_Spec.md) routed to this plugin's `on-message` hook (#95). Each must be `>= 1000` (0-999 is core-reserved) and appear at most once, checked by `PluginManifest::check_compatible` before the plugin is instantiated. |
 | `plugin.chat_commands` | list of strings, optional | Chat command names, without the leading `/` (#57). Each must be non-empty, have no leading `/`, and appear at most once, checked the same way as `message_types`. A matched command is routed to `on-chat-command` instead of published as ordinary chat. |
 
@@ -166,8 +186,8 @@ Real design from docs/PROPOSAL.md's "Plugin System" section, deliberately not bu
 - **`on_tick(zone, dt)`** (the zone-wide tick hook, distinct from #116's per-NPC `on-npc-tick`) — `world`'s tick loop has the call site (`world::zone::Zone::run`'s `on_tick` callback parameter), just not wired to a real plugin call yet.
 - **A true synchronous "query" host function against `character`'s live storage** — `item-quantity`/`currency-balance`-style reads that hand a value straight back to the plugin. Still deliberately not built: `PluginCallbacks` is called synchronously from inside `wasmtime`, while `character::CharacterStore` is async-only (`sqlx`); reads would need either a new blocking-call mechanism (`tokio::task::block_in_place`, not used anywhere else in this codebase) or an eventually-consistent cache, and neither was worth the complexity for v0 — a plugin that needs to know a quantity/balance can track it itself from `on-item-acquire`/its own bookkeeping. `caller-role` (#124) sidesteps this exact constraint for account roles specifically, not by adding blocking DB calls, but by having `server::session` populate an in-memory cache at join time (`session::EntityRoles`) that `caller-role` reads synchronously — a pattern this general query problem could reuse later if a case for it emerges, but wasn't generalized here.
 - **Per-plugin optional hooks** — with fifteen hooks now, most plugins won't want all of them; a real WIT world for that likely needs either per-hook opt-in at the manifest level with the host only calling what's declared, or restructuring hooks as several smaller worlds/interfaces a plugin composes from.
-- **Real capability gating** — `plugin.toml`'s `capabilities` field exists today but gates nothing; once host functions are grouped (`economy`, `combat`, ...) per the proposal, the host should refuse to load a plugin declaring a capability the operator hasn't enabled for that deployment.
 - **Cross-plugin RPC, hot-reload, plugin-defined persistent schema (structured tables beyond the opaque blob store)** — explicit v0 non-goals per the proposal, not accidentally missing. The opaque-blob-store half of that story *is* now in (#149, `plugin-state-get`/`plugin-state-set` above) — the non-goal is specifically anything beyond it (a plugin declaring its own real DB schema). (Plugin-declared gateway message types/custom packets *are* now in — `on-message`, #95 — cross-plugin collision checking for them is still deferred; see docs/specs/Networking_Spec.md.)
 - ~~**Account roles for dev/admin-only commands**~~ — decided in #114, implemented in #124: see the `caller-role` host function above and docs/specs/Auth_Spec.md's "Account roles" section.
 - ~~**Player session** (`on_player_join_zone`, `on_player_leave_zone`)~~ — implemented in #155: see the `on-player-join-zone`/`on-player-leave-zone` hooks above.
 - ~~**Live call sites for `on-damage-calc`/`on-death`/`on-respawn`/`on-npc-interact`/`on-item-use`**~~ — implemented in #154: see each hook's row above and `report-death`/`report-respawn` in the host functions table.
+- ~~**Real capability gating**~~ — implemented in #153: see "Capability gating" above.

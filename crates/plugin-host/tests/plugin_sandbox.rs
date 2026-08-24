@@ -24,12 +24,37 @@ fn fixture_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/test-plugin")
 }
 
+/// Full capabilities — this fixture's own `on_load`/`on_chat_command`/etc.
+/// exercise every gated host function (spawn-npc, move-entity,
+/// apply-stat-delta, grant-item/remove-item/modify-currency,
+/// report-death/report-respawn), so most tests need every capability
+/// granted; `restricted_manifest` below is for the tests proving a
+/// missing capability is actually enforced (#153).
 fn manifest() -> PluginManifest {
     PluginManifest::from_toml(
         r#"
 [plugin]
 name = "test-plugin"
 host_api_version = "0.7.0"
+capabilities = ["spawning", "movement", "combat", "economy", "messaging"]
+message_types = [1000]
+"#,
+    )
+    .unwrap()
+}
+
+/// Declares "messaging" only (not "economy") — used to prove a gated
+/// host function call is actually rejected, not just parsed-and-ignored
+/// (#153). Needs "messaging" so the fixture's own `send-message` call
+/// reporting the rejected `grant-item` call can still get through —
+/// otherwise the test would have no way to observe the rejection at all.
+fn restricted_manifest() -> PluginManifest {
+    PluginManifest::from_toml(
+        r#"
+[plugin]
+name = "test-plugin"
+host_api_version = "0.7.0"
+capabilities = ["messaging"]
 message_types = [1000]
 "#,
     )
@@ -347,6 +372,67 @@ fn a_plugin_handles_npc_interaction_and_reports_death_and_respawn() {
     assert_eq!(messages.len(), 3);
     assert!(messages[1].1.contains("died"), "{:?}", messages[1]);
     assert!(messages[2].1.contains("respawned"), "{:?}", messages[2]);
+}
+
+#[test]
+#[ignore]
+fn a_plugin_lacking_a_capability_has_its_host_function_call_rejected() {
+    let wasm_path = fixture_dir().join("target/wasm32-wasip2/release/test_plugin.wasm");
+    let callbacks = RecordingCallbacks::default();
+
+    let host = PluginHost::new();
+    let mut plugin = host
+        .load(
+            &restricted_manifest(),
+            &wasm_path,
+            Box::new(callbacks.clone()),
+        )
+        .expect("failed to load the restricted test plugin");
+
+    // No "economy" capability declared — grant-item is rejected before
+    // it ever reaches the real callback, through the real sandboxed call
+    // boundary (#153).
+    plugin
+        .on_chat_command("give", "torch", "actor-1")
+        .expect("on_chat_command itself should still succeed — the plugin caught the error");
+    assert!(
+        callbacks.item_grants.lock().unwrap().is_empty(),
+        "the ungranted call should never have reached the real callback"
+    );
+    let messages = callbacks.messages.lock().unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].0, "actor-1");
+    assert!(
+        messages[0].1.contains("grant-item failed") && messages[0].1.contains("economy"),
+        "{:?}",
+        messages[0]
+    );
+}
+
+#[test]
+#[ignore]
+fn a_plugin_with_the_declared_capability_succeeds() {
+    let wasm_path = fixture_dir().join("target/wasm32-wasip2/release/test_plugin.wasm");
+    let callbacks = RecordingCallbacks::default();
+
+    let host = PluginHost::new();
+    let mut plugin = host
+        .load(&manifest(), &wasm_path, Box::new(callbacks.clone()))
+        .expect("failed to load the well-behaved test plugin");
+
+    // `manifest()` declares "economy" — same call as the restricted test
+    // above, this time it actually reaches the real callback.
+    plugin
+        .on_chat_command("give", "torch", "actor-1")
+        .expect("on_chat_command should succeed");
+    assert_eq!(
+        callbacks.item_grants.lock().unwrap().as_slice(),
+        [("actor-1".to_string(), "torch".to_string(), 1)]
+    );
+    assert!(
+        callbacks.messages.lock().unwrap().is_empty(),
+        "no failure message should have been sent"
+    );
 }
 
 #[test]
