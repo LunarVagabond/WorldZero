@@ -81,6 +81,8 @@ CREATE TABLE character_sessions (
 
 `realm-directory::LoginPolicy` (`crates/realm-directory/src/login_policy.rs`) is #51's single enforcement point: given a character's home realm and a target realm, it rejects a bound-realm mismatch outright, and for an open realm, acquires this lease as part of the same authorization call.
 
+`LoginPolicy::resolve_character` is #52's counterpart on the read side: finding *which* character a login resolves to, using `CharacterStore::find_by_account` (realm-scoped) for a bound target realm or `CharacterStore::find_by_account_in_open_realms` (a join against `realms` matching any `open` realm) for an open one — so an open-realm character is found regardless of which specific open realm it was created on, and a bound-realm character never leaks into an open lookup. No caching layer sits in front of either query, so a write made through one realm is immediately visible through resolution via any other.
+
 ## Currency: one balance, not a ledger table
 
 `characters.currency_balance` is a single `BIGINT`, not a `currencies` table or a per-currency ledger — deliberately, for v0: no game requirement for multiple named currencies (gold *and* gems *and* faction tokens, each independently tracked) has driven this yet, and a single balance is the overwhelmingly common case. `character::CharacterStore::modify_currency` applies a signed delta and rejects (storage untouched) any change that would take the balance negative — the same invariant the column's own `CHECK (currency_balance >= 0)` enforces at the database level, checked in `character` first so a caller gets a clear crate error instead of a raw constraint-violation from `sqlx`.

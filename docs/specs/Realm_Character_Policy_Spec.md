@@ -41,6 +41,8 @@ An open realm lets one character be reachable from any zone-service instance in 
 
 Bound realms do not use `character_sessions` at all — a bound-realm character only ever has one realm that could possibly claim it, so the split-brain scenario this table exists to prevent cannot occur. `character` skips the lease step entirely when the target realm's `open_or_bound` is `bound`.
 
+**Finding the character, not just leasing it (#52, implemented).** The lease alone doesn't solve "which character row" — an open-realm character can be *recorded* against any one of the group's open realms (whichever it happened to be created on), so a lookup scoped to just the realm being connected through (`CharacterStore::find_by_account`, realm-scoped) would miss it entirely on every realm except that one. `CharacterStore::find_by_account_in_open_realms` (`crates/character/src/store.rs`) is the open-realm-aware counterpart — it joins against `realms` and matches any realm flagged `open`, never a bound one. `realm-directory::LoginPolicy::resolve_character` (`crates/realm-directory/src/login_policy.rs`) is the single call site that picks the right lookup for a given target realm's policy, mirroring `authorize_login`'s "one enforcement point" shape. There is no caching layer anywhere in this path — every read goes straight to Postgres — so a write made through one open realm is immediately visible through resolution via any other, with no staleness window to reason about.
+
 ## Bound realms: caching
 
 A bound realm's zone-service instance may cache character state more aggressively than an open realm's (per the proposal), since no other realm can ever contend it. The lease mechanism above still is not needed for this — the contention it prevents doesn't exist in the bound model. Cache invalidation on write stays entirely within that one realm's own process; nothing cross-realm to coordinate.
@@ -68,6 +70,7 @@ This satisfies #53's "no partial-transfer state" and "failed transfer leaves the
 | Where does open/bound live? | Per-realm field on the `realm-directory` registry | #47 (field exists), #51 (enforced, not yet wired into `server`) |
 | How is open-realm split-brain prevented? | A `character_sessions` lease table, checked at login/reconnect only | `character::CharacterSessionLease`, consumed by `realm-directory::LoginPolicy` (#51) |
 | Do bound realms need the lease? | No — skipped entirely | `character` |
+| How is an open-realm character found regardless of which open realm it's on? | A join against `realms` matching any `open` realm, never a bound one | `CharacterStore::find_by_account_in_open_realms`, consumed by `LoginPolicy::resolve_character` (#52, not yet wired into `server`) |
 | Is a transfer atomic? | Yes — one Postgres transaction, no distributed/saga logic | #53 |
 | Can an open-realm character be transferred? | No — rejected as a validation error | #53 |
 | Where does gating happen relative to the transfer transaction? | Before it opens; a denied gate never touches character data | #54 |
