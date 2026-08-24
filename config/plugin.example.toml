@@ -4,7 +4,7 @@
 # WZ_PLUGIN_MANIFEST_PATH / WZ_PLUGIN_WASM_PATH at them) and adjust freely.
 [plugin]
 name = "example-plugin"
-host_api_version = "0.4.0"
+host_api_version = "0.5.0"
 capabilities = []
 # message_type values this plugin wants gateway-routed messages for, via
 # the on-message hook. Must each be >= 1000 (0-999 is core-reserved —

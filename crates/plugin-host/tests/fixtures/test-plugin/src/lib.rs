@@ -97,6 +97,16 @@ impl Guest for Plugin {
             let _ = worldzero::plugin::host::grant_item(&sender_entity_id, &args, 1);
             return;
         }
+        if command == "whoami" {
+            let roles = worldzero::plugin::host::caller_role(&sender_entity_id)
+                .unwrap_or_default()
+                .join(",");
+            let _ = worldzero::plugin::host::send_message(
+                &sender_entity_id,
+                &format!("roles: {roles}"),
+            );
+            return;
+        }
         let _ = worldzero::plugin::host::send_message(
             &sender_entity_id,
             &format!("ran command {command} with args {args}"),
