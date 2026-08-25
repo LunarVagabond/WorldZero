@@ -311,7 +311,7 @@ impl Guest for Plugin {
     // meant to model an actual game economy.
     fn on_item_use(_zone_id: String, entity_id: String, item_type: String) {
         let _ = worldzero::plugin::host::remove_item(&entity_id, &item_type, 1);
-        let _ = worldzero::plugin::host::modify_currency(&entity_id, 5);
+        let _ = worldzero::plugin::host::modify_currency(&entity_id, "gold", 5);
         let _ = worldzero::plugin::host::send_message(&entity_id, &format!("used {item_type}"));
     }
 }

@@ -35,7 +35,7 @@ fn manifest() -> PluginManifest {
         r#"
 [plugin]
 name = "test-plugin"
-host_api_version = "0.9.0"
+host_api_version = "0.10.0"
 capabilities = ["spawning", "movement", "combat", "economy", "messaging"]
 message_types = [1000]
 "#,
@@ -53,7 +53,7 @@ fn restricted_manifest() -> PluginManifest {
         r#"
 [plugin]
 name = "test-plugin"
-host_api_version = "0.9.0"
+host_api_version = "0.10.0"
 capabilities = ["messaging"]
 message_types = [1000]
 "#,
@@ -70,7 +70,7 @@ struct RecordingCallbacks {
     moves: Arc<Mutex<Vec<(String, f64, f64)>>>,
     item_grants: Arc<Mutex<Vec<(String, String, i64)>>>,
     item_removals: Arc<Mutex<Vec<(String, String, i64)>>>,
-    currency_deltas: Arc<Mutex<Vec<(String, i64)>>>,
+    currency_deltas: Arc<Mutex<Vec<(String, String, i64)>>>,
     roles: Arc<Mutex<HashMap<String, Vec<String>>>>,
     state: Arc<Mutex<HashMap<String, Vec<u8>>>>,
     deaths: Arc<Mutex<Vec<String>>>,
@@ -169,11 +169,17 @@ impl HostCallbacks for RecordingCallbacks {
         Ok(())
     }
 
-    fn modify_currency(&mut self, entity_id: &str, delta: i64) -> Result<(), String> {
-        self.currency_deltas
-            .lock()
-            .unwrap()
-            .push((entity_id.to_string(), delta));
+    fn modify_currency(
+        &mut self,
+        entity_id: &str,
+        currency_key: &str,
+        delta: i64,
+    ) -> Result<(), String> {
+        self.currency_deltas.lock().unwrap().push((
+            entity_id.to_string(),
+            currency_key.to_string(),
+            delta,
+        ));
         Ok(())
     }
 
@@ -364,7 +370,7 @@ fn a_plugin_grants_removes_items_and_modifies_currency() {
     );
     assert_eq!(
         callbacks.currency_deltas.lock().unwrap().as_slice(),
-        [("actor-1".to_string(), 5)]
+        [("actor-1".to_string(), "gold".to_string(), 5)]
     );
 }
 

@@ -15,8 +15,9 @@ The framework-required columns — never a superset or subset per deployment —
 | `zone_id` | `TEXT NOT NULL` | Which zone the character is currently in, by the content manifest's zone `id` slug (docs/specs/Content_Manifest_Spec.md) — not a DB foreign key, since zones are content-defined, not database rows. |
 | `position_x`, `position_y`, `position_z` | `DOUBLE PRECISION NOT NULL DEFAULT 0` | Position, in the zone's own coordinate system. |
 | `stats` | `JSONB NOT NULL DEFAULT '{}'` | The declared-attribute-schema column — see below. |
-| `currency_balance` | `BIGINT NOT NULL DEFAULT 0 CHECK (currency_balance >= 0)` | A single currency balance (#112) — see "Currency: one balance, not a ledger table" below. |
 | `created_at`, `updated_at` | `TIMESTAMPTZ NOT NULL DEFAULT now()` | Timestamps. |
+
+Currency is **not** a column on this table — see "Currency: dev-declared, multi-currency, denomination-aware" below (#218) for the separate `character_currency` table that replaced the old single `currency_balance` column (#112's original single-currency version, migrated away by #218).
 
 No column exists for any specific stat (no `hp`, no `mana`) — that would violate "no stat is ever privileged by the core." A GIN index on `stats` makes it queryable/indexable via native JSONB operators per the proposal's rationale.
 
@@ -98,11 +99,26 @@ CREATE TABLE character_sessions (
 
 `LoginPolicy::resolve_character` is #52's counterpart on the read side: finding *which* character a login resolves to, using `CharacterStore::find_by_account` (realm-scoped) for a bound target realm or `CharacterStore::find_by_account_in_open_realms` (a join against `realms` matching any `open` realm) for an open one — so an open-realm character is found regardless of which specific open realm it was created on, and a bound-realm character never leaks into an open lookup. No caching layer sits in front of either query, so a write made through one realm is immediately visible through resolution via any other.
 
-## Currency: one balance, not a ledger table
+## Currency: dev-declared, multi-currency, denomination-aware (#217/#218)
 
-`characters.currency_balance` is a single `BIGINT`, not a `currencies` table or a per-currency ledger — deliberately, for v0: no game requirement for multiple named currencies (gold *and* gems *and* faction tokens, each independently tracked) has driven this yet, and a single balance is the overwhelmingly common case. `character::CharacterStore::modify_currency` applies a signed delta and rejects (storage untouched) any change that would take the balance negative — the same invariant the column's own `CHECK (currency_balance >= 0)` enforces at the database level, checked in `character` first so a caller gets a clear crate error instead of a raw constraint-violation from `sqlx`.
+Currency is **dev-declared config, not a hardcoded core concept** — same "core enforces generically, dev declares the specifics" pattern `party.schema.yaml`/`guild.schema.yaml`/`stats.schema.yaml`/`character.archetypes.yaml` already use. `character::CurrencySchema` (`crates/character/src/currency_schema.rs`) loads `currency.schema.yaml` from the config dir: one or more independent named currencies (e.g. `gold`, `honor`), each optionally declaring an ordered denomination ladder — a `key` plus a conversion ratio to that currency's base unit (e.g. `copper: 1`, `silver: 100`, `gold: 10000` — "100 copper = 1 silver" falls directly out of the ratio). A currency with no denominations declared is just a flat balance, the pre-#218 single-currency behavior generalized to a named key. Denominations must be declared in strictly ascending ratio order; a dev who mis-orders their own ladder gets a loud load-time error rather than a schema that silently means something other than what they wrote.
 
-**This is additive, not a wall.** If a real game needs multiple independently-tracked currencies later, that's a new `character_currency(character_id, currency_key, balance)` table added alongside this column — not a breaking redesign of it. `currency_balance` stays as the default/primary balance either way, the same way adding a new declared stat key never requires a migration for existing `stats` data.
+```sql
+CREATE TABLE character_currency (
+    character_id UUID NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+    currency_key TEXT NOT NULL,
+    balance BIGINT NOT NULL DEFAULT 0 CHECK (balance >= 0),
+    PRIMARY KEY (character_id, currency_key)
+);
+```
+
+**Storage is always a single flat integer balance per `(character_id, currency_key)`, in that currency's base unit — never a separate stored ledger per denomination.** A denomination ladder is a pure display/conversion concept, computed fresh on every read via `CurrencySchema::breakdown(currency_key, raw_balance)` (largest denomination first, cascading divide-and-remainder), never persisted as separate per-denomination numbers. Worked example: a stored balance of `10847` (base unit `copper`) against ratios `copper: 1, silver: 100, gold: 10000` breaks down as `1 gold, 8 silver, 47 copper` (`10847 / 10000 = 1` remainder `847`; `847 / 100 = 8` remainder `47`). This deliberately avoids "carry the 1" bookkeeping (e.g. spending 50 copper when a character only has loose silver/gold and needs to "break" a denomination) entirely — there is only ever one real stored number per currency.
+
+`character::CharacterStore::modify_currency(character_id, currency_key, delta)` applies a signed delta to one currency's balance and rejects (storage untouched) any change that would take that specific currency negative — the same invariant `character_currency.balance`'s own `CHECK (balance >= 0)` enforces at the database level, checked in `character` first so a caller gets a clear crate error instead of a raw constraint-violation from `sqlx`. Every `(character, currency_key)` pair has a fully independent balance — draining one currency to zero, or rejecting a delta that would take it negative, never touches any other currency on the same character. `character::CharacterStore::currency_balance(character_id, currency_key)` reads it back, returning `0` for a currency the character has never touched (no row yet), the same "no row means zero" convention `item_quantity` already uses.
+
+`modify-currency` (the plugin host function, `wit/plugin.wit`) takes a `currency-key` alongside `entity-id`/`delta`; a key that isn't declared in `currency.schema.yaml` is rejected before it ever reaches storage. `CurrencyChanged` (the wire push, #211/#218) carries `currency_key` alongside `balance` for the same reason.
+
+**Migration from the old single `currency_balance` column (#4/#112) to this table (#218, `db/migrations/0015_create_character_currency/`):** any character with a nonzero pre-migration `currency_balance` gets one `character_currency` row under the key `default` — a real, non-silently-dropped migration of existing balances, not a data loss. A dev is expected to either declare `default` as one of their real currency keys in `currency.schema.yaml`, or migrate that data again under whatever key their actual single currency uses.
 
 ## `stats.schema.yaml` format
 

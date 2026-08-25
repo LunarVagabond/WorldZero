@@ -1,10 +1,14 @@
 //! Core inventory (item stacks) and currency read/write —
-//! docs/specs/Data_Model_Spec.md's `items` table and `characters.
-//! currency_balance` column, following the same "fixed core schema, the
-//! framework never interprets the meaning" discipline as `stats` JSONB
-//! (see this crate's `schema`/`store` modules): the framework knows an
-//! `item_type` string and a quantity exist, never what an item *does* —
-//! that's entirely plugin-owned.
+//! docs/specs/Data_Model_Spec.md's `items` table and `character_currency`
+//! table (#218 — one row per `(character_id, currency_key)`, replacing
+//! the old single `characters.currency_balance` column), following the
+//! same "fixed core schema, the framework never interprets the meaning"
+//! discipline as `stats` JSONB (see this crate's `schema`/`store`
+//! modules): the framework knows an `item_type` string and a quantity
+//! exist, never what an item *does* — that's entirely plugin-owned. Same
+//! for a `currency_key`: the framework validates it against
+//! `crate::currency_schema::CurrencySchema` at the call site (not inside
+//! this module), never here.
 //!
 //! Not transactional against a concurrent writer, same as `store`'s
 //! `get_stat`/`set_stat` — the open-realm concurrency boundary is the
@@ -226,24 +230,43 @@ impl CharacterStore {
             .collect())
     }
 
-    /// `character_id`'s current currency balance.
-    pub async fn currency_balance(&self, character_id: CharacterId) -> Result<i64> {
-        sqlx::query_scalar("SELECT currency_balance FROM characters WHERE id = $1")
-            .bind(character_id.as_uuid())
-            .fetch_one(self.pool())
-            .await
-            .map_err(|e| Error::wrap("character", "failed to read currency balance", e))
+    /// `character_id`'s current balance of `currency_key` — `0` if no
+    /// row exists yet (never having touched a currency is the ordinary
+    /// case, not an exceptional one; same "no row means zero" convention
+    /// `item_quantity` already uses).
+    pub async fn currency_balance(
+        &self,
+        character_id: CharacterId,
+        currency_key: &str,
+    ) -> Result<i64> {
+        let balance: Option<i64> = sqlx::query_scalar(
+            "SELECT balance FROM character_currency WHERE character_id = $1 AND currency_key = $2",
+        )
+        .bind(character_id.as_uuid())
+        .bind(currency_key)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(|e| Error::wrap("character", "failed to read currency balance", e))?;
+
+        Ok(balance.unwrap_or(0))
     }
 
-    /// Adjusts `character_id`'s currency balance by `delta` (positive or
-    /// negative) and returns the new balance. Rejected (storage
-    /// untouched) if the result would go negative — the same
-    /// `currency_balance >= 0` invariant `db/migrations` enforces at the
+    /// Adjusts `character_id`'s balance of `currency_key` by `delta`
+    /// (positive or negative) and returns the new balance — every
+    /// `(character, currency_key)` pair has its own fully independent
+    /// balance (#218), so a delta on one currency never touches another.
+    /// Rejected (storage untouched) if the result would go negative —
+    /// the same `balance >= 0` invariant `db/migrations` enforces at the
     /// column level via `CHECK`, checked here first so the caller gets a
     /// clear `character`-crate error instead of a raw constraint
     /// violation surfacing from `sqlx`.
-    pub async fn modify_currency(&self, character_id: CharacterId, delta: i64) -> Result<i64> {
-        let current = self.currency_balance(character_id).await?;
+    pub async fn modify_currency(
+        &self,
+        character_id: CharacterId,
+        currency_key: &str,
+        delta: i64,
+    ) -> Result<i64> {
+        let current = self.currency_balance(character_id, currency_key).await?;
         let new_balance = current
             .checked_add(delta)
             .ok_or_else(|| Error::new("character", "currency balance delta overflowed"))?;
@@ -255,9 +278,12 @@ impl CharacterStore {
         }
 
         sqlx::query(
-            "UPDATE characters SET currency_balance = $2, updated_at = now() WHERE id = $1",
+            "INSERT INTO character_currency (character_id, currency_key, balance) \
+             VALUES ($1, $2, $3) \
+             ON CONFLICT (character_id, currency_key) DO UPDATE SET balance = EXCLUDED.balance",
         )
         .bind(character_id.as_uuid())
+        .bind(currency_key)
         .bind(new_balance)
         .execute(self.pool())
         .await
@@ -490,14 +516,20 @@ mod tests {
     #[ignore]
     async fn a_new_character_starts_with_zero_currency() {
         let (store, character_id) = store_with_character().await;
-        assert_eq!(store.currency_balance(character_id).await.unwrap(), 0);
+        assert_eq!(
+            store.currency_balance(character_id, "gold").await.unwrap(),
+            0
+        );
     }
 
     #[tokio::test]
     #[ignore]
     async fn modify_currency_applies_a_positive_delta() {
         let (store, character_id) = store_with_character().await;
-        let balance = store.modify_currency(character_id, 100).await.unwrap();
+        let balance = store
+            .modify_currency(character_id, "gold", 100)
+            .await
+            .unwrap();
         assert_eq!(balance, 100);
     }
 
@@ -505,25 +537,83 @@ mod tests {
     #[ignore]
     async fn modify_currency_going_negative_is_rejected_and_unapplied() {
         let (store, character_id) = store_with_character().await;
-        store.modify_currency(character_id, 50).await.unwrap();
-        assert!(store.modify_currency(character_id, -100).await.is_err());
-        assert_eq!(store.currency_balance(character_id).await.unwrap(), 50);
+        store
+            .modify_currency(character_id, "gold", 50)
+            .await
+            .unwrap();
+        assert!(
+            store
+                .modify_currency(character_id, "gold", -100)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            store.currency_balance(character_id, "gold").await.unwrap(),
+            50
+        );
     }
 
     #[tokio::test]
     #[ignore]
     async fn modify_currency_overflow_is_rejected_and_unapplied() {
         let (store, character_id) = store_with_character().await;
-        store.modify_currency(character_id, i64::MAX).await.unwrap();
+        store
+            .modify_currency(character_id, "gold", i64::MAX)
+            .await
+            .unwrap();
 
         let err = store
-            .modify_currency(character_id, i64::MAX)
+            .modify_currency(character_id, "gold", i64::MAX)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("overflowed"), "{err}");
         assert_eq!(
-            store.currency_balance(character_id).await.unwrap(),
+            store.currency_balance(character_id, "gold").await.unwrap(),
             i64::MAX
+        );
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn two_currencies_on_the_same_character_have_independent_balances() {
+        let (store, character_id) = store_with_character().await;
+        store
+            .modify_currency(character_id, "gold", 100)
+            .await
+            .unwrap();
+        store
+            .modify_currency(character_id, "honor", 5)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store.currency_balance(character_id, "gold").await.unwrap(),
+            100
+        );
+        assert_eq!(
+            store.currency_balance(character_id, "honor").await.unwrap(),
+            5
+        );
+
+        // Draining "honor" to zero (and rejecting going further negative)
+        // never touches "gold".
+        store
+            .modify_currency(character_id, "honor", -5)
+            .await
+            .unwrap();
+        assert!(
+            store
+                .modify_currency(character_id, "honor", -1)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            store.currency_balance(character_id, "gold").await.unwrap(),
+            100
+        );
+        assert_eq!(
+            store.currency_balance(character_id, "honor").await.unwrap(),
+            0
         );
     }
 }
