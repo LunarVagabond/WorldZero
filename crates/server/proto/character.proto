@@ -1,0 +1,65 @@
+// Wire schema for `server::character_protocol` — `message_type` 3
+// (docs/specs/Networking_Spec.md's catalog). Character list/create/select
+// (#193), slotted between realm selection (`message_type` 2) and
+// world-join (`message_type` 200) — see `crates/auth/proto/auth.proto`'s
+// header comment for the same note on why `server::character_protocol`'s
+// Rust enum wraps this rather than being generated from it directly.
+
+syntax = "proto3";
+
+package worldzero.character;
+
+message ClientMessage {
+  oneof kind {
+    ListCharacters list_characters = 1;
+    CreateCharacter create_character = 2;
+    SelectCharacter select_character = 3;
+  }
+}
+
+message ListCharacters {}
+
+message CreateCharacter {
+  string name = 1;
+}
+
+// character_id as a plain string, same "opaque id crossing the wire" as
+// every other id in this protocol suite.
+message SelectCharacter {
+  string character_id = 1;
+}
+
+message ServerMessage {
+  oneof kind {
+    CharacterList character_list = 1;
+    CharacterCreated character_created = 2;
+    CharacterSelected character_selected = 3;
+    Error error = 4;
+  }
+}
+
+message CharacterSummary {
+  string character_id = 1;
+  string name = 2;
+  string zone_id = 3;
+}
+
+message CharacterList {
+  repeated CharacterSummary characters = 1;
+}
+
+message CharacterCreated {
+  string character_id = 1;
+}
+
+// Acknowledges a successful SelectCharacter — the world-join messages
+// that follow (`message_type` 200) are the fuller confirmation, but this
+// gives the client an explicit "yes, this one" independent of whether
+// the subsequent world-join itself succeeds.
+message CharacterSelected {
+  string character_id = 1;
+}
+
+message Error {
+  string message = 1;
+}

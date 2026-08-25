@@ -106,7 +106,7 @@ A dev-facing, demo-scoped wiring of this provider into a live `gateway` connecti
 - On failure, the server replies `Error { message }` and closes the connection — no retry-on-the-same-connection; the client reconnects to try again.
 - The issued `session_token` is not yet used for anything past this handshake (no reconnect-without-re-entering-a-password flow, no other service verifies it) — that's real follow-up work once more than one service needs to trust an already-authenticated connection, not solved here.
 - Enforcing "auth first, then everything else" is this integration's own connection-handling code, not a `gateway`-crate-level guarantee — `gateway` itself has no concept of message ordering or required handshakes (docs/specs/Networking_Spec.md).
-- In `server`'s combined process specifically (not this crate's own standalone demo), `Authenticated` is immediately followed by a mandatory realm-selection step (`server::realm_protocol`, `message_type` 2, #192) before anything else on the connection is accepted — see docs/specs/Realm_Character_Policy_Spec.md's "Realm selection" for that handshake's shape.
+- In `server`'s combined process specifically (not this crate's own standalone demo), `Authenticated` is immediately followed by a mandatory realm-selection step (`server::realm_protocol`, `message_type` 2, #192), then a mandatory character list/create/select step (`server::character_protocol`, `message_type` 3, #193), before anything else on the connection is accepted — see docs/specs/Realm_Character_Policy_Spec.md's "Realm selection" and docs/specs/Data_Model_Spec.md's "Character list/create/select" for those handshakes' shape.
 
 ## Account roles (decision: #114, implemented: #124)
 

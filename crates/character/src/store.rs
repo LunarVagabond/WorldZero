@@ -147,6 +147,96 @@ impl CharacterStore {
         Ok(row.map(row_to_character_summary))
     }
 
+    /// Every character `account_id` owns on `realm_id`, most-recently-
+    /// created first — the bound-realm-scoped half of #193's character
+    /// list, mirroring [`Self::find_by_account`]'s scoping (never crosses
+    /// into another realm).
+    pub async fn list_by_account(
+        &self,
+        account_id: AccountId,
+        realm_id: RealmId,
+    ) -> Result<Vec<CharacterSummary>> {
+        let rows = sqlx::query(
+            "SELECT id, name, realm_id, zone_id, position_x, position_y, position_z FROM characters \
+             WHERE account_id = $1 AND realm_id = $2 ORDER BY created_at DESC",
+        )
+        .bind(account_id.as_uuid())
+        .bind(realm_id.as_uuid())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| Error::wrap("character", "failed to list characters by account", e))?;
+
+        Ok(rows.into_iter().map(row_to_character_summary).collect())
+    }
+
+    /// The open-realm-group-aware counterpart to [`Self::list_by_account`]
+    /// (#193), mirroring [`Self::find_by_account_in_open_realms`]'s
+    /// scoping — every character `account_id` owns across any realm
+    /// currently flagged `open`, never a bound one.
+    pub async fn list_by_account_in_open_realms(
+        &self,
+        account_id: AccountId,
+    ) -> Result<Vec<CharacterSummary>> {
+        let rows = sqlx::query(
+            "SELECT c.id, c.name, c.realm_id, c.zone_id, c.position_x, c.position_y, c.position_z \
+             FROM characters c JOIN realms r ON c.realm_id = r.id \
+             WHERE c.account_id = $1 AND r.open_or_bound = 'open' \
+             ORDER BY c.created_at DESC",
+        )
+        .bind(account_id.as_uuid())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| {
+            Error::wrap(
+                "character",
+                "failed to list account's open-realm characters",
+                e,
+            )
+        })?;
+
+        Ok(rows.into_iter().map(row_to_character_summary).collect())
+    }
+
+    /// Fetches `character_id`, but only if it's actually owned by
+    /// `account_id` — the ownership-checked lookup #193's `SelectCharacter`
+    /// needs (a client naming a character id it doesn't own must never
+    /// succeed, regardless of what that id actually resolves to).
+    /// `None` covers both "no such character" and "exists, but belongs to
+    /// someone else" — deliberately indistinguishable to the caller, same
+    /// as not leaking which usernames exist elsewhere in this codebase.
+    pub async fn get_for_account(
+        &self,
+        character_id: CharacterId,
+        account_id: AccountId,
+    ) -> Result<Option<CharacterSummary>> {
+        let row = sqlx::query(
+            "SELECT id, name, realm_id, zone_id, position_x, position_y, position_z FROM characters \
+             WHERE id = $1 AND account_id = $2",
+        )
+        .bind(character_id.as_uuid())
+        .bind(account_id.as_uuid())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| Error::wrap("character", "failed to look up character by id", e))?;
+
+        Ok(row.map(row_to_character_summary))
+    }
+
+    /// How many characters `account_id` already owns on `realm_id` — the
+    /// count #193's character-creation cap checks against
+    /// (`WZ_CHARACTER_MAX_PER_ACCOUNT`, enforced by `server`, not this
+    /// crate — see `server::session`'s `CreateCharacter` handling).
+    pub async fn count_for_account(&self, account_id: AccountId, realm_id: RealmId) -> Result<i64> {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM characters WHERE account_id = $1 AND realm_id = $2",
+        )
+        .bind(account_id.as_uuid())
+        .bind(realm_id.as_uuid())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| Error::wrap("character", "failed to count characters for account", e))
+    }
+
     /// Total character count for `realm_id`, regardless of whether any
     /// of them are currently online — the durable "census" half of
     /// #137's realm population reporting. Deliberately returns a plain
@@ -508,6 +598,112 @@ stats:
                 .await
                 .unwrap(),
             None
+        );
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn list_by_account_returns_every_character_on_that_realm_only() {
+        let (store, account_id, realm_id) = store_with_account().await;
+        let aria = store
+            .create(account_id, "Aria", realm_id, "greenwood-forest")
+            .await
+            .unwrap();
+        let bram = store
+            .create(account_id, "Bram", realm_id, "greenwood-forest")
+            .await
+            .unwrap();
+        // A different realm — must never show up in the list above.
+        store
+            .create(account_id, "Elsewhere", RealmId::new(), "greenwood-forest")
+            .await
+            .unwrap();
+
+        let mut ids: Vec<_> = store
+            .list_by_account(account_id, realm_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|c| c.id)
+            .collect();
+        ids.sort();
+        let mut expected = vec![aria, bram];
+        expected.sort();
+        assert_eq!(ids, expected);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn list_by_account_in_open_realms_spans_every_open_realm_but_never_bound() {
+        let (store, account_id, _pool, open_realm_id, bound_realm_id) = store_with_realms().await;
+        let open_character = store
+            .create(account_id, "Aria", open_realm_id, "greenwood-forest")
+            .await
+            .unwrap();
+        store
+            .create(account_id, "Bound", bound_realm_id, "greenwood-forest")
+            .await
+            .unwrap();
+
+        let found = store
+            .list_by_account_in_open_realms(account_id)
+            .await
+            .unwrap();
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].id, open_character);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn get_for_account_returns_none_for_a_character_owned_by_someone_else() {
+        let (store, account_id, realm_id) = store_with_account().await;
+        let character_id = store
+            .create(account_id, "Aria", realm_id, "greenwood-forest")
+            .await
+            .unwrap();
+
+        let (_, other_account_id, _) = store_with_account().await;
+        assert_eq!(
+            store
+                .get_for_account(character_id, other_account_id)
+                .await
+                .unwrap(),
+            None
+        );
+        assert!(
+            store
+                .get_for_account(character_id, account_id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn count_for_account_counts_only_this_realms_characters() {
+        let (store, account_id, realm_id) = store_with_account().await;
+        assert_eq!(
+            store.count_for_account(account_id, realm_id).await.unwrap(),
+            0
+        );
+
+        store
+            .create(account_id, "Aria", realm_id, "greenwood-forest")
+            .await
+            .unwrap();
+        store
+            .create(account_id, "Bram", realm_id, "greenwood-forest")
+            .await
+            .unwrap();
+        store
+            .create(account_id, "Elsewhere", RealmId::new(), "greenwood-forest")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store.count_for_account(account_id, realm_id).await.unwrap(),
+            2
         );
     }
 
