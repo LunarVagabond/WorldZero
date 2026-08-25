@@ -30,6 +30,13 @@ impl Guest for Plugin {
 
     fn on_unload() {}
 
+    // Not declared in this plugin's own `hooks` list (it never needed a
+    // starting-stat/archetype system), but the WIT world still requires
+    // every plugin to export it (exports aren't individually optional in
+    // the Component Model) — an empty body is the correct "not
+    // interested" implementation, same as on_entity_spawn below.
+    fn on_character_create(_character_id: String, _zone_id: String) {}
+
     // One plugin instance now serves every zone (#152) — spawning
     // "wolf-pack-01" lives here, not `on_load`, since `on_load` no
     // longer has any zone context. This example only ever runs against
@@ -184,6 +191,16 @@ impl Guest for Plugin {
             &format!("you use the {item_type} — the wolves eye it warily"),
         );
     }
+
+    // Live: fires once a CraftItem request actually consumes its inputs
+    // and grants its output (#216). No entity id is given here (a craft
+    // is character-scoped, not entity-scoped — same reasoning
+    // on_character_create's own character_id-only signature follows),
+    // so there's no connection to send-message a reply to; a real game
+    // would typically call apply-stat-delta-for-character here (e.g. a
+    // profession XP bonus) the way `test-plugin`'s own on_craft_complete
+    // fixture does.
+    fn on_craft_complete(_character_id: String, _recipe_key: String) {}
 }
 
 export!(Plugin);

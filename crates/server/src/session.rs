@@ -171,6 +171,10 @@ pub struct SessionDeps {
     /// (via `character_store.set_stat`) is never expected to fail on a
     /// bounds check.
     pub archetype_schema: Arc<character::ArchetypeSchema>,
+    /// The dev-declared recipe schema (#216/#215, `crafting.schema.yaml`)
+    /// — resolves `CraftItem`'s `recipe_key` before
+    /// `character::CharacterStore::craft_item` ever touches storage.
+    pub crafting_schema: Arc<character::CraftingSchema>,
     /// Every loaded plugin (#152: one instance, process-wide), shared
     /// with every zone actor — the character-creation loop below also
     /// dispatches into this directly (#194's `on-character-create`),
@@ -1088,6 +1092,37 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
                                 }
                             }
                         }
+                        Ok(ClientMessage::CraftItem { recipe_key }) => {
+                            let recipe = deps.crafting_schema.resolve(&recipe_key).cloned();
+                            match recipe {
+                                Err(e) => {
+                                    send_world(&mut sink, &ServerMessage::Error { message: e.to_string() }).await?;
+                                }
+                                Ok(recipe) => {
+                                    match deps.character_store.craft_item(character_id, &recipe).await {
+                                        Ok(results) => {
+                                            for (item_type, quantity) in results {
+                                                send_world(&mut sink, &ServerMessage::ItemChanged {
+                                                    item_type,
+                                                    quantity,
+                                                }).await?;
+                                            }
+                                            fire_on_craft_complete(
+                                                &deps.plugins,
+                                                &deps.character_store,
+                                                &deps.character_entities,
+                                                &deps.global_sessions,
+                                                character_id,
+                                                &recipe_key,
+                                            ).await;
+                                        }
+                                        Err(e) => {
+                                            send_world(&mut sink, &ServerMessage::Error { message: e.to_string() }).await?;
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         Err(e) => {
                             send_world(&mut sink, &ServerMessage::Error { message: e.to_string() }).await?;
                         }
@@ -1796,6 +1831,76 @@ async fn fire_on_character_create(
             .on_character_create(&character_id_str, zone_id)
         {
             tracing::warn!(plugin = %runtime.name, %character_id, error = %e, "plugin on_character_create hook failed");
+        }
+        for (target, stat_key, delta) in runtime.drain_pending_character_stat_deltas() {
+            let Ok(target_id) = target.parse::<CharacterId>() else {
+                tracing::warn!(plugin = %runtime.name, character_id = %target, "plugin apply-stat-delta-for-character called with an invalid character id");
+                continue;
+            };
+            match character_store
+                .apply_stat_delta(target_id, &stat_key, delta)
+                .await
+            {
+                Ok(new_value) => {
+                    let live_entity = character_entities.lock().unwrap().get(&target_id).copied();
+                    if let Some(entity_id) = live_entity {
+                        send_to(
+                            global_sessions,
+                            entity_id,
+                            ServerMessage::StatChanged {
+                                stat_key: stat_key.clone(),
+                                value: new_value,
+                            },
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(plugin = %runtime.name, character_id = %target_id, stat_key, error = %e, "plugin apply-stat-delta-for-character failed");
+                }
+            }
+        }
+    }
+}
+
+/// Fires `on-craft-complete` (#216, implementing #215's crafting
+/// decision) on every plugin that both declared the hook *and* the
+/// `economy` capability — see `plugin_startup::PluginRuntime::capabilities`'s
+/// doc comment for why this hook is gated at the firing site rather than
+/// through `CapabilityGatedCallbacks`. Same shape as
+/// `fire_on_character_create`: no `Zone`/entity context to dispatch
+/// through (a craft is character-scoped, not entity-scoped — the hook
+/// itself only ever carries `character-id`), so this dispatches directly
+/// against `character_store`, and only drains each plugin's own
+/// `apply-stat-delta-for-character` requests afterward (the one host
+/// function `on-craft-complete` can meaningfully call without an entity
+/// id — `grant-item`/`remove-item`/`modify-currency` are all
+/// entity-id-scoped and unreachable from here). A failed hook call or a
+/// rejected stat write is logged and otherwise ignored, same never-fatal
+/// discipline every other hook call site uses. Unlike
+/// `fire_on_character_create`, a craft only ever happens from an already
+/// fully-joined connection, so `character_entities` always has a live
+/// entity to push a resulting `StatChanged` to.
+async fn fire_on_craft_complete(
+    plugins: &Arc<tokio::sync::Mutex<Vec<crate::plugin_startup::PluginRuntime>>>,
+    character_store: &CharacterStore,
+    character_entities: &CharacterEntities,
+    global_sessions: &Sessions,
+    character_id: CharacterId,
+    recipe_key: &str,
+) {
+    let character_id_str = character_id.to_string();
+    let mut plugins = plugins.lock().await;
+    for runtime in plugins.iter_mut() {
+        if !runtime.wants("on-craft-complete")
+            || !runtime.has_capability(plugin_host::manifest::CAPABILITY_ECONOMY)
+        {
+            continue;
+        }
+        if let Err(e) = runtime
+            .plugin
+            .on_craft_complete(&character_id_str, recipe_key)
+        {
+            tracing::warn!(plugin = %runtime.name, %character_id, recipe_key, error = %e, "plugin on_craft_complete hook failed");
         }
         for (target, stat_key, delta) in runtime.drain_pending_character_stat_deltas() {
             let Ok(target_id) = target.parse::<CharacterId>() else {

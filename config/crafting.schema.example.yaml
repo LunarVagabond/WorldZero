@@ -1,0 +1,39 @@
+# Example declared recipe schema — loaded by the `character` crate
+# (crates/character/src/crafting_schema.rs), implementing #215's
+# crafting decision. Copy/rename this as crafting.schema.yaml in the
+# config dir your instance actually uses (WZ_CONFIG_DIR, or ./config by
+# default) and adjust freely — the framework doesn't declare any
+# recipes, professions, or item types of its own, same "core has no
+# opinion on the domain specifics" discipline stats.schema.yaml/
+# party.schema.yaml/guild.schema.yaml already follow.
+#
+# `category` is an opaque, dev-owned grouping/display string (e.g.
+# "blacksmithing", "alchemy") — core stores and reports it but never
+# validates or interprets it. `inputs` must be non-empty; every amount
+# (input or output) must be positive. A `CraftItem{recipe_key}` request
+# succeeds only if the caller's inventory holds at least the declared
+# amount of every input — consumption and the output grant happen
+# atomically, in one transaction, so a rejected craft never partially
+# consumes anything (character::CharacterStore::craft_item).
+schema_version: 1
+recipes:
+  - key: wolf-fang-dagger
+    category: blacksmithing
+    inputs:
+      - item_type: wolf-fang
+        amount: 3
+      - item_type: iron-ore
+        amount: 2
+    output:
+      item_type: wolf-fang-dagger
+      amount: 1
+  - key: healing-tonic
+    category: alchemy
+    inputs:
+      - item_type: herb
+        amount: 2
+      - item_type: water-flask
+        amount: 1
+    output:
+      item_type: healing-tonic
+      amount: 1

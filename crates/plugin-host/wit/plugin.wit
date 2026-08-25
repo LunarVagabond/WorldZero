@@ -31,7 +31,11 @@
 // needs to match a specific `spawn-npc` call to the `on-entity-spawn`
 // event it eventually causes, since `spawn-npc` itself can't
 // synchronously return the real entity id (see both hooks' doc comments
-// below). See
+// below). #216 adds `on-craft-complete` — the post-craft notification
+// for #215's generic crafting decision, gated behind the `economy`
+// capability at the firing site (`server::session`) rather than through
+// a host-function call, since it has no corresponding host function to
+// gate. See
 // docs/specs/Plugin_API.md, "Beyond this v0 slice" for what still isn't
 // here. #218 adds a `currency-key` parameter to `modify-currency` — a
 // dev-declared multi-currency system (`currency.schema.yaml`,
@@ -372,6 +376,22 @@ interface hooks {
     /// Live (#154): fires when a client sends a `UseItem` action.
     /// `zone-id` is where it happened.
     on-item-use: func(zone-id: string, entity-id: string, item-type: string);
+
+    /// Fired once, right after a `CraftItem` request (#216, implementing
+    /// #215's crafting decision) successfully consumes its declared
+    /// inputs and grants its declared output — post-craft notification
+    /// only, no veto mechanism (#215 deliberately defaults to
+    /// post-craft-only; core already enforced the atomic exchange by the
+    /// time this fires). No entity/zone context is given — like
+    /// `on-character-create`, a craft is account/character-scoped, not
+    /// entity-scoped, so `character-id` is what's available; a plugin
+    /// wanting to react against the crafting character's stats calls
+    /// `apply-stat-delta-for-character`. `recipe-key` is the same key the
+    /// `CraftItem` request named, resolved against the dev-declared
+    /// `crafting.schema.yaml`. Gated behind the `economy` capability
+    /// (`plugin_host::manifest::CAPABILITY_ECONOMY`), the same capability
+    /// that already covers `grant-item`/`remove-item`/`modify-currency`.
+    on-craft-complete: func(character-id: string, recipe-key: string);
 }
 
 world plugin {

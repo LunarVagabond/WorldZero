@@ -36,6 +36,9 @@
 //! - `<config_dir>/character.archetypes.yaml` (see
 //!   `config/character.archetypes.example.yaml`) — the declared
 //!   character-archetype schema (#213/#212)
+//! - `<config_dir>/crafting.schema.yaml` (see
+//!   `config/crafting.schema.example.yaml`) — the declared recipe schema
+//!   (#216/#215)
 //! - `<config_dir>/currency.schema.yaml` (see
 //!   `config/currency.schema.example.yaml`) — the declared, possibly
 //!   multi-currency schema (#217/#218)
@@ -240,6 +243,14 @@ async fn main() {
                 archetype_schema_path.display()
             )
         });
+    let crafting_schema_path = config_dir.join("crafting.schema.yaml");
+    let crafting_schema =
+        character::CraftingSchema::from_file(&crafting_schema_path).unwrap_or_else(|e| {
+            panic!(
+                "failed to load the declared recipe schema at {} (see config/crafting.schema.example.yaml): {e}",
+                crafting_schema_path.display()
+            )
+        });
     let currency_schema_path = config_dir.join("currency.schema.yaml");
     let currency_schema =
         character::CurrencySchema::from_file(&currency_schema_path).unwrap_or_else(|e| {
@@ -280,6 +291,7 @@ async fn main() {
     let party_store = Arc::new(character::PartyStore::new(pool.clone(), party_schema));
     let guild_store = Arc::new(guild::GuildStore::new(pool.clone(), guild_schema));
     let archetype_schema = Arc::new(archetype_schema);
+    let crafting_schema = Arc::new(crafting_schema);
     let currency_schema = Arc::new(currency_schema);
 
     let realm_store = realm_directory::RealmStore::new(pool.clone());
@@ -616,6 +628,7 @@ async fn main() {
         realm_presence,
         max_characters_per_account,
         archetype_schema,
+        crafting_schema,
         plugins: plugins.clone(),
         zones,
         default_zone_id,

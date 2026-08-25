@@ -812,6 +812,22 @@ impl LoadedPlugin {
             .call_on_item_use(&mut self.store, zone_id, entity_id, item_type)
             .map_err(|e| Error::new("plugin-host", format!("on_item_use hook failed: {e:#}")))
     }
+
+    /// Live: `server::session` calls this once a `CraftItem` request
+    /// successfully consumes its inputs and grants its output (#216) —
+    /// post-craft notification only, same "confirmation callback, not a
+    /// decision point" shape `on_item_acquire` already uses.
+    pub fn on_craft_complete(&mut self, character_id: &str, recipe_key: &str) -> Result<()> {
+        self.bindings
+            .worldzero_plugin_hooks()
+            .call_on_craft_complete(&mut self.store, character_id, recipe_key)
+            .map_err(|e| {
+                Error::new(
+                    "plugin-host",
+                    format!("on_craft_complete hook failed: {e:#}"),
+                )
+            })
+    }
 }
 
 #[cfg(test)]

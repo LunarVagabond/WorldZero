@@ -60,6 +60,16 @@
 // `currency.schema.yaml`, #217's decision) replaced `character`'s old
 // single `currency_balance` column, so a currency's identity has to be
 // on the wire too, not just its resulting value.
+//
+// #216 adds `CraftItem` (client) -- implementing #215's crafting
+// decision: resolves recipe_key against the dev-declared
+// crafting.schema.yaml (character::CraftingSchema) and, if every
+// declared input is present in sufficient quantity, atomically consumes
+// them and grants the declared output
+// (character::CharacterStore::craft_item). No new server message --
+// success is reported via the existing ItemChanged (once per affected
+// stack, #211) and failure via the existing Error, same "reuse what
+// already covers it" reasoning #211 itself already established.
 
 syntax = "proto3";
 
@@ -86,6 +96,7 @@ message ClientMessage {
     GuildDemote guild_demote = 17;
     GuildSetMotd guild_set_motd = 18;
     GuildSetTag guild_set_tag = 19;
+    CraftItem craft_item = 20;
   }
 }
 
@@ -259,6 +270,18 @@ message GuildSetMotd {
 // requires the `edit_tag` permission. Empty string clears it.
 message GuildSetTag {
   string tag = 1;
+}
+
+// Requests crafting recipe_key against this connection's own character
+// (#216) — recipe_key names one of the dev-declared entries in
+// crafting.schema.yaml (character::CraftingSchema). Error if recipe_key
+// is unknown, or if the caller's inventory doesn't hold at least the
+// declared amount of every input; nothing is consumed on a rejected
+// craft. On success, no dedicated reply: the resulting inventory change
+// (every consumed input, then the granted output) arrives as ordinary
+// ItemChanged pushes (#211).
+message CraftItem {
+  string recipe_key = 1;
 }
 
 message RosterEntry {

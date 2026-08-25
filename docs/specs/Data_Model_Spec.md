@@ -58,6 +58,21 @@ Same "fixed core schema, framework never interprets the meaning" discipline as `
 
 **Capacity is enforced but configurable.** `character::inventory::InventoryConfig::max_distinct_item_types` (default 40, override via `WZ_INVENTORY_MAX_ITEM_TYPES`) caps the number of *distinct* `item_type` stacks a character can hold — granting more of an already-owned type is never blocked by this, only a brand-new stack is. This is a soft, configurable UX limit (the classic "N inventory slots" game mechanic), not a hard architectural ceiling — same "solid default everywhere, never a wall for the dev" spirit as every other configurable bound in this crate, and consistent with `AttributeSchema`'s dev-declared per-stat bounds. Enforced with a plain read-then-write count check, not a transaction — acceptable because it's a soft limit, not a data-integrity boundary (see the module doc on `character::inventory` for the full reasoning).
 
+## Crafting: `crafting.schema.yaml` and the atomic craft primitive (#216/#215)
+
+A recipe is dev-declared data, not a core table — `crafting.schema.yaml` (`character::CraftingSchema`, loaded the same way `party.schema.yaml`/`guild.schema.yaml`/`character.archetypes.yaml` already are), a list of recipes each declaring:
+
+- `key` — unique within the schema, resolved against `CraftItem.recipe_key` (`docs/specs/Networking_Spec.md`)
+- `category` — an opaque, dev-owned grouping/display string (e.g. `"blacksmithing"`, `"alchemy"`); core stores and reports it but never validates or interprets it, same discipline `Attack.stat_key`/`items.item_type` already follow
+- `inputs` — a non-empty list of `{item_type, amount}`, every `amount` positive
+- `output` — a single `{item_type, amount}`, `amount` positive
+
+Validated at load (`CraftingSchema::from_yaml`): non-empty recipe list, unique recipe keys, non-empty `inputs` per recipe, positive amounts throughout — same fail-loud-at-startup discipline every other declared schema in this codebase uses.
+
+**The atomic exchange.** `character::CharacterStore::craft_item` is the one write path: given a character id and a resolved `Recipe`, it runs one Postgres transaction that locks every declared input row (`FOR UPDATE`), verifies each is present in at least the declared amount, then consumes all inputs and grants the output — or, if any input is insufficient, rolls back and changes nothing at all. This is deliberately not built on `inventory.rs`'s `grant_item`/`remove_item` (each of those is its own non-transactional statement, by design — see that module's doc comment); a craft's multi-row exchange needs the all-or-nothing guarantee those two don't individually provide, same reasoning `transfer::TransferExecutor::transfer_inner` already applies to a realm move. The output's capacity check reuses `grant_item`'s own "a *new* stack past `InventoryConfig::max_distinct_item_types` is rejected" rule.
+
+Core has no opinion on quality tiers, success chance, or profession/skill gating — that's the `on-craft-complete` plugin hook's job (`docs/specs/Plugin_API.md`).
+
 ## `realms`/`realm_zones` tables: the realm registry (#47)
 
 ```sql

@@ -97,3 +97,11 @@ Before #211, a plugin's `apply-stat-delta`/`grant-item`/`remove-item`/`modify-cu
 - `apply-stat-delta-for-character` (fired from `on-character-create`, before any entity/session necessarily exists for that character — see `wit/plugin.wit`'s doc comment on it) when the character has no live connection at the moment it's called, which is the ordinary case for this hook. Skipped silently, same as the NPC case above — there's simply nothing to push to yet.
 
 A write that fails (a rejected `remove-item` for insufficient quantity, a `modify-currency` that would go negative, an overflowed `apply-stat-delta`) never reaches the push either — same "only a value that actually landed gets pushed" discipline, logged as a `WARN` and otherwise silent, matching every other plugin host-function failure mode already documented in docs/specs/Plugin_API.md.
+
+## Crafting (#216, implementing #215's decision)
+
+**`CraftItem { recipe_key: string }`** (`session.proto`, `message_type` 200, client) — requests crafting `recipe_key` against this connection's own character. The server resolves `recipe_key` against the dev-declared `crafting.schema.yaml` (`character::CraftingSchema`, docs/specs/Data_Model_Spec.md's "Crafting" section) and, if every declared input is present in the caller's inventory in sufficient quantity, atomically consumes them and grants the declared output (`character::CharacterStore::craft_item`) — or, if any input is missing/insufficient, rejects the whole request and consumes nothing.
+
+No dedicated reply message. Success arrives as ordinary `ItemChanged` pushes (above) — one per affected stack, every consumed input first (`0` if a stack was fully consumed), then the granted output, in the recipe's own declared order. Failure — an unknown `recipe_key` or an insufficient input — arrives as the existing `Error { message }`, never a panic or a silent no-op.
+
+If the configured plugin declared both `on-craft-complete` in `plugin.toml`'s `hooks` and the `economy` capability, a successful craft also fires that hook (`character-id`, `recipe-key`) — see docs/specs/Plugin_API.md's hooks table. This is a post-craft notification only; core has already committed the exchange by the time it fires, so the hook can't veto it (#215's decision deliberately defaults to post-craft-only for v0).

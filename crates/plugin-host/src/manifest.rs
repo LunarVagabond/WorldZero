@@ -87,6 +87,7 @@ pub const KNOWN_HOOKS: &[&str] = &[
     "on-chat-command",
     "on-item-acquire",
     "on-item-use",
+    "on-craft-complete",
 ];
 
 #[derive(Debug, Clone, Deserialize)]

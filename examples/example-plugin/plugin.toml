@@ -32,4 +32,5 @@ hooks = [
     "on-npc-interact",
     "on-item-acquire",
     "on-item-use",
+    "on-craft-complete",
 ]

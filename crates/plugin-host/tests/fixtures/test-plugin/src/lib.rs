@@ -396,6 +396,33 @@ impl Guest for Plugin {
         let _ = worldzero::plugin::host::modify_currency(&entity_id, "gold", 5);
         let _ = worldzero::plugin::host::send_message(&entity_id, &format!("used {item_type}"));
     }
+
+    // Exercises on-craft-complete end to end (#216) — no entity id is
+    // given (a craft is character-scoped, same reasoning as
+    // on_character_create), so this applies a small reputation bonus via
+    // apply-stat-delta-for-character, the one host function reachable
+    // without an entity id (grant-item/remove-item/modify-currency are
+    // all entity-id-scoped and unreachable from here). Directly
+    // observable by a black-box test via the StatChanged push it
+    // triggers and a direct DB read, same convention
+    // on_character_create's own +25 write already established.
+    //
+    // Deliberately doesn't also demonstrate `plugin-state-set`'s
+    // `character` scope here: that scope's durable-persistence drain
+    // (`server::world_actor`'s pending_state_writes handling) assumes
+    // the given id is always an *entity* id and resolves it through
+    // `entity_characters` — it doesn't yet accept a raw `character-id`
+    // the way `apply-stat-delta-for-character` does, so a call from
+    // this hook would only ever update the in-memory cache, never
+    // persist. Left as a known gap rather than worked around here.
+    fn on_craft_complete(character_id: String, recipe_key: String) {
+        let _ = recipe_key;
+        let _ = worldzero::plugin::host::apply_stat_delta_for_character(
+            &character_id,
+            "reputation.ironclad_guild",
+            5,
+        );
+    }
 }
 
 export!(Plugin);
