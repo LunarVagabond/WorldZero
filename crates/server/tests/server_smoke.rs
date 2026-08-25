@@ -76,6 +76,8 @@ const PING_PONG_ADDR: &str = "127.0.0.1:7933";
 const NPC_STATS_ADDR: &str = "127.0.0.1:7934";
 const GROUP_LAYER_ADDR: &str = "127.0.0.1:7935";
 const GROUP_LAYER_RECONNECT_ADDR: &str = "127.0.0.1:7936";
+const PARTY_DECLINE_ADDR: &str = "127.0.0.1:7937";
+const PARTY_LEAVE_ADDR: &str = "127.0.0.1:7938";
 
 struct ServerProcess {
     child: Child,
@@ -441,6 +443,11 @@ fn setup_config_dir(test_name: &str) -> PathBuf {
         config_dir.join("stats.schema.yaml"),
     )
     .unwrap();
+    std::fs::copy(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../config/party.schema.example.yaml"),
+        config_dir.join("party.schema.yaml"),
+    )
+    .unwrap();
     // `<config_dir>/plugins/test-plugin/{plugin.toml,test_plugin.wasm}`
     // (#152's discovery convention) — only written if the compiled wasm
     // fixture actually exists, same "gracefully run with no plugin
@@ -508,6 +515,11 @@ fn setup_multi_plugin_config_dir(test_name: &str) -> PathBuf {
     std::fs::copy(
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../config/stats.schema.example.yaml"),
         config_dir.join("stats.schema.yaml"),
+    )
+    .unwrap();
+    std::fs::copy(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../config/party.schema.example.yaml"),
+        config_dir.join("party.schema.yaml"),
     )
     .unwrap();
 
@@ -588,6 +600,11 @@ fn setup_content_pack_config_dir(test_name: &str) -> PathBuf {
     std::fs::copy(
         repo_config_dir.join("stats.schema.example.yaml"),
         config_dir.join("stats.schema.yaml"),
+    )
+    .unwrap();
+    std::fs::copy(
+        repo_config_dir.join("party.schema.example.yaml"),
+        config_dir.join("party.schema.yaml"),
     )
     .unwrap();
     config_dir
@@ -2473,18 +2490,54 @@ async fn attacking_an_npc_applies_real_stats_and_kills_it_at_zero() {
     }
 }
 
-/// #142: two connections a low population threshold forces onto separate
-/// layers of the same zone (same setup as
+/// Sends a `PartyInvite` from `inviter` to `invitee_entity_id`, drains
+/// `invitee`'s stream until its `PartyInviteReceived` confirms delivery,
+/// then answers it with `PartyInviteResponse { accept }`. Shared by
+/// every #178 party test below — the one real trigger this ticket adds.
+async fn invite_and_respond(
+    inviter: &mut ClientStream,
+    invitee: &mut ClientStream,
+    invitee_entity_id: &str,
+    inviter_entity_id: &str,
+    accept: bool,
+) {
+    send_world(
+        inviter,
+        &ClientMessage::PartyInvite {
+            target_entity_id: invitee_entity_id.to_string(),
+            party_type: String::new(),
+        },
+    )
+    .await;
+    loop {
+        match recv_world(invitee).await {
+            ServerMessage::PartyInviteReceived { from_entity_id } => {
+                assert_eq!(from_entity_id, inviter_entity_id);
+                break;
+            }
+            ServerMessage::Moved { .. }
+            | ServerMessage::EntitySpawned { .. }
+            | ServerMessage::PluginMessage { .. } => {}
+            other => panic!("expected PartyInviteReceived, got {other:?}"),
+        }
+    }
+    send_world(invitee, &ClientMessage::PartyInviteResponse { accept }).await;
+}
+
+/// #178's core end-to-end proof: two connections a low population
+/// threshold forces onto separate layers of the same zone (same setup as
 /// `a_low_population_threshold_isolates_two_joining_connections_onto_separate_layers`
-/// above — proven isolated first, same as that test) start seeing each
-/// other live once the second sends `JoinGroupLayer` naming the first:
-/// its `ZoneChanged` roster includes the first's entity, and the first
-/// observes the second's `EntitySpawned` broadcast — proving a real
-/// cross-layer move happened, not just that the message didn't error.
+/// above — proven isolated first, same as that test) end up truly
+/// co-located once the second *accepts a real party invite* from the
+/// first — not a raw `JoinGroupLayer` call standing in for party
+/// formation, the actual invite/accept flow #178 adds firing #142's
+/// placement primitive as a side effect. Both sides get a `PartyUpdate`
+/// roster; the accepter gets a `ZoneChanged` proving the live layer move;
+/// the inviter observes the accepter's `EntitySpawned` arrival.
 #[tokio::test]
 #[ignore]
-async fn join_group_layer_moves_a_connection_onto_its_groupmates_live_layer() {
-    let config_dir = setup_content_pack_config_dir("group-layer");
+async fn accepting_a_party_invite_moves_the_accepter_onto_the_inviters_live_layer() {
+    let config_dir = setup_content_pack_config_dir("party-accept-layer");
     let _server = start_server_with_env(
         &config_dir,
         GROUP_LAYER_ADDR,
@@ -2497,7 +2550,7 @@ async fn join_group_layer_moves_a_connection_onto_its_groupmates_live_layer() {
     let mut first = connect(&config_dir, GROUP_LAYER_ADDR).await;
     register_and_authenticate(
         &mut first,
-        &format!("group-layer-a-{}", uuid::Uuid::now_v7()),
+        &format!("party-accept-a-{}", uuid::Uuid::now_v7()),
         "hunter2",
         _server.realm_id,
     )
@@ -2515,65 +2568,244 @@ async fn join_group_layer_moves_a_connection_onto_its_groupmates_live_layer() {
     let mut second = connect(&config_dir, GROUP_LAYER_ADDR).await;
     register_and_authenticate(
         &mut second,
-        &format!("group-layer-b-{}", uuid::Uuid::now_v7()),
+        &format!("party-accept-b-{}", uuid::Uuid::now_v7()),
         "hunter2",
         _server.realm_id,
     )
     .await;
-    loop {
-        if let ServerMessage::Joined { roster, .. } = recv_world(&mut second).await {
+    let second_entity_id = loop {
+        if let ServerMessage::Joined {
+            entity_id, roster, ..
+        } = recv_world(&mut second).await
+        {
             // With the threshold forcing a separate layer, the second
             // connection does *not* see the first yet — confirms the two
             // really do start on different layers, same as the
             // isolation test above.
             assert!(roster.is_empty(), "{roster:?}");
-            break;
+            break entity_id;
+        }
+    };
+
+    invite_and_respond(
+        &mut first,
+        &mut second,
+        &second_entity_id,
+        &first_entity_id,
+        true,
+    )
+    .await;
+
+    // second: a PartyUpdate naming first, and a ZoneChanged landing it on
+    // first's layer — order between the two isn't guaranteed (different
+    // delivery paths), so drain until both are seen.
+    let (mut saw_party_update, mut saw_zone_changed) = (false, false);
+    while !(saw_party_update && saw_zone_changed) {
+        match recv_world(&mut second).await {
+            ServerMessage::PartyUpdate { members } => {
+                assert_eq!(members, vec![first_entity_id.clone()]);
+                saw_party_update = true;
+            }
+            ServerMessage::ZoneChanged { roster, .. } => {
+                assert!(
+                    roster
+                        .iter()
+                        .any(|entry| entry.entity_id == first_entity_id),
+                    "{roster:?}"
+                );
+                saw_zone_changed = true;
+            }
+            ServerMessage::Moved { .. } | ServerMessage::EntitySpawned { .. } => {}
+            other => panic!("expected PartyUpdate/ZoneChanged, got {other:?}"),
+        }
+    }
+
+    // first: its own PartyUpdate naming second, and second's EntitySpawned
+    // actually arriving live — the real, observable proof the move
+    // happened, not just that second's own ZoneChanged said so.
+    let (mut saw_first_party_update, mut saw_second_arrive) = (false, false);
+    while !(saw_first_party_update && saw_second_arrive) {
+        match recv_world(&mut first).await {
+            ServerMessage::PartyUpdate { members } => {
+                assert_eq!(members, vec![second_entity_id.clone()]);
+                saw_first_party_update = true;
+            }
+            ServerMessage::EntitySpawned { entity_id, .. } if entity_id == second_entity_id => {
+                saw_second_arrive = true;
+            }
+            ServerMessage::Moved { .. } | ServerMessage::EntitySpawned { .. } => {}
+            other => panic!("expected PartyUpdate/EntitySpawned, got {other:?}"),
+        }
+    }
+}
+
+/// #178: declining an invite notifies the inviter and forms no party at
+/// all — proven by a subsequent `JoinGroupLayer` from the would-be
+/// inviter against the decliner being rejected as "not partied," the
+/// same rejection an unrelated stranger would get.
+#[tokio::test]
+#[ignore]
+async fn declining_a_party_invite_notifies_the_inviter_and_forms_no_party() {
+    let config_dir = setup_config_dir("party-decline");
+    let _server = start_server(&config_dir, PARTY_DECLINE_ADDR).await;
+    wait_for_port(PARTY_DECLINE_ADDR).await;
+
+    let mut first = connect(&config_dir, PARTY_DECLINE_ADDR).await;
+    register_and_authenticate(
+        &mut first,
+        &format!("party-decline-a-{}", uuid::Uuid::now_v7()),
+        "hunter2",
+        _server.realm_id,
+    )
+    .await;
+    let first_entity_id = loop {
+        if let ServerMessage::Joined { entity_id, .. } = recv_world(&mut first).await {
+            break entity_id;
+        }
+    };
+
+    let mut second = connect(&config_dir, PARTY_DECLINE_ADDR).await;
+    register_and_authenticate(
+        &mut second,
+        &format!("party-decline-b-{}", uuid::Uuid::now_v7()),
+        "hunter2",
+        _server.realm_id,
+    )
+    .await;
+    let second_entity_id = loop {
+        if let ServerMessage::Joined { entity_id, .. } = recv_world(&mut second).await {
+            break entity_id;
+        }
+    };
+
+    invite_and_respond(
+        &mut first,
+        &mut second,
+        &second_entity_id,
+        &first_entity_id,
+        false,
+    )
+    .await;
+
+    loop {
+        match recv_world(&mut first).await {
+            ServerMessage::PartyInviteDeclined { by_entity_id } => {
+                assert_eq!(by_entity_id, second_entity_id);
+                break;
+            }
+            ServerMessage::Moved { .. }
+            | ServerMessage::EntitySpawned { .. }
+            | ServerMessage::PluginMessage { .. } => {}
+            other => panic!("expected PartyInviteDeclined, got {other:?}"),
         }
     }
 
     send_world(
-        &mut second,
+        &mut first,
         &ClientMessage::JoinGroupLayer {
-            other_entity_id: first_entity_id.clone(),
+            other_entity_id: second_entity_id.clone(),
         },
     )
     .await;
-
-    // second lands on first's layer: a ZoneChanged whose roster now
-    // includes first.
-    match recv_world(&mut second).await {
-        ServerMessage::ZoneChanged { roster, .. } => {
-            assert!(
-                roster
-                    .iter()
-                    .any(|entry| entry.entity_id == first_entity_id),
-                "{roster:?}"
-            );
-        }
-        other => panic!("expected ZoneChanged from the group-layer join, got {other:?}"),
-    }
-
-    // first observes second actually arriving live — the real,
-    // observable proof the move happened, not just that second's own
-    // ZoneChanged said so.
     match recv_world(&mut first).await {
-        ServerMessage::EntitySpawned { .. } => {}
-        other => panic!("expected second's EntitySpawned, got {other:?}"),
+        ServerMessage::Error { message } => {
+            assert!(message.contains("not in a party"), "{message}");
+        }
+        other => panic!("expected a not-in-a-party Error, got {other:?}"),
     }
 }
 
-/// #142's second acceptance criterion: a player *reconnecting* to a
-/// group they were already in before disconnecting lands back on that
-/// group's current layer, not wherever population balancing alone would
-/// put them. `second` joins `first`'s layer live (same mechanism as the
-/// test above, which is what records `GroupMemberships`), disconnects,
-/// then logs back in as the *same* character — with the population
-/// threshold still forcing a fresh connection onto a brand-new layer,
-/// landing back on `first`'s layer at all is only possible because
-/// login itself consulted the recorded group state.
+/// #178: leaving a two-person party dissolves it entirely — the
+/// remaining member's `PartyUpdate` comes back empty, not just missing
+/// the leaver.
 #[tokio::test]
 #[ignore]
-async fn reconnecting_to_a_still_live_group_lands_on_its_current_layer() {
+async fn leaving_a_two_person_party_notifies_the_remaining_member_with_an_empty_roster() {
+    let config_dir = setup_config_dir("party-leave");
+    let _server = start_server(&config_dir, PARTY_LEAVE_ADDR).await;
+    wait_for_port(PARTY_LEAVE_ADDR).await;
+
+    let mut first = connect(&config_dir, PARTY_LEAVE_ADDR).await;
+    register_and_authenticate(
+        &mut first,
+        &format!("party-leave-a-{}", uuid::Uuid::now_v7()),
+        "hunter2",
+        _server.realm_id,
+    )
+    .await;
+    let first_entity_id = loop {
+        if let ServerMessage::Joined { entity_id, .. } = recv_world(&mut first).await {
+            break entity_id;
+        }
+    };
+
+    let mut second = connect(&config_dir, PARTY_LEAVE_ADDR).await;
+    register_and_authenticate(
+        &mut second,
+        &format!("party-leave-b-{}", uuid::Uuid::now_v7()),
+        "hunter2",
+        _server.realm_id,
+    )
+    .await;
+    let second_entity_id = loop {
+        if let ServerMessage::Joined { entity_id, .. } = recv_world(&mut second).await {
+            break entity_id;
+        }
+    };
+
+    invite_and_respond(
+        &mut first,
+        &mut second,
+        &second_entity_id,
+        &first_entity_id,
+        true,
+    )
+    .await;
+    // Drain both sides' formation confirmations (PartyUpdate/ZoneChanged/
+    // EntitySpawned, same as the acceptance test above) before leaving.
+    loop {
+        if let ServerMessage::PartyUpdate { members } = recv_world(&mut second).await {
+            assert_eq!(members, vec![first_entity_id.clone()]);
+            break;
+        }
+    }
+    loop {
+        if let ServerMessage::PartyUpdate { members } = recv_world(&mut first).await {
+            assert_eq!(members, vec![second_entity_id.clone()]);
+            break;
+        }
+    }
+
+    send_world(&mut second, &ClientMessage::PartyLeave {}).await;
+
+    loop {
+        if let ServerMessage::PartyUpdate { members } = recv_world(&mut first).await {
+            assert!(members.is_empty(), "{members:?}");
+            break;
+        }
+    }
+    loop {
+        if let ServerMessage::PartyUpdate { members } = recv_world(&mut second).await {
+            assert!(members.is_empty(), "{members:?}");
+            break;
+        }
+    }
+}
+
+/// #142's second acceptance criterion, now driven by real party
+/// formation (#178) rather than a raw `JoinGroupLayer` stand-in: a
+/// player *reconnecting* to a party they were already in before
+/// disconnecting lands back on that party's current layer, not wherever
+/// population balancing alone would put them. `second` accepts a real
+/// invite from `first` (landing them together live, same mechanism as
+/// the acceptance test above), disconnects, then logs back in as the
+/// *same* character — with the population threshold still forcing a
+/// fresh connection onto a brand-new layer, landing back on `first`'s
+/// layer at all is only possible because login itself consulted real
+/// party membership.
+#[tokio::test]
+#[ignore]
+async fn reconnecting_to_a_still_live_party_lands_on_its_current_layer() {
     let config_dir = setup_content_pack_config_dir("group-layer-reconnect");
     let _server = start_server_with_env(
         &config_dir,
@@ -2601,39 +2833,41 @@ async fn reconnecting_to_a_still_live_group_lands_on_its_current_layer() {
     let second_username = format!("group-reconnect-b-{}", uuid::Uuid::now_v7());
     let mut second = connect(&config_dir, GROUP_LAYER_RECONNECT_ADDR).await;
     register_and_authenticate(&mut second, &second_username, "hunter2", _server.realm_id).await;
-    loop {
-        if let ServerMessage::Joined { roster, .. } = recv_world(&mut second).await {
-            // Separate layer, same as the isolation/group-join tests
+    let second_entity_id = loop {
+        if let ServerMessage::Joined {
+            entity_id, roster, ..
+        } = recv_world(&mut second).await
+        {
+            // Separate layer, same as the isolation/party-accept tests
             // above — confirms the threshold really did split them
-            // before the group action below brings them together.
+            // before the invite below brings them together.
             assert!(roster.is_empty(), "{roster:?}");
-            break;
+            break entity_id;
         }
-    }
+    };
 
-    send_world(
+    invite_and_respond(
+        &mut first,
         &mut second,
-        &ClientMessage::JoinGroupLayer {
-            other_entity_id: first_entity_id.clone(),
-        },
+        &second_entity_id,
+        &first_entity_id,
+        true,
     )
     .await;
-    match recv_world(&mut second).await {
-        ServerMessage::ZoneChanged { roster, .. } => {
-            assert!(
-                roster
-                    .iter()
-                    .any(|entry| entry.entity_id == first_entity_id),
-                "{roster:?}"
-            );
+    // Drain both sides' formation confirmations before disconnecting
+    // second, so they don't confuse the reconnect roster check below.
+    let (mut saw_party_update, mut saw_zone_changed) = (false, false);
+    while !(saw_party_update && saw_zone_changed) {
+        match recv_world(&mut second).await {
+            ServerMessage::PartyUpdate { .. } => saw_party_update = true,
+            ServerMessage::ZoneChanged { .. } => saw_zone_changed = true,
+            _ => {}
         }
-        other => panic!("expected ZoneChanged from the group-layer join, got {other:?}"),
     }
-    // Drain first's observation of second's arrival before disconnecting
-    // second, so it doesn't confuse the reconnect roster check below.
-    match recv_world(&mut first).await {
-        ServerMessage::EntitySpawned { .. } => {}
-        other => panic!("expected second's EntitySpawned, got {other:?}"),
+    loop {
+        if let ServerMessage::PartyUpdate { .. } = recv_world(&mut first).await {
+            break;
+        }
     }
 
     drop(second);
@@ -2657,7 +2891,7 @@ async fn reconnecting_to_a_still_live_group_lands_on_its_current_layer() {
     select_realm(&mut second, _server.realm_id).await;
     // Same character name resolves to the same existing character via
     // `select_or_create_character`'s "select if it already exists"
-    // branch — the same character that was grouped, not a new one.
+    // branch — the same character that was partied, not a new one.
     select_or_create_character(&mut second, &second_username).await;
 
     loop {

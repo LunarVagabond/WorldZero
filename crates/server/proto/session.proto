@@ -25,6 +25,12 @@
 // type, since a layer move is the same "despawn here, spawn there, tell
 // the connection" shape as a real zone-link crossing. See
 // docs/specs/Networking_Spec.md's "Group-aware layer reassignment".
+//
+// #178 adds the real party/group system `JoinGroupLayer` deferred to:
+// `PartyInvite`/`PartyInviteResponse`/`PartyLeave` (client) and
+// `PartyInviteReceived`/`PartyInviteDeclined`/`PartyUpdate` (server).
+// `JoinGroupLayer` itself now validates real party membership before
+// moving anyone (see its own comment, updated by #178).
 
 syntax = "proto3";
 
@@ -38,6 +44,9 @@ message ClientMessage {
     InteractNpc interact_npc = 4;
     Ping ping = 5;
     JoinGroupLayer join_group_layer = 6;
+    PartyInvite party_invite = 7;
+    PartyInviteResponse party_invite_response = 8;
+    PartyLeave party_leave = 9;
   }
 }
 
@@ -94,16 +103,47 @@ message Ping {
 
 // Requests moving this connection's own entity onto whichever layer of
 // the *current* zone other_entity_id is already spawned into (#142) —
-// the live layer-reassignment primitive a group/party system calls once
-// it decides two players should end up together, not a party system
-// itself: the server performs the placement unconditionally against any
-// currently-spawned entity id in this zone, with no membership check of
-// its own (that's the group system's job — see
-// docs/specs/Networking_Spec.md's "Group-aware layer reassignment"). A
-// no-op if other_entity_id isn't currently spawned anywhere in this
-// zone, or is already on this connection's own layer.
+// the live layer-reassignment mechanism the real party system (#178)
+// uses once two players form a party. other_entity_id must actually be
+// a fellow party member (#178) — rejected with an Error otherwise. A
+// no-op (no message sent) if other_entity_id isn't currently spawned
+// anywhere in this zone, or is already on this connection's own layer.
+// See docs/specs/Networking_Spec.md's "Group-aware layer reassignment".
 message JoinGroupLayer {
   string other_entity_id = 1;
+}
+
+// Invites target_entity_id (any currently-connected player, any zone) to
+// a party (#178) — creates one first if the inviter isn't already in
+// one, or grows the inviter's existing party. A no-op beyond delivering
+// PartyInviteReceived to the target; nothing is committed to storage
+// until PartyInviteResponse accepts. At most one pending invite per
+// invitee — a second invite before the first is answered simply
+// replaces it. party_type names one of the dev-declared entries in
+// party.schema.yaml (character::party_schema::PartySchema) — only
+// meaningful when this invite founds a *new* party; empty resolves to
+// the schema's first declared type. Joining an inviter's already-
+// existing party always uses whatever type it was actually founded
+// under, regardless of what this names.
+message PartyInvite {
+  string target_entity_id = 1;
+  string party_type = 2;
+}
+
+// Answers this connection's own most recently received party invite, if
+// any (#178) — Error if there is none pending. Accepting is a real,
+// durable `character::PartyStore` write (character::party's own doc
+// comment); declining just notifies the inviter.
+message PartyInviteResponse {
+  bool accept = 1;
+}
+
+// Leaves this connection's own current party (#178) — a real
+// `character::PartyStore` write, not a chat-channel leave. If this
+// would drop the party to a single remaining member, the whole party is
+// dissolved rather than leaving a "party of one" around. Error if this
+// connection isn't currently in a party.
+message PartyLeave {
 }
 
 message RosterEntry {
@@ -124,6 +164,9 @@ message ServerMessage {
     Error error = 7;
     PluginMessage plugin_message = 8;
     Pong pong = 9;
+    PartyInviteReceived party_invite_received = 10;
+    PartyInviteDeclined party_invite_declined = 11;
+    PartyUpdate party_update = 12;
   }
 }
 
@@ -209,4 +252,23 @@ message PluginMessage {
 message Pong {
   int64 client_sent_at = 1;
   int64 server_time = 2;
+}
+
+// A party invite arrived for this connection's own entity (#178) —
+// from_entity_id names the inviter. Answer with PartyInviteResponse.
+message PartyInviteReceived {
+  string from_entity_id = 1;
+}
+
+// The party invite this connection sent was declined (#178).
+message PartyInviteDeclined {
+  string by_entity_id = 1;
+}
+
+// This connection's current party roster, sent after any membership
+// change (accept, leave, disband — #178) — every other character
+// currently in the party, as their live entity ids. Empty means "no
+// party" (just left, or the party just dissolved).
+message PartyUpdate {
+  repeated string members = 1;
 }

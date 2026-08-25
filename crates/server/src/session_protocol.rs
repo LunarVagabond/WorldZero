@@ -58,14 +58,30 @@ pub enum ClientMessage {
     InteractNpc { npc_entity_id: String },
     /// Requests moving this connection's own entity onto whichever layer
     /// of the *current* zone `other_entity_id` is already spawned into
-    /// (#142) — the live layer-reassignment primitive a group/party
-    /// system calls once it decides two players should end up together.
-    /// The server performs the placement unconditionally against any
-    /// currently-spawned entity id in this zone, with no membership
-    /// check of its own — a no-op if `other_entity_id` isn't spawned
-    /// anywhere in this zone, or is already on this connection's own
-    /// layer.
+    /// (#142) — the live layer-reassignment mechanism the real party
+    /// system (#178) uses once two players form a party. `other_entity_id`
+    /// must actually be a fellow party member (#178) — rejected otherwise.
+    /// A no-op if `other_entity_id` isn't spawned anywhere in this zone,
+    /// or is already on this connection's own layer.
     JoinGroupLayer { other_entity_id: String },
+    /// Invites `target_entity_id` (any currently-connected player, any
+    /// zone) to a party (#178) — creates one first if this connection
+    /// isn't already in one, or grows its existing party. `party_type`
+    /// names a `party.schema.yaml`-declared type; empty resolves to the
+    /// schema's first declared entry, and only matters when this invite
+    /// founds a *new* party (joining an existing one always uses
+    /// whatever type it was actually founded under).
+    PartyInvite {
+        target_entity_id: String,
+        party_type: String,
+    },
+    /// Answers this connection's own most recently received party
+    /// invite, if any (#178) — an `Error` if there is none pending.
+    PartyInviteResponse { accept: bool },
+    /// Leaves this connection's own current party (#178) — a real
+    /// `character::PartyStore` write, not a chat-channel leave. `Error`
+    /// if this connection isn't currently in a party.
+    PartyLeave {},
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -176,6 +192,23 @@ pub enum ServerMessage {
         client_sent_at: i64,
         server_time: i64,
     },
+    /// A party invite has been sent to this connection's own entity
+    /// (#178) — `from_entity_id` names the inviter. Answer with
+    /// `PartyInviteResponse`.
+    PartyInviteReceived {
+        from_entity_id: String,
+    },
+    /// The party invite this connection sent was declined (#178).
+    PartyInviteDeclined {
+        by_entity_id: String,
+    },
+    /// This connection's current party roster, sent after any membership
+    /// change (accept, leave, disband — #178) — every *other* character
+    /// currently in the party, as their live entity ids. Empty means "no
+    /// party" (just left, or the party just dissolved).
+    PartyUpdate {
+        members: Vec<String>,
+    },
 }
 
 // Both directions of this protocol define both `into_envelope` and
@@ -262,6 +295,17 @@ impl From<&ClientMessage> for proto::ClientMessage {
                     other_entity_id: other_entity_id.clone(),
                 })
             }
+            ClientMessage::PartyInvite {
+                target_entity_id,
+                party_type,
+            } => Kind::PartyInvite(proto::PartyInvite {
+                target_entity_id: target_entity_id.clone(),
+                party_type: party_type.clone(),
+            }),
+            ClientMessage::PartyInviteResponse { accept } => {
+                Kind::PartyInviteResponse(proto::PartyInviteResponse { accept: *accept })
+            }
+            ClientMessage::PartyLeave {} => Kind::PartyLeave(proto::PartyLeave {}),
         };
         proto::ClientMessage { kind: Some(kind) }
     }
@@ -293,6 +337,17 @@ impl TryFrom<proto::ClientMessage> for ClientMessage {
             Some(Kind::JoinGroupLayer(proto::JoinGroupLayer { other_entity_id })) => {
                 Ok(ClientMessage::JoinGroupLayer { other_entity_id })
             }
+            Some(Kind::PartyInvite(proto::PartyInvite {
+                target_entity_id,
+                party_type,
+            })) => Ok(ClientMessage::PartyInvite {
+                target_entity_id,
+                party_type,
+            }),
+            Some(Kind::PartyInviteResponse(proto::PartyInviteResponse { accept })) => {
+                Ok(ClientMessage::PartyInviteResponse { accept })
+            }
+            Some(Kind::PartyLeave(proto::PartyLeave {})) => Ok(ClientMessage::PartyLeave {}),
             None => Err(Error::new(
                 "server",
                 "gateway world message has no kind set",
@@ -380,6 +435,19 @@ impl From<&ServerMessage> for proto::ServerMessage {
                 client_sent_at: *client_sent_at,
                 server_time: *server_time,
             }),
+            ServerMessage::PartyInviteReceived { from_entity_id } => {
+                Kind::PartyInviteReceived(proto::PartyInviteReceived {
+                    from_entity_id: from_entity_id.clone(),
+                })
+            }
+            ServerMessage::PartyInviteDeclined { by_entity_id } => {
+                Kind::PartyInviteDeclined(proto::PartyInviteDeclined {
+                    by_entity_id: by_entity_id.clone(),
+                })
+            }
+            ServerMessage::PartyUpdate { members } => Kind::PartyUpdate(proto::PartyUpdate {
+                members: members.clone(),
+            }),
         };
         proto::ServerMessage { kind: Some(kind) }
     }
@@ -460,6 +528,15 @@ impl TryFrom<proto::ServerMessage> for ServerMessage {
                 client_sent_at,
                 server_time,
             }),
+            Some(Kind::PartyInviteReceived(proto::PartyInviteReceived { from_entity_id })) => {
+                Ok(ServerMessage::PartyInviteReceived { from_entity_id })
+            }
+            Some(Kind::PartyInviteDeclined(proto::PartyInviteDeclined { by_entity_id })) => {
+                Ok(ServerMessage::PartyInviteDeclined { by_entity_id })
+            }
+            Some(Kind::PartyUpdate(proto::PartyUpdate { members })) => {
+                Ok(ServerMessage::PartyUpdate { members })
+            }
             None => Err(Error::new(
                 "server",
                 "gateway world message has no kind set",

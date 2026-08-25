@@ -20,8 +20,8 @@ use crate::character_protocol;
 use crate::chat_session::{self, ChatDeps};
 use crate::realm_protocol;
 use crate::session_protocol::{ClientMessage, RosterEntry, ServerMessage, WORLD_MESSAGE_TYPE};
-use crate::zone_registry::ZoneRegistry;
-use crate::{despawn_from_layer, spawn_into_layer};
+use crate::zone_registry::{ZoneRegistry, ZoneRuntime};
+use crate::{despawn_from_layer, send_to, spawn_into_layer};
 
 pub type ServerStream =
     Framed<tokio_rustls::server::TlsStream<tokio::net::TcpStream>, gateway::EnvelopeCodec>;
@@ -61,36 +61,27 @@ pub type NpcStats = Arc<Mutex<HashMap<EntityId, HashMap<String, i64>>>>;
 
 /// `EntityCharacters`, reversed (#142) — which currently-connected entity
 /// id a given character is playing as right now, if any. `entity_id`
-/// alone can't answer "is this character's groupmate still online" at a
-/// later *login* (a fresh connection always gets a brand-new entity id,
-/// so any entity id recorded before a disconnect is already stale by the
-/// time a reconnect needs to consult it) — `CharacterId` is the stable
-/// key that survives the gap; this is how [`GroupMemberships`] (keyed by
-/// `CharacterId`, same reason) gets translated back into a live entity
-/// id `ZoneRegistry::join_layer_of` can actually use. Populated/cleared
-/// at the exact same two points as `EntityCharacters`.
+/// alone can't answer "is this character's party member still online" at
+/// a later *login* (a fresh connection always gets a brand-new entity
+/// id, so any entity id recorded before a disconnect is already stale by
+/// the time a reconnect needs to consult it) — `CharacterId` is the
+/// stable key that survives the gap, and `character::PartyStore`'s
+/// membership is keyed by `CharacterId` for the same reason (#178).
+/// Populated/cleared at the exact same two points as `EntityCharacters`.
 pub type CharacterEntities = Arc<Mutex<HashMap<CharacterId, EntityId>>>;
 
-/// A minimal, pairwise "who is this character currently grouped with"
-/// memory (#142) — **not** the real party/group system (#178, unbuilt):
-/// no invites, no N-member rosters, no disband semantics, just "the last
-/// entity this character successfully `JoinGroupLayer`'d onto, and vice
-/// versa," recorded automatically as a side effect of that live action
-/// (`session::handle_session`'s `ClientMessage::JoinGroupLayer` arm).
-/// Exists so #142's own reconnect-placement acceptance criterion is
-/// real, not test-only: a login looks itself up here (keyed by
-/// `CharacterId`, stable across the disconnect gap `EntityCharacters`
-/// alone can't survive) and, if its groupmate is still connected
-/// somewhere in the zone, lands on that layer instead of wherever
-/// population balancing alone would put it. Selecting a *different*
-/// character at login than the one that was grouped naturally finds no
-/// entry here (a different key) and falls through to an ordinary login —
-/// exactly the "no recovery attempted" behavior the ticket asks for,
-/// with no extra bookkeeping needed. #178 is expected to layer real
-/// invite/accept/N-member/disband semantics on top of — or in place of —
-/// this, not be blocked by it; this ticket only needed *a* query shape
-/// to satisfy its own reconnect criterion, not the final one.
-pub type GroupMemberships = Arc<Mutex<HashMap<CharacterId, CharacterId>>>;
+/// A party invite awaiting a response, keyed by the *invitee's* entity
+/// id (value: `(inviter's entity id, requested party_type)`) — #178's
+/// invite/accept/decline flow. Deliberately entity-id-scoped and
+/// process-wide, not durable: an invite only ever makes sense against a
+/// live connection (there's no "accept an invite from someone who's
+/// since logged off" case worth supporting), so there's nothing to
+/// persist and nothing to reconcile across a reconnect the way
+/// `character::PartyStore`'s actual membership needs to. A second invite
+/// to the same invitee simply overwrites the first — last invite wins,
+/// no queueing — the simplest v0 shape; a `PartyInviteResponse` always
+/// answers whichever invite is currently pending for the responder.
+pub type PendingPartyInvites = Arc<Mutex<HashMap<EntityId, (EntityId, String)>>>;
 
 /// Which roles (docs/specs/Auth_Spec.md, "Account roles", #114/#124) the
 /// account behind a connected player entity holds — populated once at
@@ -165,11 +156,16 @@ pub struct SessionDeps {
     /// zone) — never silently drops the connection over a stale zone_id.
     pub default_zone_id: String,
     pub entity_characters: EntityCharacters,
-    /// `EntityCharacters` reversed, for `GroupMemberships` reconnect
-    /// lookups (#142) — see its own doc comment.
+    /// `EntityCharacters` reversed, for reconnect-to-party lookups
+    /// (#142/#178) — see its own doc comment.
     pub character_entities: CharacterEntities,
-    /// See [`GroupMemberships`]'s own doc comment (#142).
-    pub group_memberships: GroupMemberships,
+    /// The real party/group system (#178) — invite/accept/leave, and the
+    /// membership `#142`'s placement primitive (`ZoneRegistry::join_layer_of`)
+    /// actually consults, both for the live `JoinGroupLayer` trigger and
+    /// reconnect placement.
+    pub party_store: Arc<character::PartyStore>,
+    /// See [`PendingPartyInvites`]'s own doc comment (#178).
+    pub pending_party_invites: PendingPartyInvites,
     /// Backs `EntityRoles` population at join time (#124) — `auth` (like
     /// `character`) is always wired in this combined process, so this is
     /// never optional the way `chat`/`metrics` are.
@@ -482,31 +478,30 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
         );
         deps.default_zone_id.clone()
     };
-    // Reconnecting to a still-live group (#142) is the one case initial
-    // connection resolution needs to consult group state at all — looked
-    // up *before* population-balanced assignment, which only runs if
-    // this comes back empty (no recorded groupmate, or that groupmate
-    // isn't actually online in this zone right now). Selecting a
-    // different character than the one that was grouped naturally finds
-    // no entry here (a different key) and falls straight through to an
-    // ordinary login — see `GroupMemberships`'s own doc comment.
-    let groupmate_layer = deps
-        .group_memberships
-        .lock()
-        .unwrap()
-        .get(&character_id)
-        .copied()
-        .and_then(|groupmate_character_id| {
-            deps.character_entities
-                .lock()
-                .unwrap()
-                .get(&groupmate_character_id)
-                .copied()
-        })
-        .and_then(|groupmate_entity_id| {
-            deps.zones
-                .join_layer_of(&current_zone_id, groupmate_entity_id)
-        });
+    // Reconnecting to a still-live party (#142/#178) is the one case
+    // initial connection resolution needs to consult group state at all
+    // — looked up *before* population-balanced assignment, which only
+    // runs if this comes back empty (not in a party, or no party member
+    // is actually online in this zone right now). Tries every current
+    // party member, not just one — an N-member party might have several
+    // online, only some of them in this zone. Selecting a *different*
+    // character at login than the one that was partied naturally has no
+    // party membership under this new character_id and falls straight
+    // through to an ordinary login.
+    let party_members = deps
+        .party_store
+        .members_of(character_id)
+        .await
+        .unwrap_or_default();
+    let groupmate_layer = party_members.into_iter().find_map(|member_character_id| {
+        let member_entity_id = deps
+            .character_entities
+            .lock()
+            .unwrap()
+            .get(&member_character_id)
+            .copied()?;
+        deps.zones.join_layer_of(&current_zone_id, member_entity_id)
+    });
 
     // Population-balanced layer assignment (#50) happens once, here, at
     // initial join — see `zone_registry`'s doc comment for why a later
@@ -685,56 +680,148 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
                                 }).await?;
                                 continue;
                             };
-                            // #142: the placement primitive a group/party
-                            // system calls — no membership check of its
-                            // own, that's the group system's job (still
-                            // unbuilt, #178). Resolves against *any*
-                            // currently-spawned entity id in this zone.
-                            match deps.zones.join_layer_of(&current_zone_id, other_entity_id) {
-                                Some(target) if !std::sync::Arc::ptr_eq(&target.sessions, &zone.sessions) => {
-                                    let Some(position) = zone.world.position_of(entity_id).await else {
-                                        // Already despawned/disconnecting —
-                                        // nothing to move.
-                                        continue;
-                                    };
-                                    despawn_from_layer(&zone, entity_id);
-                                    let message = spawn_into_layer(
-                                        &target,
-                                        current_zone_id.clone(),
+                            // #142's placement primitive is real
+                            // group-aware as of #178: `other_entity_id`
+                            // must actually be a fellow party member, not
+                            // just any currently-spawned entity — the
+                            // membership check #142 deliberately deferred
+                            // ("that's the group system's job") now that
+                            // the group system exists.
+                            let other_character_id = deps
+                                .entity_characters
+                                .lock()
+                                .unwrap()
+                                .get(&other_entity_id)
+                                .copied();
+                            let is_party_member = match other_character_id {
+                                Some(id) => deps
+                                    .party_store
+                                    .members_of(character_id)
+                                    .await
+                                    .map(|members| members.contains(&id))
+                                    .unwrap_or(false),
+                                None => false,
+                            };
+                            if !is_party_member {
+                                send_world(&mut sink, &ServerMessage::Error {
+                                    message: "you are not in a party with that player".to_string(),
+                                }).await?;
+                                continue;
+                            }
+                            perform_group_layer_move(
+                                &mut zone,
+                                &current_zone_id,
+                                entity_id,
+                                other_entity_id,
+                                &deps.zones,
+                                &mut sink,
+                                &outgoing_tx,
+                            ).await?;
+                        }
+                        Ok(ClientMessage::PartyInvite { target_entity_id, party_type }) => {
+                            let Ok(target_entity_id) = target_entity_id.parse::<EntityId>() else {
+                                send_world(&mut sink, &ServerMessage::Error {
+                                    message: format!("{target_entity_id:?} is not a valid entity id"),
+                                }).await?;
+                                continue;
+                            };
+                            if target_entity_id == entity_id {
+                                send_world(&mut sink, &ServerMessage::Error {
+                                    message: "you can't invite yourself".to_string(),
+                                }).await?;
+                                continue;
+                            }
+                            let target_is_player = deps
+                                .entity_characters
+                                .lock()
+                                .unwrap()
+                                .contains_key(&target_entity_id);
+                            if !target_is_player {
+                                send_world(&mut sink, &ServerMessage::Error {
+                                    message: "that entity isn't a player you can invite".to_string(),
+                                }).await?;
+                                continue;
+                            }
+                            deps.pending_party_invites
+                                .lock()
+                                .unwrap()
+                                .insert(target_entity_id, (entity_id, party_type));
+                            send_to(&deps.global_sessions, target_entity_id, ServerMessage::PartyInviteReceived {
+                                from_entity_id: entity_id.to_string(),
+                            });
+                        }
+                        Ok(ClientMessage::PartyInviteResponse { accept }) => {
+                            let Some((inviter_entity_id, requested_party_type)) = deps
+                                .pending_party_invites
+                                .lock()
+                                .unwrap()
+                                .remove(&entity_id)
+                            else {
+                                send_world(&mut sink, &ServerMessage::Error {
+                                    message: "you have no pending party invite".to_string(),
+                                }).await?;
+                                continue;
+                            };
+                            if !accept {
+                                send_to(&deps.global_sessions, inviter_entity_id, ServerMessage::PartyInviteDeclined {
+                                    by_entity_id: entity_id.to_string(),
+                                });
+                                continue;
+                            }
+                            let inviter_character_id = deps
+                                .entity_characters
+                                .lock()
+                                .unwrap()
+                                .get(&inviter_entity_id)
+                                .copied();
+                            let Some(inviter_character_id) = inviter_character_id else {
+                                send_world(&mut sink, &ServerMessage::Error {
+                                    message: "the player who invited you is no longer connected".to_string(),
+                                }).await?;
+                                continue;
+                            };
+                            match deps.party_store.accept_invite(inviter_character_id, character_id, &requested_party_type).await {
+                                Ok(_) => {
+                                    let mut interested = deps
+                                        .party_store
+                                        .members_of(character_id)
+                                        .await
+                                        .unwrap_or_default();
+                                    interested.push(character_id);
+                                    refresh_party_rosters(&deps, &interested).await;
+                                    // Lands the accepter alongside the
+                                    // inviter live if they're already in
+                                    // the same zone (#142) — a no-op
+                                    // otherwise (different zone, or the
+                                    // inviter's own connection just
+                                    // dropped), same as `JoinGroupLayer`.
+                                    perform_group_layer_move(
+                                        &mut zone,
+                                        &current_zone_id,
                                         entity_id,
-                                        position,
-                                        outgoing_tx.clone(),
-                                    ).await;
-                                    send_world(&mut sink, &message).await?;
-                                    zone = target;
-
-                                    // Records this pairing for reconnect
-                                    // placement (#142's `GroupMemberships`,
-                                    // see its own doc comment) — only when
-                                    // the target resolves to a real
-                                    // character (a player, not e.g. an NPC
-                                    // — the move itself works against any
-                                    // entity, but "group membership" only
-                                    // means something between two players).
-                                    if let Some(other_character_id) = deps
-                                        .entity_characters
-                                        .lock()
-                                        .unwrap()
-                                        .get(&other_entity_id)
-                                        .copied()
-                                    {
-                                        let mut memberships =
-                                            deps.group_memberships.lock().unwrap();
-                                        memberships.insert(character_id, other_character_id);
-                                        memberships.insert(other_character_id, character_id);
-                                    }
+                                        inviter_entity_id,
+                                        &deps.zones,
+                                        &mut sink,
+                                        &outgoing_tx,
+                                    ).await?;
                                 }
-                                // Already on other_entity_id's layer, or
-                                // other_entity_id isn't spawned anywhere in
-                                // this zone right now — no move needed
-                                // (acceptance criteria: unaffected unless a
-                                // cross-layer move is actually needed).
-                                _ => {}
+                                Err(e) => {
+                                    send_world(&mut sink, &ServerMessage::Error { message: e.to_string() }).await?;
+                                }
+                            }
+                        }
+                        Ok(ClientMessage::PartyLeave {}) => {
+                            let mut interested = deps
+                                .party_store
+                                .members_of(character_id)
+                                .await
+                                .unwrap_or_default();
+                            interested.push(character_id);
+                            match deps.party_store.leave(character_id).await {
+                                Ok(()) => refresh_party_rosters(&deps, &interested).await,
+                                Err(e) => {
+                                    send_world(&mut sink, &ServerMessage::Error { message: e.to_string() }).await?;
+                                }
                             }
                         }
                         Err(e) => {
@@ -973,6 +1060,88 @@ fn unix_millis_now() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system clock is before the Unix epoch")
         .as_millis() as i64
+}
+
+/// Actually performs a live layer move onto `other_entity_id`'s layer,
+/// if one is actually needed — the mechanics half of the `#142`
+/// placement primitive, shared by `JoinGroupLayer` (which validates real
+/// party membership before calling this) and `PartyInviteResponse`'s
+/// accept path (membership was just established, no separate check
+/// needed). A no-op — no message sent — if `other_entity_id` isn't
+/// spawned anywhere in this zone right now, or is already on the
+/// caller's own layer.
+async fn perform_group_layer_move(
+    zone: &mut ZoneRuntime,
+    zone_id: &str,
+    entity_id: EntityId,
+    other_entity_id: EntityId,
+    zones: &ZoneRegistry,
+    sink: &mut ServerSink,
+    outgoing_tx: &mpsc::UnboundedSender<Envelope>,
+) -> Result<()> {
+    match zones.join_layer_of(zone_id, other_entity_id) {
+        Some(target) if !Arc::ptr_eq(&target.sessions, &zone.sessions) => {
+            let Some(position) = zone.world.position_of(entity_id).await else {
+                // Already despawned/disconnecting — nothing to move.
+                return Ok(());
+            };
+            despawn_from_layer(zone, entity_id);
+            let message = spawn_into_layer(
+                &target,
+                zone_id.to_string(),
+                entity_id,
+                position,
+                outgoing_tx.clone(),
+            )
+            .await;
+            send_world(sink, &message).await?;
+            *zone = target;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Sends every currently-online character in `interested` a fresh
+/// `PartyUpdate` reflecting *their own* current party roster (#178) —
+/// called after any membership change (accept, leave/dissolve), since a
+/// change to one member's party can change what every other member
+/// should see. A character no longer in a party (the one who just left,
+/// or everyone if the party just dissolved) correctly gets an empty
+/// roster back from `PartyStore::members_of` — no special-casing needed.
+async fn refresh_party_rosters(deps: &SessionDeps, interested: &[CharacterId]) {
+    for &character_id in interested {
+        let Some(entity_id) = deps
+            .character_entities
+            .lock()
+            .unwrap()
+            .get(&character_id)
+            .copied()
+        else {
+            continue;
+        };
+        let Ok(members) = deps.party_store.members_of(character_id).await else {
+            continue;
+        };
+        let member_entity_ids: Vec<String> = members
+            .iter()
+            .filter_map(|member_character_id| {
+                deps.character_entities
+                    .lock()
+                    .unwrap()
+                    .get(member_character_id)
+                    .copied()
+            })
+            .map(|id| id.to_string())
+            .collect();
+        send_to(
+            &deps.global_sessions,
+            entity_id,
+            ServerMessage::PartyUpdate {
+                members: member_entity_ids,
+            },
+        );
+    }
 }
 
 fn queue(outgoing_tx: &mpsc::UnboundedSender<Envelope>, message: &ServerMessage) {

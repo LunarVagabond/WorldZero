@@ -25,6 +25,7 @@ config/certs/
 # never the templates themselves.
 config/zone.manifest.yaml
 config/stats.schema.yaml
+config/party.schema.yaml
 config/plugin.toml
 
 # Logs

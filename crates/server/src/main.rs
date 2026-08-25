@@ -27,6 +27,9 @@
 //! - `<config_dir>/stats.schema.yaml` (see
 //!   `config/stats.schema.example.yaml`) — the declared
 //!   character attribute schema
+//! - `<config_dir>/party.schema.yaml` (see
+//!   `config/party.schema.example.yaml`) — the declared party-type/size
+//!   schema (#178)
 //!
 //! Optional: `WZ_SERVER_ADDR` (default `127.0.0.1:7900`),
 //! `WZ_PLUGINS_DIR` (default `<config_dir>/plugins`) — a directory of
@@ -81,7 +84,7 @@ use content::content_pack::ContentPack;
 use content::manifest::ZoneManifest;
 use futures_util::StreamExt;
 use session::{
-    CharacterEntities, EntityCharacters, EntityRoles, GroupMemberships, NpcStats, SessionDeps,
+    CharacterEntities, EntityCharacters, EntityRoles, NpcStats, PendingPartyInvites, SessionDeps,
     Sessions,
 };
 use session_protocol::{RosterEntry, ServerMessage};
@@ -203,6 +206,13 @@ async fn main() {
             schema_path.display()
         )
     });
+    let party_schema_path = config_dir.join("party.schema.yaml");
+    let party_schema = character::PartySchema::from_file(&party_schema_path).unwrap_or_else(|e| {
+        panic!(
+            "failed to load the declared party-type schema at {} (see config/party.schema.example.yaml): {e}",
+            party_schema_path.display()
+        )
+    });
     let inventory_config =
         InventoryConfig::from_env().expect("invalid WZ_INVENTORY_MAX_ITEM_TYPES");
     // #193's character-creation cap — a `server`-side policy value (like
@@ -232,6 +242,7 @@ async fn main() {
     // `character_store` gets — not a second file load that could drift.
     let npc_attribute_schema = Arc::new(schema.clone());
     let character_store = Arc::new(CharacterStore::new(pool.clone(), schema, inventory_config));
+    let party_store = Arc::new(character::PartyStore::new(pool.clone(), party_schema));
 
     let realm_store = realm_directory::RealmStore::new(pool.clone());
     let realm = resolve_realm(&realm_store).await;
@@ -282,7 +293,7 @@ async fn main() {
     let character_entities: CharacterEntities = Arc::new(Mutex::new(HashMap::new()));
     let entity_roles: EntityRoles = Arc::new(Mutex::new(HashMap::new()));
     let npc_stats: NpcStats = Arc::new(Mutex::new(HashMap::new()));
-    let group_memberships: GroupMemberships = Arc::new(Mutex::new(HashMap::new()));
+    let pending_party_invites: PendingPartyInvites = Arc::new(Mutex::new(HashMap::new()));
 
     // Every connected entity's outgoing channel, process-wide, regardless
     // of which zone it's currently in (#152) — backs the plugin
@@ -564,7 +575,8 @@ async fn main() {
         default_zone_id,
         entity_characters,
         character_entities,
-        group_memberships,
+        party_store,
+        pending_party_invites,
         role_store,
         entity_roles,
         plugin_message_types,

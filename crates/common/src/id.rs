@@ -154,6 +154,13 @@ pub type EntityId = Id<EntityMarker>;
 pub struct ChannelMarker;
 pub type ChannelId = Id<ChannelMarker>;
 
+/// A party/group's durable identity (#178) — a small roster of
+/// `CharacterId`s, not `AccountId`s (a party membership is per-character,
+/// matching `#142`'s reconnect-placement logic, which already keys off
+/// the specific character too).
+pub struct PartyMarker;
+pub type PartyId = Id<PartyMarker>;
+
 #[cfg(test)]
 mod tests {
     use super::*;
