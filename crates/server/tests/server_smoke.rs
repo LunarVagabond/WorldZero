@@ -50,6 +50,8 @@ const LAYER_DISABLED_ADDR: &str = "127.0.0.1:7919";
 const PLAYER_SESSION_ADDR: &str = "127.0.0.1:7920";
 const COMBAT_ADDR: &str = "127.0.0.1:7921";
 const MULTI_PLUGIN_ADDR: &str = "127.0.0.1:7922";
+const OPEN_LEASE_ADDR: &str = "127.0.0.1:7923";
+const BOUND_REALM_ADDR: &str = "127.0.0.1:7924";
 
 struct ServerProcess {
     child: Child,
@@ -62,26 +64,42 @@ impl Drop for ServerProcess {
     }
 }
 
-fn start_server(config_dir: &std::path::Path, addr: &str) -> ServerProcess {
-    start_server_with(config_dir, addr, true)
+/// A fresh realm for one test's server process to serve (#136 —
+/// `WZ_REALM_ID` is required now, no more `placeholder_realm_id()`).
+/// Every call gets its own uniquely-named realm, so concurrently-run
+/// tests never share one.
+async fn create_realm(open_or_bound: realm_directory::OpenOrBound) -> common::id::RealmId {
+    let pg_config = common::config::PostgresConfig::from_env().expect("WZ_POSTGRES_* env vars set");
+    let pool = common::pool::postgres_pool(&pg_config, common::pool::PoolOptions::default())
+        .await
+        .expect("failed to connect to Postgres to set up a test realm");
+    let store = realm_directory::RealmStore::new(pool);
+    let name = format!("smoke-test-realm-{}", common::id::RealmId::new());
+    store.create(&name, open_or_bound).await.unwrap()
+}
+
+async fn start_server(config_dir: &std::path::Path, addr: &str) -> ServerProcess {
+    start_server_with(config_dir, addr, true).await
 }
 
 /// `chat_enabled = false` sets `WZ_SERVICE_CHAT_ENABLED=false` (#104) —
 /// otherwise identical to `start_server`.
-fn start_server_with(
+async fn start_server_with(
     config_dir: &std::path::Path,
     addr: &str,
     chat_enabled: bool,
 ) -> ServerProcess {
-    start_server_with_env(config_dir, addr, chat_enabled, &[])
+    start_server_with_env(config_dir, addr, chat_enabled, &[]).await
 }
 
 /// Same as `start_server_with`, plus arbitrary extra env vars — used by
 /// the zone-transition test (#45) to raise `WZ_WORLD_MAX_SPEED_MPS`
 /// enough for one queued move to cross a link edge hundreds of meters
 /// away in a single tick, without waiting out hundreds of real ticks at
-/// the default walking-speed cap.
-fn start_server_with_env(
+/// the default walking-speed cap, and by the realm-policy tests (#136)
+/// to pass a specific `WZ_REALM_ID` rather than the freshly-created open
+/// realm every other test gets by default.
+async fn start_server_with_env(
     config_dir: &std::path::Path,
     addr: &str,
     chat_enabled: bool,
@@ -123,6 +141,13 @@ fn start_server_with_env(
     if let Ok(password) = std::env::var("WZ_REDIS_PASSWORD") {
         command.env("WZ_REDIS_PASSWORD", password);
     }
+
+    // A fresh open realm by default (#136) — overridden below if
+    // `extra_env` names its own `WZ_REALM_ID` (the realm-policy tests do
+    // this to point at a realm they've set up with specific policy/zone
+    // assignments).
+    let default_realm_id = create_realm(realm_directory::OpenOrBound::Open).await;
+    command.env("WZ_REALM_ID", default_realm_id.to_string());
 
     // #152: plugins are discovered from `<config_dir>/plugins/<name>/`,
     // not a single `WZ_PLUGIN_MANIFEST_PATH`/`WZ_PLUGIN_WASM_PATH` pair
@@ -423,7 +448,7 @@ fn setup_content_pack_config_dir(test_name: &str) -> PathBuf {
 async fn connect_register_move_and_persist_across_reconnect() {
     let config_dir = setup_config_dir("move");
 
-    let _server = start_server(&config_dir, ADDR);
+    let _server = start_server(&config_dir, ADDR).await;
     wait_for_port(ADDR).await;
 
     let username = format!("smoke-{}", uuid::Uuid::now_v7());
@@ -549,7 +574,7 @@ async fn connect_register_move_and_persist_across_reconnect() {
 async fn player_join_and_leave_hooks_fire_for_real() {
     let config_dir = setup_config_dir("player-session");
 
-    let _server = start_server(&config_dir, PLAYER_SESSION_ADDR);
+    let _server = start_server(&config_dir, PLAYER_SESSION_ADDR).await;
     wait_for_port(PLAYER_SESSION_ADDR).await;
 
     let username = format!("smoke-{}", uuid::Uuid::now_v7());
@@ -649,7 +674,7 @@ async fn player_join_and_leave_hooks_fire_for_real() {
 async fn combat_item_use_npc_interact_and_death_respawn_hooks_fire_for_real() {
     let config_dir = setup_config_dir("combat-hooks");
 
-    let _server = start_server(&config_dir, COMBAT_ADDR);
+    let _server = start_server(&config_dir, COMBAT_ADDR).await;
     wait_for_port(COMBAT_ADDR).await;
 
     let mut attacker = connect(&config_dir, COMBAT_ADDR).await;
@@ -823,7 +848,7 @@ async fn combat_item_use_npc_interact_and_death_respawn_hooks_fire_for_real() {
 async fn two_independent_plugins_fan_out_a_shared_hook_and_keep_message_types_separate() {
     let config_dir = setup_multi_plugin_config_dir("multi-plugin");
 
-    let _server = start_server(&config_dir, MULTI_PLUGIN_ADDR);
+    let _server = start_server(&config_dir, MULTI_PLUGIN_ADDR).await;
     wait_for_port(MULTI_PLUGIN_ADDR).await;
 
     let mut stream = connect(&config_dir, MULTI_PLUGIN_ADDR).await;
@@ -915,7 +940,8 @@ async fn zone_transition_crosses_a_link_without_reconnecting() {
         ZONE_TRANSITION_ADDR,
         true,
         &[("WZ_WORLD_MAX_SPEED_MPS", "1000000")],
-    );
+    )
+    .await;
     wait_for_port(ZONE_TRANSITION_ADDR).await;
 
     let mut stream = connect(&config_dir, ZONE_TRANSITION_ADDR).await;
@@ -980,7 +1006,8 @@ async fn a_low_population_threshold_isolates_two_joining_connections_onto_separa
         LAYER_ADDR,
         false,
         &[("WZ_LAYER_POPULATION_THRESHOLD", "1")],
-    );
+    )
+    .await;
     wait_for_port(LAYER_ADDR).await;
 
     let mut first = connect(&config_dir, LAYER_ADDR).await;
@@ -1032,7 +1059,8 @@ async fn layering_disabled_keeps_connections_on_the_same_layer_regardless_of_thr
             ("WZ_LAYER_ENABLED", "false"),
             ("WZ_LAYER_POPULATION_THRESHOLD", "1"),
         ],
-    );
+    )
+    .await;
     wait_for_port(LAYER_DISABLED_ADDR).await;
 
     let mut first = connect(&config_dir, LAYER_DISABLED_ADDR).await;
@@ -1078,7 +1106,7 @@ async fn layering_disabled_keeps_connections_on_the_same_layer_regardless_of_thr
 #[ignore]
 async fn chat_join_send_and_receive_across_two_connections() {
     let config_dir = setup_config_dir("chat");
-    let _server = start_server(&config_dir, CHAT_ADDR);
+    let _server = start_server(&config_dir, CHAT_ADDR).await;
     wait_for_port(CHAT_ADDR).await;
 
     let channel = format!("smoke-{}", uuid::Uuid::now_v7());
@@ -1161,7 +1189,7 @@ async fn chat_join_send_and_receive_across_two_connections() {
 #[ignore]
 async fn chat_disabled_returns_a_clear_error() {
     let config_dir = setup_config_dir("chat-disabled");
-    let _server = start_server_with(&config_dir, CHAT_DISABLED_ADDR, false);
+    let _server = start_server_with(&config_dir, CHAT_DISABLED_ADDR, false).await;
     wait_for_port(CHAT_DISABLED_ADDR).await;
 
     let mut stream = connect(&config_dir, CHAT_DISABLED_ADDR).await;
@@ -1212,7 +1240,8 @@ async fn metrics_endpoint_serves_prometheus_text() {
         "127.0.0.1:7915",
         true,
         &[("WZ_METRICS_ADDR", metrics_addr)],
-    );
+    )
+    .await;
     wait_for_port("127.0.0.1:7915").await;
     wait_for_port(metrics_addr).await;
 
@@ -1284,7 +1313,8 @@ async fn metrics_disabled_means_no_listener_at_all() {
             ("WZ_METRICS_ADDR", metrics_addr),
             ("WZ_SERVICE_METRICS_ENABLED", "false"),
         ],
-    );
+    )
+    .await;
     wait_for_port("127.0.0.1:7917").await;
 
     // Give the process a moment to have started (and *not* bound the
@@ -1294,4 +1324,118 @@ async fn metrics_disabled_means_no_listener_at_all() {
         tokio::net::TcpStream::connect(metrics_addr).await.is_err(),
         "metrics listener should not be bound when WZ_SERVICE_METRICS_ENABLED=false"
     );
+}
+
+/// #51/#136, end to end (not just `realm-directory`'s own crate-level
+/// tests): two connections for the same account, both logging into the
+/// same open realm at once, is exactly the split-brain scenario #21's
+/// session lease exists to prevent — `login_policy::authorize_login`
+/// must refuse the second one while the first is still connected and
+/// holding the lease.
+#[tokio::test]
+#[ignore]
+async fn a_second_login_to_the_same_open_realm_character_is_rejected_while_the_first_is_still_connected()
+ {
+    let config_dir = setup_config_dir("open-lease");
+    let _server = start_server(&config_dir, OPEN_LEASE_ADDR).await;
+    wait_for_port(OPEN_LEASE_ADDR).await;
+
+    let username = format!("open-lease-{}", uuid::Uuid::now_v7());
+    let password = "hunter2";
+
+    // First connection stays open for the rest of this test — its lease
+    // is never released.
+    let mut first = connect(&config_dir, OPEN_LEASE_ADDR).await;
+    register_and_authenticate(&mut first, &username, password).await;
+    assert!(matches!(
+        recv_world(&mut first).await,
+        ServerMessage::Joined { .. }
+    ));
+
+    // Second connection, same account: `authorize_login` should refuse
+    // it — the first connection's lease on this character is still held.
+    let mut second = connect(&config_dir, OPEN_LEASE_ADDR).await;
+    send_auth(
+        &mut second,
+        &AuthClientMessage::Login {
+            username,
+            password: password.to_string(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv_auth(&mut second).await,
+        AuthServerMessage::Authenticated { .. }
+    ));
+    match recv_auth(&mut second).await {
+        AuthServerMessage::Error { message } => {
+            assert!(message.contains("already logged in elsewhere"), "{message}");
+        }
+        other => panic!("expected the second login to be rejected, got {other:?}"),
+    }
+}
+
+/// A bound realm's login flow, end to end — separate from the open-realm
+/// lease-contention test above, since a bound realm never touches #21's
+/// lease table at all. Note: `authorize_login`'s bound-mismatch
+/// *rejection* branch itself isn't reachable through this single-realm-
+/// per-process login flow — `resolve_or_create_character` only ever
+/// resolves a character whose `realm_id` already matches `deps.realm_id`
+/// for a bound realm (`CharacterStore::find_by_account`'s realm-scoped
+/// lookup), so the mismatch case can't fire here; it needs a real
+/// multi-realm character-selection flow (#193) to reach, and is already
+/// covered by `realm-directory`'s own crate-level tests
+/// (`login_policy.rs`). This test instead proves the ordinary bound-realm
+/// path — resolve, authorize, reconnect to the same character — is
+/// really wired through `login_policy` rather than skipped.
+#[tokio::test]
+#[ignore]
+async fn a_bound_realm_login_resolves_and_authorizes_through_the_real_policy() {
+    let config_dir = setup_config_dir("bound-realm");
+    let realm_id = create_realm(realm_directory::OpenOrBound::Bound).await;
+    let realm_id = realm_id.to_string();
+    let _server = start_server_with_env(
+        &config_dir,
+        BOUND_REALM_ADDR,
+        true,
+        &[("WZ_REALM_ID", realm_id.as_str())],
+    )
+    .await;
+    wait_for_port(BOUND_REALM_ADDR).await;
+
+    let username = format!("bound-realm-{}", uuid::Uuid::now_v7());
+    let password = "hunter2";
+
+    let mut stream = connect(&config_dir, BOUND_REALM_ADDR).await;
+    register_and_authenticate(&mut stream, &username, password).await;
+    assert!(matches!(
+        recv_world(&mut stream).await,
+        ServerMessage::Joined { .. }
+    ));
+    drop(stream);
+    // Give the session task a moment to notice the disconnect, release
+    // the lease (a harmless no-op here, since a bound realm never took
+    // one), and persist.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Reconnect: resolved via `login_policy::resolve_character`'s bound
+    // branch, then authorized — the same character, not a freshly
+    // auto-created one.
+    let mut stream = connect(&config_dir, BOUND_REALM_ADDR).await;
+    send_auth(
+        &mut stream,
+        &AuthClientMessage::Login {
+            username,
+            password: password.to_string(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv_auth(&mut stream).await,
+        AuthServerMessage::Authenticated { .. }
+    ));
+    assert!(matches!(
+        recv_world(&mut stream).await,
+        ServerMessage::Joined { .. }
+    ));
 }

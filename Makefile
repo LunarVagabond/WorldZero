@@ -9,6 +9,11 @@ PID_FILE := $(PID_DIR)/server.pid
 LOG_FILE := $(LOG_DIR)/server.log
 EXAMPLE_PLUGIN_DIR := examples/example-plugin
 EXAMPLE_PLUGIN_WASM := $(EXAMPLE_PLUGIN_DIR)/target/wasm32-wasip2/release/example_plugin.wasm
+# `make quickstart`'s realm (#136) — created once via `realm ensure`
+# (idempotent by name) and cached here so re-running quickstart reuses
+# the same realm instead of minting a new one every time; a dev who sets
+# their own WZ_REALM_ID in .env skips this file entirely.
+QUICKSTART_REALM_ID_FILE := $(RUN_DIR)/quickstart_realm_id
 
 .PHONY: help build run quickstart start stop restart status test test-live fmt fmt-check lint check clean migrate migrate-down chat-server chat realm docker-up docker-down docker-status docker-logs
 
@@ -32,8 +37,8 @@ help:
 	@echo "  make status        report whether the background server is running"
 	@echo "  make migrate       apply pending db/migrations/*.up.sql (needs WZ_POSTGRES_* — .env is loaded automatically)"
 	@echo "  make migrate-down  revert the most recently applied migration (its .down.sql)"
-	@echo "  make realm ARGS='create MyRealm open'   realm-directory CLI (create/list/get/update/delete/"
-	@echo "                     assign-zone/unassign-zone — needs WZ_POSTGRES_*, run 'make realm ARGS=' for full usage)"
+	@echo "  make realm ARGS='create MyRealm open'   realm-directory CLI (create/ensure/list/get/update/"
+	@echo "                     delete/assign-zone/unassign-zone — needs WZ_POSTGRES_*, run 'make realm ARGS=' for full usage)"
 	@echo "  make chat-server   run the chat gateway demo server (TCP+TLS+auth, routes into chat) — start this first"
 	@echo "  make chat NAME=x   run an interactive chat demo client as username 'x' (gateway mode by default,"
 	@echo "                     needs ARGS='--password <pw>' — add --register on first use to create the account;"
@@ -50,7 +55,7 @@ build:
 	$(CARGO) build --workspace
 
 run:
-	$(CARGO) run -p server
+	WZ_REALM_ID=$${WZ_REALM_ID:-$$(cat $(QUICKSTART_REALM_ID_FILE) 2>/dev/null)} $(CARGO) run -p server
 
 # One command from clone to a running world (#43, docs/PROPOSAL.md's
 # Developer Experience Bar) — zero required config beyond WZ_POSTGRES_*/
@@ -69,7 +74,10 @@ quickstart:
 	@mkdir -p config/plugins/example-plugin
 	@[ -f config/plugins/example-plugin/plugin.toml ] || cp $(EXAMPLE_PLUGIN_DIR)/plugin.toml config/plugins/example-plugin/plugin.toml
 	cp $(EXAMPLE_PLUGIN_WASM) config/plugins/example-plugin/example_plugin.wasm
-	$(CARGO) run -p server
+	@mkdir -p $(RUN_DIR)
+	@[ -n "$$WZ_REALM_ID" ] || [ -f $(QUICKSTART_REALM_ID_FILE) ] || \
+		$(CARGO) run -q -p realm-directory --bin realm -- ensure quickstart open | tail -n 1 > $(QUICKSTART_REALM_ID_FILE)
+	WZ_REALM_ID=$${WZ_REALM_ID:-$$(cat $(QUICKSTART_REALM_ID_FILE))} $(CARGO) run -p server
 
 start:
 	@mkdir -p $(PID_DIR) $(LOG_DIR)
@@ -77,6 +85,8 @@ start:
 		echo "server already running (pid $$(cat $(PID_FILE)))"; \
 	else \
 		$(CARGO) build -p server; \
+		WZ_REALM_ID=$${WZ_REALM_ID:-$$(cat $(QUICKSTART_REALM_ID_FILE) 2>/dev/null)}; \
+		export WZ_REALM_ID; \
 		( $(CARGO) run -p server > $(LOG_FILE) 2>&1 & echo $$! > $(PID_FILE) ); \
 		sleep 1; \
 		echo "server started (pid $$(cat $(PID_FILE))), logs: $(LOG_FILE)"; \

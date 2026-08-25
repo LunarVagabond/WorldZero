@@ -194,18 +194,30 @@ Dynamic layer assignment ([#50](https://github.com/LunarVagabond/WorldZero/issue
 
 ## Step 8 — Realms & transfers (real, but not yet live)
 
-**Read this before you plan around either of these.** `realm-directory` (realm CRUD, open-vs-bound character-binding policy, cross-realm consistency) and `transfer` (moving a character between bound realms, with gating and an audit trail) are both real, fully tested crates — but **neither is wired into the combined `server` process yet.** `server::main` still runs on a single hardcoded placeholder realm; there's no config file or env var for either crate because there's no live code path that would consume one. Full wiring is tracked as [#136](https://github.com/LunarVagabond/WorldZero/issues/136).
+`realm-directory` (realm CRUD, open-vs-bound character-binding policy, cross-realm consistency) is wired into the combined `server` process as of [#136](https://github.com/LunarVagabond/WorldZero/issues/136) — `transfer` (moving a character between bound realms, with gating and an audit trail) is a real, fully tested crate too, but **still isn't wired in**; there's no config file or env var for it yet because there's no live code path that would consume one.
 
-What *is* usable today: `realm-directory` ships a CLI over its real `RealmStore` —
+**Required, no default** — `server` refuses to start without this:
+
+| Var | Purpose |
+|---|---|
+| `WZ_REALM_ID` | The one realm this `server` process serves. Create it first — see below — and pass the id `make realm` prints. A single process serving more than one realm at once is [#130](https://github.com/LunarVagabond/WorldZero/issues/130)'s job, not this one's. |
+
+**Optional, with a default:**
+
+| Var | Default | Purpose |
+|---|---|---|
+| `WZ_REALM_LEASE_TTL_SECS` | `60` | [#21](https://github.com/LunarVagabond/WorldZero/issues/21)'s open-realm session lease TTL — only consulted when `WZ_REALM_ID` names an `open` realm; a `bound` realm never takes a lease. |
+
+Create the realm `WZ_REALM_ID` will point at (and, for a multi-zone deployment, assign your zones to it) with `realm-directory`'s CLI over its real `RealmStore` — still the only way to create/manage realms themselves; there's no in-game or admin-API flow for that yet:
 
 ```sh
-make realm ARGS="create MyRealm open"      # or "bound"
+make realm ARGS="create MyRealm open"      # or "bound" — prints the new realm's id
 make realm ARGS="list"
 make realm ARGS="get <realm-id>"
 make realm ARGS="assign-zone <realm-id> greenwood-forest"
 ```
 
-— useful for experimenting with the data model or preparing realm definitions ahead of #136 landing, but it has no effect on how the combined `server` binary behaves right now. See [`docs/specs/Realm_Character_Policy_Spec.md`](../specs/Realm_Character_Policy_Spec.md) for the full open-vs-bound design and [`docs/specs/Data_Model_Spec.md`](../specs/Data_Model_Spec.md) for the schema, both real and worth reading if you're planning a multi-realm game ahead of time.
+See [`docs/specs/Realm_Character_Policy_Spec.md`](../specs/Realm_Character_Policy_Spec.md) for the full open-vs-bound design (including what a bound-realm login rejection looks like and how the open-realm lease works) and [`docs/specs/Data_Model_Spec.md`](../specs/Data_Model_Spec.md) for the schema.
 
 ---
 
@@ -221,8 +233,8 @@ make realm ARGS="assign-zone <realm-id> greenwood-forest"
 | `gateway` | `WZ_TLS_CERT_PATH`, `WZ_TLS_KEY_PATH` | — | `CertMaterial` |
 | `plugin-host` | — | `plugin.toml` | `PluginManifest` |
 | `chat` | (toggle lives in `common`) | — | `ChannelStore`, `ChatBus` |
-| `server` | `WZ_SERVER_ADDR`, `WZ_METRICS_ADDR`, `WZ_LAYER_ENABLED`, `WZ_LAYER_POPULATION_THRESHOLD`, `WZ_PLUGINS_DIR` | — | — |
-| `realm-directory` | none (not wired into `server` yet) | — | `RealmStore`, `LoginPolicy`, `RealmPresence` |
+| `server` | `WZ_SERVER_ADDR`, `WZ_METRICS_ADDR`, `WZ_LAYER_ENABLED`, `WZ_LAYER_POPULATION_THRESHOLD`, `WZ_PLUGINS_DIR`, `WZ_REALM_ID`, `WZ_REALM_LEASE_TTL_SECS` | — | — |
+| `realm-directory` | (consumed via `server`'s `WZ_REALM_ID`/`WZ_REALM_LEASE_TTL_SECS` above) | — | `RealmStore`, `LoginPolicy`, `RealmPresence` |
 | `transfer` | none (not wired into `server` yet) | — | `TransferExecutor`, `TransferGateStore`, `TransferAuditLog` |
 
 ## Where to go next
