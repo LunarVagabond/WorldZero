@@ -36,10 +36,27 @@ pub type Sessions = Arc<Mutex<HashMap<EntityId, mpsc::UnboundedSender<Envelope>>
 /// resolution `plugin_host`'s `apply-stat-delta` needs (a plugin only
 /// knows the opaque entity id; the actual stat write is per-character),
 /// populated alongside `Sessions` at spawn and removed at disconnect.
-/// Never has an NPC entry — NPCs have no backing character row (no NPC
-/// stat storage exists yet, see docs/specs/Plugin_API.md's "Beyond this
-/// v0 slice").
+/// Never has an NPC entry — an NPC entity has no backing character row;
+/// see [`NpcStats`] for the parallel storage `apply-stat-delta` resolves
+/// against when the target entity isn't a player (#197).
 pub type EntityCharacters = Arc<Mutex<HashMap<EntityId, CharacterId>>>;
+
+/// Declared-schema-validated stats for NPC entities (#197) — the
+/// non-player counterpart to `character`'s `stats` column, keyed by
+/// entity id rather than character id since an NPC has no character row
+/// at all. Deliberately in-memory only, process-wide (mirrors
+/// `EntityCharacters`'s scope), not persisted to Postgres: an NPC's
+/// entity id is generated fresh at spawn time (`spawn_npc_from_table`),
+/// never stable across a zone-service restart the way a character id is,
+/// so there is nothing meaningful to durably key stored stats against —
+/// a restarted server respawns its NPCs from the same manifest-declared
+/// spawn tables at their schema-declared defaults either way. Read
+/// through the same `character::AttributeSchema` bounds/defaults real
+/// character stats get, not an unvalidated ad-hoc blob — see
+/// `crate::world_actor::apply_npc_stat_delta`. An entry is removed when
+/// its entity despawns (`WorldCommand::Despawn`) so this map never grows
+/// past the zone's actual live NPC population.
+pub type NpcStats = Arc<Mutex<HashMap<EntityId, HashMap<String, i64>>>>;
 
 /// Which roles (docs/specs/Auth_Spec.md, "Account roles", #114/#124) the
 /// account behind a connected player entity holds — populated once at

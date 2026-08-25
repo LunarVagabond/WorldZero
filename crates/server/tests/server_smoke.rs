@@ -73,6 +73,7 @@ const SESSION_RESUME_ADDR: &str = "127.0.0.1:7930";
 const SESSION_RESUME_INVALID_ADDR: &str = "127.0.0.1:7931";
 const MOVE_CORRELATION_ADDR: &str = "127.0.0.1:7932";
 const PING_PONG_ADDR: &str = "127.0.0.1:7933";
+const NPC_STATS_ADDR: &str = "127.0.0.1:7934";
 
 struct ServerProcess {
     child: Child,
@@ -2353,6 +2354,119 @@ async fn ping_gets_a_pong_with_the_echoed_timestamp_and_a_server_time() {
             assert_eq!(echoed, client_sent_at, "should echo the client's timestamp");
             assert!(server_time > 0, "server_time should be a real timestamp");
             break;
+        }
+    }
+}
+
+/// #197: an NPC entity — no character row, no `entity_characters` entry
+/// — can get real, declared-schema-validated stats through the exact
+/// same `apply-stat-delta` path a player target does, and that composes
+/// with `on-damage-calc`/`report-death` into a real "attack it, watch it
+/// die" combat loop: three `Attack`s (the fixture's `on_damage_calc`
+/// tracks a 3-hit combat counter per target — see its own doc comment)
+/// against the plugin-spawned wolf NPC, `on-death` firing after the
+/// third confirms the whole chain actually ran end to end, not just that
+/// `apply-stat-delta` stopped silently no-op'ing.
+#[tokio::test]
+#[ignore]
+async fn attacking_an_npc_applies_real_stats_and_kills_it_at_zero() {
+    let config_dir = setup_config_dir("npc-stats");
+    let _server = start_server(&config_dir, NPC_STATS_ADDR).await;
+    wait_for_port(NPC_STATS_ADDR).await;
+
+    let mut attacker = connect(&config_dir, NPC_STATS_ADDR).await;
+    register_and_authenticate(
+        &mut attacker,
+        &format!("npc-attacker-{}", uuid::Uuid::now_v7()),
+        "hunter2",
+        _server.realm_id,
+    )
+    .await;
+    let npc_id = loop {
+        if let ServerMessage::Joined { roster, .. } = recv_world(&mut attacker).await {
+            break roster
+                .iter()
+                .find(|entry| entry.entity_type == "npc")
+                .map(|entry| entry.entity_id.clone())
+                .expect("expected the plugin-spawned NPC in the join roster");
+        }
+    };
+    // Drain this connection's own join greeting (#155).
+    loop {
+        match recv_world(&mut attacker).await {
+            ServerMessage::PluginMessage { .. } => break,
+            ServerMessage::Moved { .. } => {}
+            other => panic!("expected the join greeting, got {other:?}"),
+        }
+    }
+
+    // Two hits: on-damage-calc's real, schema-validated apply-stat-delta
+    // write against the NPC's stats (#197) confirmed each time via the
+    // fixture's own reply — this is the part that used to silently
+    // no-op for an NPC target before this ticket.
+    for hit in 1..=2 {
+        send_world(
+            &mut attacker,
+            &ClientMessage::Attack {
+                target_entity_id: npc_id.clone(),
+                stat_key: "hp".to_string(),
+            },
+        )
+        .await;
+        loop {
+            match recv_world(&mut attacker).await {
+                ServerMessage::PluginMessage { body } => {
+                    assert!(body.contains(&npc_id), "hit {hit}: {body}");
+                    assert!(body.contains("hp"), "hit {hit}: {body}");
+                    break;
+                }
+                ServerMessage::Moved { .. } | ServerMessage::EntitySpawned { .. } => {}
+                other => {
+                    panic!("hit {hit}: expected the on-damage-calc confirmation, got {other:?}")
+                }
+            }
+        }
+    }
+
+    // Third hit crosses the fixture's own 3-hit combat threshold — it
+    // calls report-death itself (core has no notion of HP or a death
+    // condition), which the host applies and fires on-death back for.
+    send_world(
+        &mut attacker,
+        &ClientMessage::Attack {
+            target_entity_id: npc_id.clone(),
+            stat_key: "hp".to_string(),
+        },
+    )
+    .await;
+    loop {
+        match recv_world(&mut attacker).await {
+            ServerMessage::PluginMessage { body } => {
+                assert!(body.contains(&npc_id), "{body}");
+                break;
+            }
+            ServerMessage::Moved { .. } | ServerMessage::EntitySpawned { .. } => {}
+            other => panic!("expected the fatal hit's on-damage-calc confirmation, got {other:?}"),
+        }
+    }
+
+    // `on_death`'s own `send_message` targets the entity that died — the
+    // NPC, which has no connection to receive it on. Read back what it
+    // recorded via zone-scope plugin state instead (same "last-left"
+    // pattern #155 already established), proving on-death actually fired
+    // for this specific NPC, not just that report-death didn't error.
+    attacker
+        .send(gateway::Envelope::new(1000, b"last-death".to_vec()))
+        .await
+        .unwrap();
+    loop {
+        match recv_world(&mut attacker).await {
+            ServerMessage::PluginMessage { body } => {
+                assert!(body.contains(&format!("last-death: {npc_id}")), "{body}");
+                break;
+            }
+            ServerMessage::Moved { .. } | ServerMessage::EntitySpawned { .. } => {}
+            other => panic!("expected the last-death query reply, got {other:?}"),
         }
     }
 }

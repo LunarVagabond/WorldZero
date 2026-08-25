@@ -8,7 +8,7 @@
 //! scheduling logic — fixed `dt`, log-and-resync on an overrun rather
 //! than catching up — around `Zone::tick()`'s pure step instead.
 
-use character::CharacterStore;
+use character::{AttributeSchema, CharacterStore};
 use common::id::EntityId;
 use common::metrics::Metrics;
 use prometheus::IntGauge;
@@ -17,7 +17,7 @@ use tokio::time::Instant;
 use world::{EntityKind, MovementOutcome, Point, Zone};
 
 use crate::plugin_startup::PluginRuntime;
-use crate::session::EntityCharacters;
+use crate::session::{EntityCharacters, NpcStats};
 
 enum WorldCommand {
     Spawn {
@@ -305,6 +305,8 @@ pub fn spawn_world_actor(
     plugins: std::sync::Arc<tokio::sync::Mutex<Vec<PluginRuntime>>>,
     character_store: std::sync::Arc<CharacterStore>,
     entity_characters: EntityCharacters,
+    npc_stats: NpcStats,
+    attribute_schema: std::sync::Arc<AttributeSchema>,
     plugin_state_store: std::sync::Arc<crate::plugin_state::PluginStateStore>,
     zone_id: String,
     metrics: Option<std::sync::Arc<Metrics>>,
@@ -372,7 +374,7 @@ pub fn spawn_world_actor(
                                 }
                             }
                             drain_and_apply_plugin_effects(
-                                runtime, &mut zone, &character_store, &entity_characters, &plugin_state_store,
+                                runtime, &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &plugin_state_store,
                             ).await;
                         }
                     }
@@ -389,7 +391,14 @@ pub fn spawn_world_actor(
                     }
                     match command {
                         WorldCommand::Spawn { entity, kind, position } => zone.spawn(entity, kind, position),
-                        WorldCommand::Despawn { entity } => zone.despawn(entity),
+                        WorldCommand::Despawn { entity } => {
+                            zone.despawn(entity);
+                            // Harmless no-op for a player entity (never
+                            // has an entry here) — keeps npc_stats from
+                            // growing past the zone's actual live NPC
+                            // population (#197).
+                            npc_stats.lock().unwrap().remove(&entity);
+                        }
                         WorldCommand::RequestMove { entity, to, seq } => zone.request_move(entity, to, seq),
                         WorldCommand::PositionOf { entity, reply } => {
                             let _ = reply.send(zone.position_of(entity));
@@ -422,7 +431,7 @@ pub fn spawn_world_actor(
                                 spawn_npc_from_table(&mut zone, &spawn_table_id);
                             }
                             drain_and_apply_plugin_effects(
-                                runtime, &mut zone, &character_store, &entity_characters, &plugin_state_store,
+                                runtime, &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &plugin_state_store,
                             ).await;
                         }
                         WorldCommand::ChatCommand { command, args, sender_entity_id } => {
@@ -436,14 +445,14 @@ pub fn spawn_world_actor(
                                 tracing::warn!(plugin = %runtime.name, command, error = %e, "plugin on_chat_command hook failed");
                             }
                             drain_and_apply_plugin_effects(
-                                runtime, &mut zone, &character_store, &entity_characters, &plugin_state_store,
+                                runtime, &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &plugin_state_store,
                             ).await;
                         }
                         WorldCommand::PlayerJoin { entity_id } => {
                             let entity_id_str = entity_id.to_string();
                             let mut plugins = plugins.lock().await;
                             fire_hook(
-                                &mut plugins, "on-player-join-zone", &mut zone, &character_store, &entity_characters, &plugin_state_store,
+                                &mut plugins, "on-player-join-zone", &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &plugin_state_store,
                                 |plugin| plugin.on_player_join_zone(&zone_id, &entity_id_str),
                             ).await;
                         }
@@ -451,7 +460,7 @@ pub fn spawn_world_actor(
                             let entity_id_str = entity_id.to_string();
                             let mut plugins = plugins.lock().await;
                             fire_hook(
-                                &mut plugins, "on-player-leave-zone", &mut zone, &character_store, &entity_characters, &plugin_state_store,
+                                &mut plugins, "on-player-leave-zone", &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &plugin_state_store,
                                 |plugin| plugin.on_player_leave_zone(&zone_id, &entity_id_str),
                             ).await;
                             let _ = reply.send(());
@@ -465,7 +474,7 @@ pub fn spawn_world_actor(
                             let target_str = target.to_string();
                             let mut plugins = plugins.lock().await;
                             fire_hook(
-                                &mut plugins, "on-damage-calc", &mut zone, &character_store, &entity_characters, &plugin_state_store,
+                                &mut plugins, "on-damage-calc", &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &plugin_state_store,
                                 |plugin| plugin.on_damage_calc(&zone_id, &attacker_str, &target_str, &stat_key, 0),
                             ).await;
                         }
@@ -473,7 +482,7 @@ pub fn spawn_world_actor(
                             let entity_id_str = entity_id.to_string();
                             let mut plugins = plugins.lock().await;
                             fire_hook(
-                                &mut plugins, "on-item-use", &mut zone, &character_store, &entity_characters, &plugin_state_store,
+                                &mut plugins, "on-item-use", &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &plugin_state_store,
                                 |plugin| plugin.on_item_use(&zone_id, &entity_id_str, &item_type),
                             ).await;
                         }
@@ -486,7 +495,7 @@ pub fn spawn_world_actor(
                             let actor_str = actor.to_string();
                             let mut plugins = plugins.lock().await;
                             fire_hook(
-                                &mut plugins, "on-npc-interact", &mut zone, &character_store, &entity_characters, &plugin_state_store,
+                                &mut plugins, "on-npc-interact", &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &plugin_state_store,
                                 |plugin| plugin.on_npc_interact(&zone_id, &npc_str, &actor_str),
                             ).await;
                         }
@@ -504,17 +513,49 @@ pub fn spawn_world_actor(
 
 /// Resolves a plugin-supplied entity-id string to a real `EntityId` and,
 /// via `entity_characters`, the `CharacterId` it belongs to — shared by
-/// every pending-effect kind that needs character-backed storage
-/// (stats, items, currency). `None` covers both "not a valid entity id"
-/// and "no character for this entity" (an NPC — no NPC-backed storage
-/// exists yet — or an unknown/disconnected entity); the caller logs
-/// whichever it actually was.
+/// every pending-effect kind that's character-owned only (items,
+/// currency; stats are the one exception, see `apply_npc_stat_delta`
+/// below — #197). `None` covers both "not a valid entity id" and "no
+/// character for this entity" (an NPC, which has no character row at
+/// all, or an unknown/disconnected entity); the caller logs whichever it
+/// actually was.
 fn resolve_character(
     entity_characters: &EntityCharacters,
     entity_id: &str,
 ) -> Option<common::id::CharacterId> {
     let entity_id: EntityId = entity_id.parse().ok()?;
     entity_characters.lock().unwrap().get(&entity_id).copied()
+}
+
+/// The NPC-entity counterpart to `character::CharacterStore::apply_stat_delta`
+/// (#197): same "resolve current value via the declared schema's default,
+/// add `delta`, validate, write" discipline, against `npc_stats`'s
+/// in-memory per-entity map instead of a `characters` row's `stats`
+/// column. Synchronous (no `.await`) — there's no database round trip on
+/// this path, unlike the player-character equivalent. Returns the
+/// resulting value, same as the character-store version.
+fn apply_npc_stat_delta(
+    npc_stats: &NpcStats,
+    schema: &AttributeSchema,
+    entity: EntityId,
+    key: &str,
+    delta: i64,
+) -> common::Result<i64> {
+    let mut all_stats = npc_stats.lock().unwrap();
+    let stats = all_stats.entry(entity).or_default();
+
+    let stored: serde_json::Map<String, serde_json::Value> = stats
+        .iter()
+        .map(|(k, v)| (k.clone(), serde_json::Value::from(*v)))
+        .collect();
+    let current = schema.resolve_read(&stored, key)?;
+    let new_value = current.checked_add(delta).ok_or_else(|| {
+        common::Error::new("server", format!("stat delta overflowed for {key:?}"))
+    })?;
+    schema.validate_write(key, new_value)?;
+
+    stats.insert(key.to_string(), new_value);
+    Ok(new_value)
 }
 
 /// Drains every pending host-function request a plugin hook call just
@@ -526,11 +567,14 @@ fn resolve_character(
 /// takes owned data, not a borrow) keeps no live borrow of `runtime`
 /// across that function's `.await`s; the plain field accesses/synchronous
 /// hook calls here are the only place `runtime` itself is touched.
+#[allow(clippy::too_many_arguments)]
 async fn drain_and_apply_plugin_effects(
     runtime: &mut PluginRuntime,
     zone: &mut Zone,
     character_store: &CharacterStore,
     entity_characters: &EntityCharacters,
+    npc_stats: &NpcStats,
+    attribute_schema: &AttributeSchema,
     plugin_state_store: &crate::plugin_state::PluginStateStore,
 ) {
     let zone_id = zone.manifest.id.clone();
@@ -550,6 +594,8 @@ async fn drain_and_apply_plugin_effects(
         state_writes,
         character_store,
         entity_characters,
+        npc_stats,
+        attribute_schema,
         plugin_state_store,
     )
     .await;
@@ -595,12 +641,15 @@ async fn drain_and_apply_plugin_effects(
 /// host-function effects are drained and applied right after its own
 /// hook call (`drain_and_apply_plugin_effects`) before moving to the
 /// next plugin, so one plugin's writes never overlap another's `.await`s.
+#[allow(clippy::too_many_arguments)]
 async fn fire_hook(
     plugins: &mut [PluginRuntime],
     hook_name: &str,
     zone: &mut Zone,
     character_store: &CharacterStore,
     entity_characters: &EntityCharacters,
+    npc_stats: &NpcStats,
+    attribute_schema: &AttributeSchema,
     plugin_state_store: &crate::plugin_state::PluginStateStore,
     mut call: impl FnMut(&mut plugin_host::LoadedPlugin) -> common::Result<()>,
 ) {
@@ -616,6 +665,8 @@ async fn fire_hook(
             zone,
             character_store,
             entity_characters,
+            npc_stats,
+            attribute_schema,
             plugin_state_store,
         )
         .await;
@@ -649,6 +700,8 @@ async fn apply_plugin_pending_effects(
     pending_state_writes: Vec<(plugin_host::PluginStateScope, String, Vec<u8>)>,
     character_store: &CharacterStore,
     entity_characters: &EntityCharacters,
+    npc_stats: &NpcStats,
+    attribute_schema: &AttributeSchema,
     plugin_state_store: &crate::plugin_state::PluginStateStore,
 ) -> Vec<(String, String, i64)> {
     for (entity_id, x, y) in pending_moves {
@@ -666,19 +719,52 @@ async fn apply_plugin_pending_effects(
     }
 
     for (entity_id, stat_key, delta) in pending_stat_deltas {
-        let Some(character_id) = resolve_character(entity_characters, &entity_id) else {
+        let Ok(parsed_entity_id) = entity_id.parse::<EntityId>() else {
             tracing::warn!(
                 entity_id,
-                "plugin requested a stat delta for an invalid entity id, an NPC \
-                 (no NPC stat storage exists yet), or an unknown entity"
+                "plugin requested a stat delta for an invalid entity id"
             );
             continue;
         };
-        if let Err(e) = character_store
-            .apply_stat_delta(character_id, &stat_key, delta)
-            .await
-        {
-            tracing::warn!(entity_id, stat_key, error = %e, "plugin's apply-stat-delta failed");
+        // Player vs. NPC decides which storage this resolves against
+        // (#197) — a player's declared stats live in its `characters`
+        // row, an NPC's in `npc_stats`, but both go through the same
+        // `AttributeSchema` bounds/defaults discipline either way.
+        match zone.kind_of(parsed_entity_id) {
+            Some(EntityKind::Player) => {
+                let Some(character_id) = resolve_character(entity_characters, &entity_id) else {
+                    tracing::warn!(
+                        entity_id,
+                        "plugin requested a stat delta for a player entity with no \
+                         character mapping (not fully joined yet?)"
+                    );
+                    continue;
+                };
+                if let Err(e) = character_store
+                    .apply_stat_delta(character_id, &stat_key, delta)
+                    .await
+                {
+                    tracing::warn!(entity_id, stat_key, error = %e, "plugin's apply-stat-delta failed");
+                }
+            }
+            Some(EntityKind::Npc) => {
+                if let Err(e) = apply_npc_stat_delta(
+                    npc_stats,
+                    attribute_schema,
+                    parsed_entity_id,
+                    &stat_key,
+                    delta,
+                ) {
+                    tracing::warn!(entity_id, stat_key, error = %e, "plugin's apply-stat-delta failed");
+                }
+            }
+            None => {
+                tracing::warn!(
+                    entity_id,
+                    "plugin requested a stat delta for an entity that isn't currently \
+                     spawned in this zone"
+                );
+            }
         }
     }
 

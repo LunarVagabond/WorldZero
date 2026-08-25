@@ -110,6 +110,24 @@ impl Guest for Plugin {
             );
             return;
         }
+        // Reads back what `on_death` recorded (#197) — same reasoning as
+        // `last-left` above, but for an NPC target: it has no connection
+        // of its own for `on_death`'s direct `send_message` to reach.
+        if body == "last-death" {
+            let value = worldzero::plugin::host::plugin_state_get(
+                &worldzero::plugin::host::PluginStateScope::Zone(zone_id),
+                "last-death-entity",
+            )
+            .ok()
+            .flatten()
+            .map(|bytes| String::from_utf8_lossy(&bytes).to_string())
+            .unwrap_or_else(|| "<nobody has died yet>".to_string());
+            let _ = worldzero::plugin::host::send_message(
+                &sender_entity_id,
+                &format!("last-death: {value}"),
+            );
+            return;
+        }
         // Exercises report-death/report-respawn (#154) end to end: the
         // plugin decides "died"/"respawned" for its own reasons (here,
         // just because the client asked) and reports it; the resulting
@@ -140,15 +158,61 @@ impl Guest for Plugin {
         // plugin would compute its own damage here (weapon data, roll,
         // whatever); this fixture just applies a fixed 3-point hit so the
         // effect is observable, and confirms to the attacker it landed.
+        // `apply-stat-delta` works against the target's real, declared,
+        // schema-validated stat regardless of whether it's a player or
+        // an NPC entity (#197) — the core resolves which storage that is
+        // itself, this call site doesn't need to know or care.
         let _ = worldzero::plugin::host::apply_stat_delta(&target_entity_id, &stat_key, -3);
         let _ = worldzero::plugin::host::send_message(
             &attacker_entity_id,
             &format!("hit {target_entity_id} for 3 {stat_key} (base_amount was {base_amount})"),
         );
+
+        // `apply-stat-delta` is fire-and-forget (queued, applied on the
+        // next tick's drain — see its own doc comment), so this hook
+        // never gets a synchronous read of the real value it just wrote.
+        // Deciding "dead" instead uses a small combat-scoped counter of
+        // its own (`plugin-state`'s `entity` scope: in-memory only,
+        // read-your-own-write within the same session, exactly suited to
+        // this) — the plugin's own choice of when a target dies, same
+        // "core has no notion of HP or a death condition" discipline as
+        // any other death decision (#154). Composes with #197's NPC stat
+        // storage the same way it already does for a player target: the
+        // core doesn't care which kind of entity `target_entity_id` is.
+        let scope = worldzero::plugin::host::PluginStateScope::Entity(target_entity_id.clone());
+        let remaining_before_this_hit = worldzero::plugin::host::plugin_state_get(
+            &scope,
+            "combat-hits-remaining",
+        )
+        .ok()
+        .flatten()
+        .and_then(|bytes| std::str::from_utf8(&bytes).ok().and_then(|s| s.parse::<i64>().ok()))
+        .unwrap_or(3);
+        let remaining_after_this_hit = remaining_before_this_hit - 1;
+        if remaining_after_this_hit <= 0 {
+            let _ = worldzero::plugin::host::report_death(&target_entity_id);
+        } else {
+            let _ = worldzero::plugin::host::plugin_state_set(
+                &scope,
+                "combat-hits-remaining",
+                remaining_after_this_hit.to_string().as_bytes(),
+            );
+        }
     }
 
-    fn on_death(_zone_id: String, entity_id: String) {
+    fn on_death(zone_id: String, entity_id: String) {
         let _ = worldzero::plugin::host::send_message(&entity_id, "you died");
+        // `send_message` above only ever reaches `entity_id` itself — no
+        // help to a test proving an *NPC* died, since an NPC has no
+        // connection of its own to receive it on (#197). Recorded under
+        // zone-scope state instead, same "black-box test reads it back
+        // via on-message" pattern `on_player_leave_zone` already uses for
+        // the same underlying problem (#155's "last-left-entity").
+        let _ = worldzero::plugin::host::plugin_state_set(
+            &worldzero::plugin::host::PluginStateScope::Zone(zone_id),
+            "last-death-entity",
+            entity_id.as_bytes(),
+        );
     }
 
     fn on_respawn(_zone_id: String, entity_id: String) {
