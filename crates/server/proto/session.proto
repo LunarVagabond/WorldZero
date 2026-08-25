@@ -17,6 +17,14 @@
 // measurement independent of movement traffic. See
 // docs/specs/Networking_Spec.md's "Movement correlation and ping" for
 // the full design writeup.
+//
+// #142 adds `JoinGroupLayer` — live, same-zone layer reassignment for an
+// already-connected player joining a group whose members are on a
+// different layer of the same zone. Reuses `ZoneChanged` for the
+// confirmation (same zone_id, new roster) rather than a new message
+// type, since a layer move is the same "despawn here, spawn there, tell
+// the connection" shape as a real zone-link crossing. See
+// docs/specs/Networking_Spec.md's "Group-aware layer reassignment".
 
 syntax = "proto3";
 
@@ -29,6 +37,7 @@ message ClientMessage {
     UseItem use_item = 3;
     InteractNpc interact_npc = 4;
     Ping ping = 5;
+    JoinGroupLayer join_group_layer = 6;
   }
 }
 
@@ -81,6 +90,20 @@ message InteractNpc {
 // with it.
 message Ping {
   int64 client_sent_at = 1;
+}
+
+// Requests moving this connection's own entity onto whichever layer of
+// the *current* zone other_entity_id is already spawned into (#142) —
+// the live layer-reassignment primitive a group/party system calls once
+// it decides two players should end up together, not a party system
+// itself: the server performs the placement unconditionally against any
+// currently-spawned entity id in this zone, with no membership check of
+// its own (that's the group system's job — see
+// docs/specs/Networking_Spec.md's "Group-aware layer reassignment"). A
+// no-op if other_entity_id isn't currently spawned anywhere in this
+// zone, or is already on this connection's own layer.
+message JoinGroupLayer {
+  string other_entity_id = 1;
 }
 
 message RosterEntry {

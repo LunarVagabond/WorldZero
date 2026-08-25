@@ -65,6 +65,8 @@ use std::sync::RwLock;
 use content::manifest::ZoneManifest;
 use world::Point;
 
+use common::id::EntityId;
+
 use crate::session::Sessions;
 use crate::world_actor::WorldHandle;
 
@@ -77,6 +79,10 @@ pub struct ZoneRuntime {
 impl ZoneRuntime {
     fn population(&self) -> usize {
         self.sessions.lock().unwrap().len()
+    }
+
+    fn holds(&self, entity_id: EntityId) -> bool {
+        self.sessions.lock().unwrap().contains_key(&entity_id)
     }
 }
 
@@ -182,6 +188,26 @@ impl ZoneRegistry {
             "spinning up a new zone layer: every existing layer is at or above the population threshold"
         );
         Some(new_runtime)
+    }
+
+    /// Which layer of `zone_id` currently has `other_entity_id` spawned
+    /// into it, if any (#142) — the placement primitive a group/party
+    /// system calls to actually land a joining member alongside their
+    /// group: "wherever `other_entity_id` already is, not wherever
+    /// population balancing alone would put a fresh join." A linear scan
+    /// over `zone_id`'s layers checking each one's `Sessions` — no
+    /// separate entity-to-layer index is kept; layer counts are small
+    /// (population-threshold-bounded, #50) and this is called on a live
+    /// group action, not a hot per-tick path. `None` covers both "not a
+    /// zone this registry knows about" and "not currently spawned in any
+    /// layer of it" — a disconnected, wrong-zone, or bogus entity id.
+    pub fn join_layer_of(&self, zone_id: &str, other_entity_id: EntityId) -> Option<ZoneRuntime> {
+        let runtimes = self.runtimes.read().unwrap();
+        let layers = runtimes.get(zone_id)?;
+        layers
+            .iter()
+            .find(|layer| layer.holds(other_entity_id))
+            .cloned()
     }
 
     /// Where a player crossing from `from_zone` into `target_zone`
@@ -300,6 +326,55 @@ collision:
             usize::MAX,
             Box::new(|_, _| panic!("layer_spawner should not be called in these tests")),
         )
+    }
+
+    fn zone_runtime_with_entities(entity_ids: &[EntityId]) -> ZoneRuntime {
+        let sessions: Sessions = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
+        for &id in entity_ids {
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            sessions.lock().unwrap().insert(id, tx);
+        }
+        ZoneRuntime {
+            world: crate::world_actor::WorldHandle::detached_for_test(),
+            sessions,
+        }
+    }
+
+    #[test]
+    fn join_layer_of_finds_the_layer_holding_the_named_entity() {
+        let registry = registry_with(vec![("zone-a", "")]);
+        let other_entity = EntityId::new();
+        let layer_0 = zone_runtime_with_entities(&[]);
+        let layer_1 = zone_runtime_with_entities(&[other_entity]);
+        {
+            let mut runtimes = registry.runtimes.write().unwrap();
+            runtimes.insert("zone-a".to_string(), vec![layer_0, layer_1]);
+        }
+
+        let found = registry
+            .join_layer_of("zone-a", other_entity)
+            .expect("other_entity is in layer 1");
+        assert!(found.sessions.lock().unwrap().contains_key(&other_entity));
+    }
+
+    #[test]
+    fn join_layer_of_is_none_when_the_entity_is_in_no_layer() {
+        let registry = registry_with(vec![("zone-a", "")]);
+        {
+            let mut runtimes = registry.runtimes.write().unwrap();
+            runtimes.insert("zone-a".to_string(), vec![zone_runtime_with_entities(&[])]);
+        }
+        assert!(registry.join_layer_of("zone-a", EntityId::new()).is_none());
+    }
+
+    #[test]
+    fn join_layer_of_is_none_for_an_unknown_zone() {
+        let registry = registry_with(vec![("zone-a", "")]);
+        assert!(
+            registry
+                .join_layer_of("does-not-exist", EntityId::new())
+                .is_none()
+        );
     }
 
     #[test]
