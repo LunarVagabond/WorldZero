@@ -682,26 +682,31 @@ fn handle_tick_outcomes(
     zone: &Zone,
     outcomes: Vec<(EntityId, MovementOutcome)>,
 ) {
+    // Every outcome in this batch came from the same `zone.tick()` call
+    // (#196) — one tick number for all of them, not resolved per-outcome.
+    let tick = zone.current_tick();
     for (entity_id, outcome) in outcomes {
         match outcome {
-            MovementOutcome::Applied => {
-                if let Some((x, y)) = zone.position_of(entity_id) {
-                    broadcast_all(
-                        source_sessions,
-                        ServerMessage::Moved {
-                            entity_id: entity_id.to_string(),
-                            x,
-                            y,
-                        },
-                    );
-                }
+            MovementOutcome::Applied { seq, to: (x, y) } => {
+                broadcast_all(
+                    source_sessions,
+                    ServerMessage::Moved {
+                        entity_id: entity_id.to_string(),
+                        x,
+                        y,
+                        seq,
+                        tick,
+                    },
+                );
             }
-            MovementOutcome::Rejected(rejection) => {
+            MovementOutcome::Rejected { seq, rejection } => {
                 send_to(
                     source_sessions,
                     entity_id,
                     ServerMessage::Rejected {
                         reason: format!("{rejection:?}"),
+                        seq,
+                        tick,
                     },
                 );
             }
@@ -795,12 +800,18 @@ async fn complete_zone_transition(
         },
     );
 
+    // The *destination* zone's own tick counter (#196) — each
+    // zone-service instance ticks independently, so this is a fresh
+    // baseline for the new zone, not a continuation of the source
+    // zone's.
+    let tick = target.world.current_tick().await;
     let message = ServerMessage::ZoneChanged {
         zone_id: target_zone_id,
         entity_id: entity_id.to_string(),
         x: entry.0,
         y: entry.1,
         roster,
+        tick,
     };
     if let Ok(envelope) = message.into_envelope() {
         let _ = sender.send(envelope);

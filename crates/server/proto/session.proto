@@ -9,6 +9,14 @@
 // `string`, same "opaque id" discipline as `auth.proto`/`chat.proto` —
 // `zone_id` in particular is a content-manifest-declared string, never a
 // UUID, so this was already the natural representation.
+//
+// #196 adds client/server correlation for movement (`Move.seq`, echoed
+// on `Moved`/`Rejected`), a server-authoritative `tick` on every message
+// built from — or between — simulation ticks (`Moved`/`Rejected`/
+// `Joined`/`ZoneChanged`), and a `Ping`/`Pong` pair for latency
+// measurement independent of movement traffic. See
+// docs/specs/Networking_Spec.md's "Movement correlation and ping" for
+// the full design writeup.
 
 syntax = "proto3";
 
@@ -20,24 +28,30 @@ message ClientMessage {
     Attack attack = 2;
     UseItem use_item = 3;
     InteractNpc interact_npc = 4;
+    Ping ping = 5;
   }
 }
 
 // Requests moving this connection's own entity to (x, y) — queued for
 // the next simulation tick, never applied immediately
-// (`world::Zone::request_move`).
+// (`world::Zone::request_move`). `seq` is client-assigned and
+// monotonically increasing per connection (#196) — the server never
+// interprets it beyond echoing it back on `Moved`/`Rejected`, so a
+// client can correlate a specific outcome to the specific predicted step
+// it corresponds to, not just "the most recent move."
 message Move {
   double x = 1;
   double y = 2;
+  uint32 seq = 3;
 }
 
 // Requests attacking target_entity_id — the server confirms the target
 // actually exists in this zone before ever calling the configured
 // plugin's on-damage-calc hook; the client never reports a damage amount
-// or outcome, only the intent to attack (#154, docs/specs/Plugin_API.md).
-// stat_key is an opaque, game-defined string naming which declared stat
-// this attack is aimed at — same "core has no privileged notion of HP"
-// discipline as apply-stat-delta's own stat_key.
+// or outcome, only the intent to attack (#154). stat_key is an opaque,
+// game-defined string naming which declared stat this attack is aimed
+// at — same "core has no privileged notion of HP" discipline as
+// apply-stat-delta's own stat_key.
 message Attack {
   string target_entity_id = 1;
   string stat_key = 2;
@@ -59,6 +73,16 @@ message InteractNpc {
   string npc_entity_id = 1;
 }
 
+// A latency probe, independent of gameplay/movement traffic (#196) —
+// client_sent_at is an opaque timestamp the client chose (Unix millis is
+// the intended convention, but the server never interprets it, only
+// echoes it back on Pong) so the client can compute round-trip time
+// against its own clock without needing the server's clock to agree
+// with it.
+message Ping {
+  int64 client_sent_at = 1;
+}
+
 message RosterEntry {
   string entity_id = 1;
   string entity_type = 2;
@@ -76,17 +100,22 @@ message ServerMessage {
     Rejected rejected = 6;
     Error error = 7;
     PluginMessage plugin_message = 8;
+    Pong pong = 9;
   }
 }
 
 // Sent once, right after this connection's own entity is spawned into
 // the zone — see `server::session_protocol::ServerMessage::Joined`'s doc
-// comment for why this is one message rather than several.
+// comment for why this is one message rather than several. `tick` is the
+// zone's server-authoritative simulation-step counter at the moment this
+// was built (#196) — this connection's own baseline for reasoning about
+// the ordering/staleness of every later `Moved`/`Rejected`.
 message Joined {
   string entity_id = 1;
   double x = 2;
   double y = 3;
   repeated RosterEntry roster = 4;
+  uint64 tick = 5;
 }
 
 // An entity (never this connection's own) newly exists in the zone.
@@ -103,26 +132,40 @@ message EntityDespawned {
 
 // Sent to a connection whose entity just crossed a manifest-declared
 // zone link (#45) — same shape as Joined, but for an in-place zone
-// handoff.
+// handoff. `tick` is the *destination* zone's own tick counter (#196) —
+// each zone-service instance ticks independently, so this is a fresh
+// baseline for the new zone, not a continuation of the old one's.
 message ZoneChanged {
   string zone_id = 1;
   string entity_id = 2;
   double x = 3;
   double y = 4;
   repeated RosterEntry roster = 5;
+  uint64 tick = 6;
 }
 
 // An accepted movement update, broadcast to every connected client.
+// seq is 0 for a move that didn't originate from a real client Move
+// request (e.g. an NPC's plugin-driven movement) — a real client's own
+// seq always starts at 1, so a client correlating its own moves can
+// simply ignore any Moved whose seq is 0 or doesn't match one it sent.
+// tick is the simulation step this was applied on (#196).
 message Moved {
   string entity_id = 1;
   double x = 2;
   double y = 3;
+  uint32 seq = 4;
+  uint64 tick = 5;
 }
 
 // A movement update this connection itself requested was rejected — only
-// sent back to the mover, never broadcast.
+// sent back to the mover, never broadcast. seq echoes the rejected
+// Move's own seq (#196); tick is the simulation step the rejection was
+// decided on.
 message Rejected {
   string reason = 1;
+  uint32 seq = 2;
+  uint64 tick = 3;
 }
 
 message Error {
@@ -133,4 +176,14 @@ message Error {
 // connection's entity (docs/specs/Plugin_API.md).
 message PluginMessage {
   string body = 1;
+}
+
+// Replies to a Ping — client_sent_at is echoed back verbatim so the
+// client can compute round-trip time against its own clock; server_time
+// is the server's own wall-clock (Unix millis) at the moment it replied,
+// for a client that wants to estimate clock skew too, not just RTT
+// (#196).
+message Pong {
+  int64 client_sent_at = 1;
+  int64 server_time = 2;
 }

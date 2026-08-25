@@ -25,8 +25,17 @@ pub const WORLD_MESSAGE_TYPE: u16 = 200;
 pub enum ClientMessage {
     /// Requests moving this connection's own entity to `(x, y)` — queued
     /// for the next simulation tick, never applied immediately
-    /// (`world::Zone::request_move`).
-    Move { x: f64, y: f64 },
+    /// (`world::Zone::request_move`). `seq` is client-assigned and
+    /// monotonically increasing per connection (#196, start at `1`) —
+    /// the server only ever echoes it back on `Moved`/`Rejected`, never
+    /// interprets it, so a client can correlate a specific outcome to
+    /// the specific predicted step it corresponds to.
+    Move { x: f64, y: f64, seq: u32 },
+    /// A latency probe, independent of gameplay/movement traffic (#196)
+    /// — `client_sent_at` is opaque to the server, echoed back verbatim
+    /// on `Pong` so the client can compute round-trip time against its
+    /// own clock.
+    Ping { client_sent_at: i64 },
     /// Requests attacking `target_entity_id` — the server confirms the
     /// target actually exists in this zone before ever calling the
     /// configured plugin's `on-damage-calc` hook; never a client-reported
@@ -73,6 +82,11 @@ pub enum ServerMessage {
         x: f64,
         y: f64,
         roster: Vec<RosterEntry>,
+        /// The zone's server-authoritative simulation-step counter at
+        /// the moment this was built (#196) — this connection's own
+        /// baseline for reasoning about the ordering/staleness of every
+        /// later `Moved`/`Rejected`.
+        tick: u64,
     },
     /// An entity (never this connection's own — see `Joined` above)
     /// newly exists in the zone — broadcast to already-connected clients
@@ -101,20 +115,37 @@ pub enum ServerMessage {
         x: f64,
         y: f64,
         roster: Vec<RosterEntry>,
+        /// The *destination* zone's own tick counter (#196) — each
+        /// zone-service instance ticks independently, so this is a
+        /// fresh baseline for the new zone, not a continuation of the
+        /// old one's.
+        tick: u64,
     },
     /// An accepted movement update — broadcast to every connected client,
     /// not just the mover, so everyone's view of the zone stays current
     /// (phase 1 has no interest management yet, see
-    /// docs/PROPOSAL.md's "Spatial Index: A → Z Roadmap").
+    /// docs/PROPOSAL.md's "Spatial Index: A → Z Roadmap"). `seq` is `0`
+    /// for a move that didn't originate from a real client `Move`
+    /// request (e.g. an NPC's plugin-driven movement) — a real client's
+    /// own `seq` always starts at `1`, so a client correlating its own
+    /// moves can simply ignore any `Moved` whose `seq` is `0` or doesn't
+    /// match one it sent (#196). `tick` is the simulation step this was
+    /// applied on.
     Moved {
         entity_id: String,
         x: f64,
         y: f64,
+        seq: u32,
+        tick: u64,
     },
     /// A movement update this connection itself requested was rejected —
-    /// only sent back to the mover, never broadcast.
+    /// only sent back to the mover, never broadcast. `seq` echoes the
+    /// rejected `Move`'s own `seq` (#196); `tick` is the simulation step
+    /// the rejection was decided on.
     Rejected {
         reason: String,
+        seq: u32,
+        tick: u64,
     },
     Error {
         message: String,
@@ -125,6 +156,15 @@ pub enum ServerMessage {
     /// as the plugin wrote it.
     PluginMessage {
         body: String,
+    },
+    /// Replies to a `Ping` — `client_sent_at` is echoed back verbatim so
+    /// the client can compute round-trip time against its own clock;
+    /// `server_time` is the server's own wall-clock (Unix millis) at the
+    /// moment it replied, for a client that wants clock-skew estimation
+    /// too, not just RTT (#196).
+    Pong {
+        client_sent_at: i64,
+        server_time: i64,
     },
 }
 
@@ -186,7 +226,14 @@ impl From<&ClientMessage> for proto::ClientMessage {
     fn from(message: &ClientMessage) -> Self {
         use proto::client_message::Kind;
         let kind = match message {
-            ClientMessage::Move { x, y } => Kind::Move(proto::Move { x: *x, y: *y }),
+            ClientMessage::Move { x, y, seq } => Kind::Move(proto::Move {
+                x: *x,
+                y: *y,
+                seq: *seq,
+            }),
+            ClientMessage::Ping { client_sent_at } => Kind::Ping(proto::Ping {
+                client_sent_at: *client_sent_at,
+            }),
             ClientMessage::Attack {
                 target_entity_id,
                 stat_key,
@@ -211,7 +258,10 @@ impl TryFrom<proto::ClientMessage> for ClientMessage {
     fn try_from(message: proto::ClientMessage) -> Result<Self> {
         use proto::client_message::Kind;
         match message.kind {
-            Some(Kind::Move(proto::Move { x, y })) => Ok(ClientMessage::Move { x, y }),
+            Some(Kind::Move(proto::Move { x, y, seq })) => Ok(ClientMessage::Move { x, y, seq }),
+            Some(Kind::Ping(proto::Ping { client_sent_at })) => {
+                Ok(ClientMessage::Ping { client_sent_at })
+            }
             Some(Kind::Attack(proto::Attack {
                 target_entity_id,
                 stat_key,
@@ -242,11 +292,13 @@ impl From<&ServerMessage> for proto::ServerMessage {
                 x,
                 y,
                 roster,
+                tick,
             } => Kind::Joined(proto::Joined {
                 entity_id: entity_id.clone(),
                 x: *x,
                 y: *y,
                 roster: roster.iter().map(proto::RosterEntry::from).collect(),
+                tick: *tick,
             }),
             ServerMessage::EntitySpawned {
                 entity_id,
@@ -270,20 +322,32 @@ impl From<&ServerMessage> for proto::ServerMessage {
                 x,
                 y,
                 roster,
+                tick,
             } => Kind::ZoneChanged(proto::ZoneChanged {
                 zone_id: zone_id.clone(),
                 entity_id: entity_id.clone(),
                 x: *x,
                 y: *y,
                 roster: roster.iter().map(proto::RosterEntry::from).collect(),
+                tick: *tick,
             }),
-            ServerMessage::Moved { entity_id, x, y } => Kind::Moved(proto::Moved {
+            ServerMessage::Moved {
+                entity_id,
+                x,
+                y,
+                seq,
+                tick,
+            } => Kind::Moved(proto::Moved {
                 entity_id: entity_id.clone(),
                 x: *x,
                 y: *y,
+                seq: *seq,
+                tick: *tick,
             }),
-            ServerMessage::Rejected { reason } => Kind::Rejected(proto::Rejected {
+            ServerMessage::Rejected { reason, seq, tick } => Kind::Rejected(proto::Rejected {
                 reason: reason.clone(),
+                seq: *seq,
+                tick: *tick,
             }),
             ServerMessage::Error { message } => Kind::Error(proto::Error {
                 message: message.clone(),
@@ -291,6 +355,13 @@ impl From<&ServerMessage> for proto::ServerMessage {
             ServerMessage::PluginMessage { body } => {
                 Kind::PluginMessage(proto::PluginMessage { body: body.clone() })
             }
+            ServerMessage::Pong {
+                client_sent_at,
+                server_time,
+            } => Kind::Pong(proto::Pong {
+                client_sent_at: *client_sent_at,
+                server_time: *server_time,
+            }),
         };
         proto::ServerMessage { kind: Some(kind) }
     }
@@ -307,11 +378,13 @@ impl TryFrom<proto::ServerMessage> for ServerMessage {
                 x,
                 y,
                 roster,
+                tick,
             })) => Ok(ServerMessage::Joined {
                 entity_id,
                 x,
                 y,
                 roster: roster.into_iter().map(RosterEntry::from).collect(),
+                tick,
             }),
             Some(Kind::EntitySpawned(proto::EntitySpawned {
                 entity_id,
@@ -333,23 +406,42 @@ impl TryFrom<proto::ServerMessage> for ServerMessage {
                 x,
                 y,
                 roster,
+                tick,
             })) => Ok(ServerMessage::ZoneChanged {
                 zone_id,
                 entity_id,
                 x,
                 y,
                 roster: roster.into_iter().map(RosterEntry::from).collect(),
+                tick,
             }),
-            Some(Kind::Moved(proto::Moved { entity_id, x, y })) => {
-                Ok(ServerMessage::Moved { entity_id, x, y })
-            }
-            Some(Kind::Rejected(proto::Rejected { reason })) => {
-                Ok(ServerMessage::Rejected { reason })
+            Some(Kind::Moved(proto::Moved {
+                entity_id,
+                x,
+                y,
+                seq,
+                tick,
+            })) => Ok(ServerMessage::Moved {
+                entity_id,
+                x,
+                y,
+                seq,
+                tick,
+            }),
+            Some(Kind::Rejected(proto::Rejected { reason, seq, tick })) => {
+                Ok(ServerMessage::Rejected { reason, seq, tick })
             }
             Some(Kind::Error(proto::Error { message })) => Ok(ServerMessage::Error { message }),
             Some(Kind::PluginMessage(proto::PluginMessage { body })) => {
                 Ok(ServerMessage::PluginMessage { body })
             }
+            Some(Kind::Pong(proto::Pong {
+                client_sent_at,
+                server_time,
+            })) => Ok(ServerMessage::Pong {
+                client_sent_at,
+                server_time,
+            }),
             None => Err(Error::new(
                 "server",
                 "gateway world message has no kind set",
@@ -382,11 +474,44 @@ mod tests {
 
     #[test]
     fn client_message_round_trips_through_an_envelope() {
-        let message = ClientMessage::Move { x: 1.5, y: -2.0 };
+        let message = ClientMessage::Move {
+            x: 1.5,
+            y: -2.0,
+            seq: 7,
+        };
         let envelope = message.into_envelope().unwrap();
         assert_eq!(envelope.message_type, WORLD_MESSAGE_TYPE);
         let decoded = ClientMessage::from_envelope(&envelope).unwrap();
-        assert!(matches!(decoded, ClientMessage::Move { x, y } if x == 1.5 && y == -2.0));
+        assert!(
+            matches!(decoded, ClientMessage::Move { x, y, seq } if x == 1.5 && y == -2.0 && seq == 7)
+        );
+    }
+
+    #[test]
+    fn ping_round_trips_through_an_envelope() {
+        let message = ClientMessage::Ping {
+            client_sent_at: 12345,
+        };
+        let envelope = message.into_envelope().unwrap();
+        let decoded = ClientMessage::from_envelope(&envelope).unwrap();
+        assert!(
+            matches!(decoded, ClientMessage::Ping { client_sent_at } if client_sent_at == 12345)
+        );
+    }
+
+    #[test]
+    fn pong_round_trips_through_an_envelope() {
+        let message = ServerMessage::Pong {
+            client_sent_at: 12345,
+            server_time: 67890,
+        };
+        let envelope = message.into_envelope().unwrap();
+        let decoded = ServerMessage::from_envelope(&envelope).unwrap();
+        assert!(matches!(
+            decoded,
+            ServerMessage::Pong { client_sent_at, server_time }
+                if client_sent_at == 12345 && server_time == 67890
+        ));
     }
 
     #[test]
@@ -414,6 +539,7 @@ mod tests {
                 x: 3.0,
                 y: 4.0,
             }],
+            tick: 42,
         };
         let envelope = message.into_envelope().unwrap();
         let decoded = ServerMessage::from_envelope(&envelope).unwrap();

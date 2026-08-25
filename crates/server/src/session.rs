@@ -486,6 +486,7 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
             y: other_position.1,
         })
         .collect();
+    let join_tick = zone.world.current_tick().await;
 
     zone.sessions
         .lock()
@@ -503,6 +504,7 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
             x: position.0,
             y: position.1,
             roster,
+            tick: join_tick,
         },
     );
 
@@ -555,8 +557,14 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
                 let Ok(envelope) = frame else { break };
                 if envelope.message_type == WORLD_MESSAGE_TYPE {
                     match ClientMessage::from_envelope(&envelope) {
-                        Ok(ClientMessage::Move { x, y }) => {
-                            zone.world.request_move(entity_id, (x, y));
+                        Ok(ClientMessage::Move { x, y, seq }) => {
+                            zone.world.request_move(entity_id, (x, y), seq);
+                        }
+                        Ok(ClientMessage::Ping { client_sent_at }) => {
+                            send_world(&mut sink, &ServerMessage::Pong {
+                                client_sent_at,
+                                server_time: unix_millis_now(),
+                            }).await?;
                         }
                         Ok(ClientMessage::Attack { target_entity_id, stat_key }) => {
                             match target_entity_id.parse::<EntityId>() {
@@ -803,6 +811,16 @@ pub(crate) fn entity_type_label(kind: EntityKind) -> String {
         EntityKind::Player => String::new(),
         EntityKind::Npc => "npc".to_string(),
     }
+}
+
+/// The server's own wall-clock, as Unix millis — `Pong.server_time`
+/// (#196). Never used for simulation logic (that's `tick`'s job); purely
+/// so a client can estimate clock skew alongside round-trip time.
+fn unix_millis_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock is before the Unix epoch")
+        .as_millis() as i64
 }
 
 fn queue(outgoing_tx: &mpsc::UnboundedSender<Envelope>, message: &ServerMessage) {
