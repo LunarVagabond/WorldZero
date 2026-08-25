@@ -3,7 +3,7 @@
 # or config/stats.schema.yaml). See docs/specs/Plugin_API.md.
 [plugin]
 name = "example-plugin"
-host_api_version = "0.9.0"
+host_api_version = "0.10.0"
 # This plugin calls spawn-npc, send-message, move-entity,
 # apply-stat-delta, and grant-item — all five gated capabilities
 # (docs/specs/Plugin_API.md's "Capability gating") — so it declares all
