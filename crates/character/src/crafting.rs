@@ -65,31 +65,14 @@ impl CharacterStore {
             current_quantities.push(current);
         }
 
-        let mut results = Vec::with_capacity(recipe.inputs.len() + 1);
-        for (input, current) in recipe.inputs.iter().zip(current_quantities) {
-            let remaining = current - input.amount;
-            if remaining == 0 {
-                sqlx::query("DELETE FROM items WHERE character_id = $1 AND item_type = $2")
-                    .bind(character_id.as_uuid())
-                    .bind(&input.item_type)
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(|e| Error::wrap("character", "failed to consume craft input", e))?;
-            } else {
-                sqlx::query(
-                    "UPDATE items SET quantity = $3, updated_at = now() \
-                     WHERE character_id = $1 AND item_type = $2",
-                )
-                .bind(character_id.as_uuid())
-                .bind(&input.item_type)
-                .bind(remaining)
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| Error::wrap("character", "failed to consume craft input", e))?;
-            }
-            results.push((input.item_type.clone(), remaining));
-        }
-
+        // Capacity is checked against the pre-craft inventory state,
+        // before any input is consumed — deliberately, so a craft that
+        // would fully deplete an input stack (freeing a "slot") can't use
+        // that same slot for its own new output within the same
+        // transaction. Doing this check after the consume loop below
+        // would let a craft "borrow" a slot it's about to vacate, which
+        // isn't the intended cap semantics (same soft cap `grant_item`
+        // enforces for an ordinary, non-craft grant).
         let output_already_owned: bool = sqlx::query(
             "SELECT 1 FROM items WHERE character_id = $1 AND item_type = $2 FOR UPDATE",
         )
@@ -118,6 +101,31 @@ impl CharacterStore {
                     ),
                 ));
             }
+        }
+
+        let mut results = Vec::with_capacity(recipe.inputs.len() + 1);
+        for (input, current) in recipe.inputs.iter().zip(current_quantities) {
+            let remaining = current - input.amount;
+            if remaining == 0 {
+                sqlx::query("DELETE FROM items WHERE character_id = $1 AND item_type = $2")
+                    .bind(character_id.as_uuid())
+                    .bind(&input.item_type)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| Error::wrap("character", "failed to consume craft input", e))?;
+            } else {
+                sqlx::query(
+                    "UPDATE items SET quantity = $3, updated_at = now() \
+                     WHERE character_id = $1 AND item_type = $2",
+                )
+                .bind(character_id.as_uuid())
+                .bind(&input.item_type)
+                .bind(remaining)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| Error::wrap("character", "failed to consume craft input", e))?;
+            }
+            results.push((input.item_type.clone(), remaining));
         }
 
         let output_quantity: i64 = sqlx::query(

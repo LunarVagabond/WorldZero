@@ -30,13 +30,6 @@ impl Guest for Plugin {
 
     fn on_unload() {}
 
-    // Not declared in this plugin's own `hooks` list (it never needed a
-    // starting-stat/archetype system), but the WIT world still requires
-    // every plugin to export it (exports aren't individually optional in
-    // the Component Model) — an empty body is the correct "not
-    // interested" implementation, same as on_entity_spawn below.
-    fn on_character_create(_character_id: String, _zone_id: String) {}
-
     // One plugin instance now serves every zone (#152) — spawning
     // "wolf-pack-01" lives here, not `on_load`, since `on_load` no
     // longer has any zone context. This example only ever runs against
@@ -59,7 +52,12 @@ impl Guest for Plugin {
     // nothing to correlate — see `test-plugin`'s fixture (used by
     // `plugin-host`/`server`'s own test suite) for a real multi-spawn
     // correlation example.
-    fn on_entity_spawn(_zone_id: String, _entity_id: String, _entity_type: String, _spawn_table_id: String) {
+    fn on_entity_spawn(
+        _zone_id: String,
+        _entity_id: String,
+        _entity_type: String,
+        _spawn_table_id: String,
+    ) {
     }
 
     // Live: fires once this connection has fully joined the zone (#155).
@@ -160,12 +158,7 @@ impl Guest for Plugin {
     // Live: this plugin's `plugin.toml` declares `chat_commands = ["wave"]`.
     // Also grants a `wolf-fang` trinket — the shipped example's live
     // demonstration of `grant-item`/`on-item-acquire` (#57/#112).
-    fn on_chat_command(
-        _zone_id: String,
-        command: String,
-        args: String,
-        sender_entity_id: String,
-    ) {
+    fn on_chat_command(_zone_id: String, command: String, args: String, sender_entity_id: String) {
         let _ = worldzero::plugin::host::send_message(
             &sender_entity_id,
             &format!("{sender_entity_id} used /{command} {args} — *the wolves howl*"),
