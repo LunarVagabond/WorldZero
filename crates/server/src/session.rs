@@ -97,6 +97,13 @@ pub struct SessionDeps {
     /// `character::CharacterStore::create` itself (see `main`'s doc
     /// comment on why this stays a `server`-side policy value).
     pub max_characters_per_account: u32,
+    /// Every loaded plugin (#152: one instance, process-wide), shared
+    /// with every zone actor — the character-creation loop below also
+    /// dispatches into this directly (#194's `on-character-create`),
+    /// since that hook fires before any zone/entity context exists to
+    /// route it through `world_actor::fire_hook` the way every other
+    /// hook does.
+    pub plugins: Arc<tokio::sync::Mutex<Vec<crate::plugin_startup::PluginRuntime>>>,
     /// Every zone-service instance this process runs (#45) — a
     /// connection looks up its current zone's `WorldHandle`/`Sessions`
     /// here at join time, and again on every `ZoneChanged` handoff.
@@ -327,6 +334,18 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
                     .await
                 {
                     Ok(id) => {
+                        // #194's extension point — fires (and its
+                        // starting-stat writes are applied) before the
+                        // client's own acknowledgement, so a client that
+                        // immediately selects and joins never observes
+                        // the character pre-hook.
+                        fire_on_character_create(
+                            &deps.plugins,
+                            &deps.character_store,
+                            id,
+                            &deps.default_zone_id,
+                        )
+                        .await;
                         send_character(
                             &mut sink,
                             &character_protocol::ServerMessage::CharacterCreated {
@@ -882,6 +901,48 @@ async fn build_realm_summary(deps: &SessionDeps) -> Result<realm_protocol::Realm
         character_count: population.character_count,
         live_connection_count: population.live_connections,
     })
+}
+
+/// Fires `on-character-create` (#194) on every plugin that declared it,
+/// then drains and applies each plugin's own
+/// `apply-stat-delta-for-character` requests — the character-creation
+/// counterpart to `world_actor::fire_hook`/`drain_and_apply_plugin_effects`,
+/// but not built on either of them: there's no `Zone`/`EntityCharacters`
+/// context here (the character has no entity yet), so this dispatches
+/// directly against `character_store` instead. A failed hook call or a
+/// rejected stat write is logged and otherwise ignored — same
+/// never-fatal discipline every other hook call site already uses.
+async fn fire_on_character_create(
+    plugins: &Arc<tokio::sync::Mutex<Vec<crate::plugin_startup::PluginRuntime>>>,
+    character_store: &CharacterStore,
+    character_id: CharacterId,
+    zone_id: &str,
+) {
+    let character_id_str = character_id.to_string();
+    let mut plugins = plugins.lock().await;
+    for runtime in plugins.iter_mut() {
+        if !runtime.wants("on-character-create") {
+            continue;
+        }
+        if let Err(e) = runtime
+            .plugin
+            .on_character_create(&character_id_str, zone_id)
+        {
+            tracing::warn!(plugin = %runtime.name, %character_id, error = %e, "plugin on_character_create hook failed");
+        }
+        for (target, stat_key, delta) in runtime.drain_pending_character_stat_deltas() {
+            let Ok(target_id) = target.parse::<CharacterId>() else {
+                tracing::warn!(plugin = %runtime.name, character_id = %target, "plugin apply-stat-delta-for-character called with an invalid character id");
+                continue;
+            };
+            if let Err(e) = character_store
+                .apply_stat_delta(target_id, &stat_key, delta)
+                .await
+            {
+                tracing::warn!(plugin = %runtime.name, character_id = %target_id, stat_key, error = %e, "plugin apply-stat-delta-for-character failed");
+            }
+        }
+    }
 }
 
 #[cfg(test)]

@@ -68,6 +68,7 @@ const REALM_LIST_ADDR: &str = "127.0.0.1:7925";
 const REALM_MISMATCH_ADDR: &str = "127.0.0.1:7926";
 const MULTI_CHARACTER_ADDR: &str = "127.0.0.1:7927";
 const CHARACTER_CAP_ADDR: &str = "127.0.0.1:7928";
+const CHARACTER_CREATE_HOOK_ADDR: &str = "127.0.0.1:7929";
 
 struct ServerProcess {
     child: Child,
@@ -95,6 +96,27 @@ async fn create_realm(open_or_bound: realm_directory::OpenOrBound) -> common::id
     let store = realm_directory::RealmStore::new(pool);
     let name = format!("smoke-test-realm-{}", common::id::RealmId::new());
     store.create(&name, open_or_bound).await.unwrap()
+}
+
+/// Reads a declared stat straight from `characters.stats` (#194's
+/// `on-character-create` fixture test) — a direct DB read rather than
+/// going through the wire protocol, since there's no client-facing "read
+/// my own stats" message today; this is the same JSONB column
+/// `character::CharacterStore::get_stat` reads, just queried directly so
+/// this test doesn't need to build a matching `AttributeSchema` just to
+/// read one key back.
+async fn read_character_stat(character_id: &str, key: &str) -> Option<i64> {
+    let pg_config = common::config::PostgresConfig::from_env().expect("WZ_POSTGRES_* env vars set");
+    let pool = common::pool::postgres_pool(&pg_config, common::pool::PoolOptions::default())
+        .await
+        .expect("failed to connect to Postgres to read a character stat");
+    let character_id: uuid::Uuid = character_id.parse().unwrap();
+    sqlx::query_scalar("SELECT (stats->>$2)::bigint FROM characters WHERE id = $1")
+        .bind(character_id)
+        .bind(key)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
 }
 
 async fn start_server(config_dir: &std::path::Path, addr: &str) -> ServerProcess {
@@ -431,11 +453,12 @@ fn setup_config_dir(test_name: &str) -> PathBuf {
             r#"
 [plugin]
 name = "test-plugin"
-host_api_version = "0.8.0"
+host_api_version = "0.9.0"
 capabilities = ["spawning", "movement", "combat", "economy", "messaging"]
 message_types = [1000]
 hooks = [
     "on-zone-loaded",
+    "on-character-create",
     "on-player-join-zone",
     "on-player-leave-zone",
     "on-interact",
@@ -500,7 +523,7 @@ fn setup_multi_plugin_config_dir(test_name: &str) -> PathBuf {
         r#"
 [plugin]
 name = "test-plugin"
-host_api_version = "0.8.0"
+host_api_version = "0.9.0"
 capabilities = ["spawning", "movement", "combat", "economy", "messaging"]
 message_types = [1000]
 hooks = ["on-zone-loaded", "on-player-join-zone"]
@@ -520,7 +543,7 @@ hooks = ["on-zone-loaded", "on-player-join-zone"]
         r#"
 [plugin]
 name = "second-plugin"
-host_api_version = "0.8.0"
+host_api_version = "0.9.0"
 capabilities = ["messaging"]
 message_types = [1001]
 hooks = ["on-player-join-zone"]
@@ -1991,4 +2014,57 @@ async fn character_creation_is_rejected_once_the_per_account_cap_is_reached() {
         }
         other => panic!("expected a CharacterList, got {other:?}"),
     }
+}
+
+/// #194, end to end through the real `server` binary: the fixture
+/// plugin's `on-character-create` hook calls
+/// `apply-stat-delta-for-character` to set a starting stat on a
+/// character that has no entity/session yet — observed here by reading
+/// the value straight out of Postgres right after `CharacterCreated`
+/// comes back, before the character is ever selected/spawned into the
+/// world (proving the write landed pre-spawn, not as a side effect of
+/// joining).
+#[tokio::test]
+#[ignore]
+async fn plugin_sets_a_starting_stat_via_on_character_create() {
+    let config_dir = setup_config_dir("character-create-hook");
+    let _server = start_server(&config_dir, CHARACTER_CREATE_HOOK_ADDR).await;
+    wait_for_port(CHARACTER_CREATE_HOOK_ADDR).await;
+
+    let username = format!("character-create-hook-{}", uuid::Uuid::now_v7());
+    let password = "hunter2";
+
+    let mut stream = connect(&config_dir, CHARACTER_CREATE_HOOK_ADDR).await;
+    send_auth(
+        &mut stream,
+        &AuthClientMessage::Register {
+            username: username.clone(),
+            password: password.to_string(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv_auth(&mut stream).await,
+        AuthServerMessage::Authenticated { .. }
+    ));
+    select_realm(&mut stream, _server.realm_id).await;
+
+    send_character(
+        &mut stream,
+        &CharacterClientMessage::CreateCharacter {
+            name: "Aria".to_string(),
+        },
+    )
+    .await;
+    let character_id = match recv_character(&mut stream).await {
+        CharacterServerMessage::CharacterCreated { character_id } => character_id,
+        other => panic!("expected a CharacterCreated, got {other:?}"),
+    };
+
+    // The fixture plugin's on_character_create applies a +25 delta to
+    // reputation.ironclad_guild (default 0, no declared bounds) — same
+    // key/host-function `on_player_leave_zone` already exercises
+    // elsewhere in this suite, just via the character-id-scoped variant.
+    let stat = read_character_stat(&character_id, "reputation.ironclad_guild").await;
+    assert_eq!(stat, Some(25), "starting stat should be set pre-spawn");
 }

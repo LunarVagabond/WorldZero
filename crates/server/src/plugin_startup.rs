@@ -48,6 +48,12 @@ pub struct PluginCallbacks {
     /// inside a sandboxed sync call" reasoning as `pending_spawns` (see
     /// module doc).
     pending_stat_deltas: Arc<Mutex<Vec<(String, String, i64)>>>,
+    /// `(character_id, stat_key, delta)` from `apply-stat-delta-for-character`
+    /// (#194) — same "record now, drain-and-apply later" reasoning as
+    /// `pending_stat_deltas`, but keyed by character id directly since
+    /// this is only ever called from `on-character-create`, before any
+    /// entity exists.
+    pending_character_stat_deltas: Arc<Mutex<Vec<(String, String, i64)>>>,
     /// `(entity_id, x, y)`, drained and applied via
     /// `world::Zone::request_move` by the caller.
     pending_moves: Arc<Mutex<Vec<(String, f64, f64)>>>,
@@ -133,6 +139,20 @@ impl HostCallbacks for PluginCallbacks {
     ) -> std::result::Result<(), String> {
         self.pending_stat_deltas.lock().unwrap().push((
             entity_id.to_string(),
+            stat_key.to_string(),
+            delta,
+        ));
+        Ok(())
+    }
+
+    fn apply_stat_delta_for_character(
+        &mut self,
+        character_id: &str,
+        stat_key: &str,
+        delta: i64,
+    ) -> std::result::Result<(), String> {
+        self.pending_character_stat_deltas.lock().unwrap().push((
+            character_id.to_string(),
             stat_key.to_string(),
             delta,
         ));
@@ -271,6 +291,7 @@ pub struct PluginRuntime {
     pub hooks: Vec<String>,
     pending_spawns: Arc<Mutex<Vec<String>>>,
     pending_stat_deltas: Arc<Mutex<Vec<(String, String, i64)>>>,
+    pending_character_stat_deltas: Arc<Mutex<Vec<(String, String, i64)>>>,
     pending_moves: Arc<Mutex<Vec<(String, f64, f64)>>>,
     pending_item_grants: Arc<Mutex<Vec<(String, String, i64)>>>,
     pending_item_removals: Arc<Mutex<Vec<(String, String, i64)>>>,
@@ -291,6 +312,13 @@ impl PluginRuntime {
     /// since the last drain, in call order.
     pub fn drain_pending_stat_deltas(&self) -> Vec<(String, String, i64)> {
         std::mem::take(&mut self.pending_stat_deltas.lock().unwrap())
+    }
+
+    /// `(character_id, stat_key, delta)` requested via
+    /// `apply-stat-delta-for-character` since the last drain, in call
+    /// order (#194).
+    pub fn drain_pending_character_stat_deltas(&self) -> Vec<(String, String, i64)> {
+        std::mem::take(&mut self.pending_character_stat_deltas.lock().unwrap())
     }
 
     /// `(entity_id, x, y)` requested via `move-entity` since the last
@@ -382,6 +410,7 @@ pub fn load_plugin(
     let hooks = manifest.plugin.hooks.clone();
     let pending_spawns = Arc::new(Mutex::new(Vec::new()));
     let pending_stat_deltas = Arc::new(Mutex::new(Vec::new()));
+    let pending_character_stat_deltas = Arc::new(Mutex::new(Vec::new()));
     let pending_moves = Arc::new(Mutex::new(Vec::new()));
     let pending_item_grants = Arc::new(Mutex::new(Vec::new()));
     let pending_item_removals = Arc::new(Mutex::new(Vec::new()));
@@ -392,6 +421,7 @@ pub fn load_plugin(
     let callbacks = PluginCallbacks {
         pending_spawns: pending_spawns.clone(),
         pending_stat_deltas: pending_stat_deltas.clone(),
+        pending_character_stat_deltas: pending_character_stat_deltas.clone(),
         pending_moves: pending_moves.clone(),
         pending_item_grants: pending_item_grants.clone(),
         pending_item_removals: pending_item_removals.clone(),
@@ -418,6 +448,7 @@ pub fn load_plugin(
         hooks,
         pending_spawns,
         pending_stat_deltas,
+        pending_character_stat_deltas,
         pending_moves,
         pending_item_grants,
         pending_item_removals,

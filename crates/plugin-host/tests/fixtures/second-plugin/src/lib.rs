@@ -22,6 +22,8 @@ impl Guest for Plugin {
 
     fn on_zone_loaded(_zone_id: String) {}
 
+    fn on_character_create(_character_id: String, _zone_id: String) {}
+
     fn on_entity_spawn(_zone_id: String, _entity_id: String, _entity_type: String) {}
 
     // Distinct wording from test-plugin's own on-player-join-zone
