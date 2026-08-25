@@ -26,6 +26,7 @@ config/certs/
 config/zone.manifest.yaml
 config/stats.schema.yaml
 config/party.schema.yaml
+config/currency.schema.yaml
 config/plugin.toml
 
 # Logs

@@ -1,0 +1,34 @@
+# Example declared currency schema — loaded by the `character` crate
+# (crates/character/src/currency_schema.rs), see docs/specs/Data_Model_Spec.md's
+# "Currency" section and #217's decision. Copy/rename this as
+# currency.schema.yaml in the config dir your instance actually uses
+# (WZ_CONFIG_DIR, or ./config by default) and adjust freely — the
+# framework doesn't declare any currencies of its own, same "core has no
+# opinion on the domain specifics" discipline stats.schema.yaml/
+# party.schema.yaml/guild.schema.yaml already follow.
+#
+# Storage is always a single flat integer balance per (character,
+# currency key), in that currency's base unit (the denomination with
+# ratio 1). `denominations` is a purely cosmetic conversion ladder,
+# computed at read time from that one stored number — it never creates
+# separate stored ledgers per denomination. Declare them in strictly
+# ascending ratio order (smallest/base unit first); a currency with no
+# denominations at all is just a flat balance, e.g. `honor` below.
+#
+# `gold` here: 100 copper = 1 silver, 100 silver = 1 gold — so a raw
+# stored balance of 10847 (in copper, the base unit) breaks down as 1
+# gold, 8 silver, 47 copper.
+schema_version: 1
+currencies:
+  - key: gold
+    denominations:
+      - key: copper
+        ratio: 1
+      - key: silver
+        ratio: 100
+      - key: gold
+        ratio: 10000
+  # A second, fully independent currency — no denomination ladder, just
+  # a flat balance (e.g. a PvP/reputation currency with no "loose change"
+  # concept at all).
+  - key: honor

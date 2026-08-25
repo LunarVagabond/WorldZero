@@ -106,7 +106,14 @@ pub trait HostCallbacks: Send + 'static {
 
     /// Adjusts a currency balance (`wit/plugin.wit`'s `modify-currency`)
     /// — queued, applied through `character::CharacterStore::modify_currency`.
-    fn modify_currency(&mut self, entity_id: &str, delta: i64) -> std::result::Result<(), String>;
+    /// `currency_key` (#218) names which of the dev-declared currencies
+    /// (`currency.schema.yaml`) this delta applies to.
+    fn modify_currency(
+        &mut self,
+        entity_id: &str,
+        currency_key: &str,
+        delta: i64,
+    ) -> std::result::Result<(), String>;
 
     /// Returns the roles held by the account behind `entity_id`
     /// (`wit/plugin.wit`'s `caller-role`) — unlike every other method
@@ -267,9 +274,14 @@ impl HostCallbacks for CapabilityGatedCallbacks {
         self.inner.remove_item(entity_id, item_type, quantity)
     }
 
-    fn modify_currency(&mut self, entity_id: &str, delta: i64) -> std::result::Result<(), String> {
+    fn modify_currency(
+        &mut self,
+        entity_id: &str,
+        currency_key: &str,
+        delta: i64,
+    ) -> std::result::Result<(), String> {
         self.check("modify-currency")?;
-        self.inner.modify_currency(entity_id, delta)
+        self.inner.modify_currency(entity_id, currency_key, delta)
     }
 
     fn caller_role(&mut self, entity_id: &str) -> std::result::Result<Vec<String>, String> {
@@ -382,9 +394,11 @@ impl HostInterface for PluginState {
     fn modify_currency(
         &mut self,
         entity_id: String,
+        currency_key: String,
         delta: i64,
     ) -> std::result::Result<(), String> {
-        self.callbacks.modify_currency(&entity_id, delta)
+        self.callbacks
+            .modify_currency(&entity_id, &currency_key, delta)
     }
 
     fn caller_role(&mut self, entity_id: String) -> std::result::Result<Vec<String>, String> {
@@ -842,7 +856,7 @@ mod tests {
         fn remove_item(&mut self, _: &str, _: &str, _: i64) -> std::result::Result<(), String> {
             Ok(())
         }
-        fn modify_currency(&mut self, _: &str, _: i64) -> std::result::Result<(), String> {
+        fn modify_currency(&mut self, _: &str, _: &str, _: i64) -> std::result::Result<(), String> {
             Ok(())
         }
         fn caller_role(&mut self, _: &str) -> std::result::Result<Vec<String>, String> {
@@ -909,7 +923,7 @@ mod tests {
         assert!(none.report_respawn("e1").is_err());
         assert!(none.grant_item("e1", "torch", 1).is_err());
         assert!(none.remove_item("e1", "torch", 1).is_err());
-        assert!(none.modify_currency("e1", 1).is_err());
+        assert!(none.modify_currency("e1", "gold", 1).is_err());
 
         let mut spawning = gated(&["spawning"]);
         assert!(spawning.spawn_npc("table").is_ok());
@@ -937,7 +951,7 @@ mod tests {
         let mut economy = gated(&["economy"]);
         assert!(economy.grant_item("e1", "torch", 1).is_ok());
         assert!(economy.remove_item("e1", "torch", 1).is_ok());
-        assert!(economy.modify_currency("e1", 1).is_ok());
+        assert!(economy.modify_currency("e1", "gold", 1).is_ok());
         assert!(economy.spawn_npc("table").is_err());
     }
 

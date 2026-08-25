@@ -36,6 +36,9 @@
 //! - `<config_dir>/character.archetypes.yaml` (see
 //!   `config/character.archetypes.example.yaml`) — the declared
 //!   character-archetype schema (#213/#212)
+//! - `<config_dir>/currency.schema.yaml` (see
+//!   `config/currency.schema.example.yaml`) — the declared, possibly
+//!   multi-currency schema (#217/#218)
 //!
 //! Optional: `WZ_SERVER_ADDR` (default `127.0.0.1:7900`),
 //! `WZ_PLUGINS_DIR` (default `<config_dir>/plugins`) — a directory of
@@ -237,6 +240,14 @@ async fn main() {
                 archetype_schema_path.display()
             )
         });
+    let currency_schema_path = config_dir.join("currency.schema.yaml");
+    let currency_schema =
+        character::CurrencySchema::from_file(&currency_schema_path).unwrap_or_else(|e| {
+            panic!(
+                "failed to load the declared currency schema at {} (see config/currency.schema.example.yaml): {e}",
+                currency_schema_path.display()
+            )
+        });
     let inventory_config =
         InventoryConfig::from_env().expect("invalid WZ_INVENTORY_MAX_ITEM_TYPES");
     // #193's character-creation cap — a `server`-side policy value (like
@@ -269,6 +280,7 @@ async fn main() {
     let party_store = Arc::new(character::PartyStore::new(pool.clone(), party_schema));
     let guild_store = Arc::new(guild::GuildStore::new(pool.clone(), guild_schema));
     let archetype_schema = Arc::new(archetype_schema);
+    let currency_schema = Arc::new(currency_schema);
 
     let realm_store = realm_directory::RealmStore::new(pool.clone());
     let realm = resolve_realm(&realm_store).await;
@@ -481,6 +493,7 @@ async fn main() {
             entity_characters.clone(),
             npc_stats.clone(),
             npc_attribute_schema.clone(),
+            currency_schema.clone(),
             plugin_state_store.clone(),
             zone_id.clone(),
             metrics.clone(),
@@ -530,6 +543,7 @@ async fn main() {
     let layer_spawner_entity_characters = entity_characters.clone();
     let layer_spawner_npc_stats = npc_stats.clone();
     let layer_spawner_npc_attribute_schema = npc_attribute_schema.clone();
+    let layer_spawner_currency_schema = currency_schema.clone();
     let layer_spawner_metrics = metrics.clone();
     let layer_spawner_registry_cell = zone_registry_cell.clone();
     let layer_spawner_plugin_state_store = plugin_state_store.clone();
@@ -550,6 +564,7 @@ async fn main() {
             layer_spawner_entity_characters.clone(),
             layer_spawner_npc_stats.clone(),
             layer_spawner_npc_attribute_schema.clone(),
+            layer_spawner_currency_schema.clone(),
             layer_spawner_plugin_state_store.clone(),
             zone_id.to_string(),
             layer_spawner_metrics.clone(),

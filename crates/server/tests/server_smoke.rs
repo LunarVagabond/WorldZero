@@ -512,6 +512,11 @@ fn setup_config_dir(test_name: &str) -> PathBuf {
         config_dir.join("character.archetypes.yaml"),
     )
     .unwrap();
+    std::fs::copy(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../config/currency.schema.example.yaml"),
+        config_dir.join("currency.schema.yaml"),
+    )
+    .unwrap();
     // `<config_dir>/plugins/test-plugin/{plugin.toml,test_plugin.wasm}`
     // (#152's discovery convention) — only written if the compiled wasm
     // fixture actually exists, same "gracefully run with no plugin
@@ -597,6 +602,11 @@ fn setup_multi_plugin_config_dir(test_name: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../config/character.archetypes.example.yaml"),
         config_dir.join("character.archetypes.yaml"),
+    )
+    .unwrap();
+    std::fs::copy(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../config/currency.schema.example.yaml"),
+        config_dir.join("currency.schema.yaml"),
     )
     .unwrap();
 
@@ -692,6 +702,11 @@ fn setup_content_pack_config_dir(test_name: &str) -> PathBuf {
     std::fs::copy(
         repo_config_dir.join("character.archetypes.example.yaml"),
         config_dir.join("character.archetypes.yaml"),
+    )
+    .unwrap();
+    std::fs::copy(
+        repo_config_dir.join("currency.schema.example.yaml"),
+        config_dir.join("currency.schema.yaml"),
     )
     .unwrap();
     config_dir
@@ -1162,7 +1177,11 @@ async fn combat_item_use_npc_interact_and_death_respawn_hooks_fire_for_real() {
     }
     loop {
         match recv_world(&mut attacker).await {
-            ServerMessage::CurrencyChanged { balance } => {
+            ServerMessage::CurrencyChanged {
+                currency_key,
+                balance,
+            } => {
+                assert_eq!(currency_key, "gold");
                 assert_eq!(balance, 5);
                 break;
             }

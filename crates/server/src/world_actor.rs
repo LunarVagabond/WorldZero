@@ -8,7 +8,7 @@
 //! scheduling logic — fixed `dt`, log-and-resync on an overrun rather
 //! than catching up — around `Zone::tick()`'s pure step instead.
 
-use character::{AttributeSchema, CharacterStore};
+use character::{AttributeSchema, CharacterStore, CurrencySchema};
 use common::id::EntityId;
 use common::metrics::Metrics;
 use prometheus::IntGauge;
@@ -325,6 +325,7 @@ pub fn spawn_world_actor(
     entity_characters: EntityCharacters,
     npc_stats: NpcStats,
     attribute_schema: std::sync::Arc<AttributeSchema>,
+    currency_schema: std::sync::Arc<character::CurrencySchema>,
     plugin_state_store: std::sync::Arc<crate::plugin_state::PluginStateStore>,
     zone_id: String,
     metrics: Option<std::sync::Arc<Metrics>>,
@@ -400,7 +401,7 @@ pub fn spawn_world_actor(
                                 }
                             }
                             drain_and_apply_plugin_effects(
-                                runtime, &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &plugin_state_store, &global_sessions,
+                                runtime, &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &currency_schema, &plugin_state_store, &global_sessions,
                             ).await;
                         }
                     }
@@ -455,7 +456,7 @@ pub fn spawn_world_actor(
                             }
                             spawn_requested_npcs(runtime, &mut zone, &zone_id);
                             drain_and_apply_plugin_effects(
-                                runtime, &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &plugin_state_store, &global_sessions,
+                                runtime, &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &currency_schema, &plugin_state_store, &global_sessions,
                             ).await;
                         }
                         WorldCommand::ChatCommand { command, args, sender_entity_id } => {
@@ -479,14 +480,14 @@ pub fn spawn_world_actor(
                             // below exercises exactly this path.
                             spawn_requested_npcs(runtime, &mut zone, &zone_id);
                             drain_and_apply_plugin_effects(
-                                runtime, &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &plugin_state_store, &global_sessions,
+                                runtime, &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &currency_schema, &plugin_state_store, &global_sessions,
                             ).await;
                         }
                         WorldCommand::PlayerJoin { entity_id } => {
                             let entity_id_str = entity_id.to_string();
                             let mut plugins = plugins.lock().await;
                             fire_hook(
-                                &mut plugins, "on-player-join-zone", &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &plugin_state_store, &global_sessions,
+                                &mut plugins, "on-player-join-zone", &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &currency_schema, &plugin_state_store, &global_sessions,
                                 |plugin| plugin.on_player_join_zone(&zone_id, &entity_id_str),
                             ).await;
                         }
@@ -494,7 +495,7 @@ pub fn spawn_world_actor(
                             let entity_id_str = entity_id.to_string();
                             let mut plugins = plugins.lock().await;
                             fire_hook(
-                                &mut plugins, "on-player-leave-zone", &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &plugin_state_store, &global_sessions,
+                                &mut plugins, "on-player-leave-zone", &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &currency_schema, &plugin_state_store, &global_sessions,
                                 |plugin| plugin.on_player_leave_zone(&zone_id, &entity_id_str),
                             ).await;
                             let _ = reply.send(());
@@ -508,7 +509,7 @@ pub fn spawn_world_actor(
                             let target_str = target.to_string();
                             let mut plugins = plugins.lock().await;
                             fire_hook(
-                                &mut plugins, "on-damage-calc", &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &plugin_state_store, &global_sessions,
+                                &mut plugins, "on-damage-calc", &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &currency_schema, &plugin_state_store, &global_sessions,
                                 |plugin| plugin.on_damage_calc(&zone_id, &attacker_str, &target_str, &stat_key, 0),
                             ).await;
                         }
@@ -516,7 +517,7 @@ pub fn spawn_world_actor(
                             let entity_id_str = entity_id.to_string();
                             let mut plugins = plugins.lock().await;
                             fire_hook(
-                                &mut plugins, "on-item-use", &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &plugin_state_store, &global_sessions,
+                                &mut plugins, "on-item-use", &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &currency_schema, &plugin_state_store, &global_sessions,
                                 |plugin| plugin.on_item_use(&zone_id, &entity_id_str, &item_type),
                             ).await;
                         }
@@ -529,7 +530,7 @@ pub fn spawn_world_actor(
                             let actor_str = actor.to_string();
                             let mut plugins = plugins.lock().await;
                             fire_hook(
-                                &mut plugins, "on-npc-interact", &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &plugin_state_store, &global_sessions,
+                                &mut plugins, "on-npc-interact", &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &currency_schema, &plugin_state_store, &global_sessions,
                                 |plugin| plugin.on_npc_interact(&zone_id, &npc_str, &actor_str),
                             ).await;
                         }
@@ -609,6 +610,7 @@ async fn drain_and_apply_plugin_effects(
     entity_characters: &EntityCharacters,
     npc_stats: &NpcStats,
     attribute_schema: &AttributeSchema,
+    currency_schema: &CurrencySchema,
     plugin_state_store: &crate::plugin_state::PluginStateStore,
     global_sessions: &Sessions,
 ) {
@@ -631,6 +633,7 @@ async fn drain_and_apply_plugin_effects(
         entity_characters,
         npc_stats,
         attribute_schema,
+        currency_schema,
         plugin_state_store,
         global_sessions,
     )
@@ -686,6 +689,7 @@ async fn fire_hook(
     entity_characters: &EntityCharacters,
     npc_stats: &NpcStats,
     attribute_schema: &AttributeSchema,
+    currency_schema: &CurrencySchema,
     plugin_state_store: &crate::plugin_state::PluginStateStore,
     global_sessions: &Sessions,
     mut call: impl FnMut(&mut plugin_host::LoadedPlugin) -> common::Result<()>,
@@ -704,6 +708,7 @@ async fn fire_hook(
             entity_characters,
             npc_stats,
             attribute_schema,
+            currency_schema,
             plugin_state_store,
             global_sessions,
         )
@@ -734,12 +739,13 @@ async fn apply_plugin_pending_effects(
     pending_stat_deltas: Vec<(String, String, i64)>,
     pending_item_grants: Vec<(String, String, i64)>,
     pending_item_removals: Vec<(String, String, i64)>,
-    pending_currency_deltas: Vec<(String, i64)>,
+    pending_currency_deltas: Vec<(String, String, i64)>,
     pending_state_writes: Vec<(plugin_host::PluginStateScope, String, Vec<u8>)>,
     character_store: &CharacterStore,
     entity_characters: &EntityCharacters,
     npc_stats: &NpcStats,
     attribute_schema: &AttributeSchema,
+    currency_schema: &CurrencySchema,
     plugin_state_store: &crate::plugin_state::PluginStateStore,
     // #211: pushes `StatChanged`/`ItemChanged`/`CurrencyChanged` to the
     // one connection that owns whichever entity/character a write below
@@ -895,29 +901,43 @@ async fn apply_plugin_pending_effects(
         }
     }
 
-    for (entity_id, delta) in pending_currency_deltas {
+    for (entity_id, currency_key, delta) in pending_currency_deltas {
         let Some(character_id) = resolve_character(entity_characters, &entity_id) else {
             tracing::warn!(
                 entity_id,
+                currency_key,
                 "plugin requested a currency delta for an invalid entity id, an NPC \
                  (currency is character-owned only), or an unknown entity"
             );
             continue;
         };
-        match character_store.modify_currency(character_id, delta).await {
+        if !currency_schema.is_declared(&currency_key) {
+            tracing::warn!(
+                entity_id,
+                currency_key,
+                "plugin requested a currency delta for an undeclared currency key \
+                 (see currency.schema.yaml)"
+            );
+            continue;
+        }
+        match character_store
+            .modify_currency(character_id, &currency_key, delta)
+            .await
+        {
             Ok(new_balance) => {
                 if let Ok(parsed_entity_id) = entity_id.parse::<EntityId>() {
                     send_to(
                         global_sessions,
                         parsed_entity_id,
                         ServerMessage::CurrencyChanged {
+                            currency_key: currency_key.clone(),
                             balance: new_balance,
                         },
                     );
                 }
             }
             Err(e) => {
-                tracing::warn!(entity_id, error = %e, "plugin's modify-currency failed");
+                tracing::warn!(entity_id, currency_key, error = %e, "plugin's modify-currency failed");
             }
         }
     }

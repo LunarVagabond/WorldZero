@@ -309,10 +309,11 @@ pub enum ServerMessage {
     },
     /// Pushed to this connection whenever its own character's currency
     /// balance actually changes via `modify-currency` (#211/#210) —
-    /// `balance` is the resulting balance, not the delta. No
-    /// `currency_key` yet (#218) — matches `character`'s current single
-    /// `currency_balance` column.
+    /// `balance` is the resulting balance, not the delta. `currency_key`
+    /// (#218) names which of the dev-declared currencies
+    /// (`currency.schema.yaml`) changed.
     CurrencyChanged {
+        currency_key: String,
         balance: i64,
     },
 }
@@ -685,9 +686,13 @@ impl From<&ServerMessage> for proto::ServerMessage {
                 item_type: item_type.clone(),
                 quantity: *quantity,
             }),
-            ServerMessage::CurrencyChanged { balance } => {
-                Kind::CurrencyChanged(proto::CurrencyChanged { balance: *balance })
-            }
+            ServerMessage::CurrencyChanged {
+                currency_key,
+                balance,
+            } => Kind::CurrencyChanged(proto::CurrencyChanged {
+                currency_key: currency_key.clone(),
+                balance: *balance,
+            }),
         };
         proto::ServerMessage { kind: Some(kind) }
     }
@@ -809,9 +814,13 @@ impl TryFrom<proto::ServerMessage> for ServerMessage {
                 item_type,
                 quantity,
             }),
-            Some(Kind::CurrencyChanged(proto::CurrencyChanged { balance })) => {
-                Ok(ServerMessage::CurrencyChanged { balance })
-            }
+            Some(Kind::CurrencyChanged(proto::CurrencyChanged {
+                currency_key,
+                balance,
+            })) => Ok(ServerMessage::CurrencyChanged {
+                currency_key,
+                balance,
+            }),
             None => Err(Error::new(
                 "server",
                 "gateway world message has no kind set",
