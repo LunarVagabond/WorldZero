@@ -1,7 +1,7 @@
-//! Compiles `proto/session.proto` into `OUT_DIR` at build time via
-//! `prost-build` (docs/specs/Networking_Spec.md, "Wire schema", #109/#123)
-//! — see `crates/auth/build.rs` for why a vendored `protoc` is used
-//! instead of requiring one on the host.
+//! Compiles `proto/session.proto` and `proto/realm.proto` into `OUT_DIR`
+//! at build time via `prost-build` (docs/specs/Networking_Spec.md, "Wire
+//! schema", #109/#123) — see `crates/auth/build.rs` for why a vendored
+//! `protoc` is used instead of requiring one on the host.
 
 fn main() {
     let protoc_path =
@@ -12,6 +12,6 @@ fn main() {
         std::env::set_var("PROTOC", protoc_path);
     }
 
-    prost_build::compile_protos(&["proto/session.proto"], &["proto/"])
-        .expect("failed to compile proto/session.proto");
+    prost_build::compile_protos(&["proto/session.proto", "proto/realm.proto"], &["proto/"])
+        .expect("failed to compile proto/session.proto and proto/realm.proto");
 }
