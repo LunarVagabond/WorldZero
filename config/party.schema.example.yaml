@@ -1,0 +1,18 @@
+# Example declared party-type schema — loaded by the `character` crate
+# (crates/character/src/party_schema.rs), see docs/specs/Chat_Spec.md's
+# "Party/group" section. Copy/rename this as party.schema.yaml in the
+# config dir your instance actually uses (WZ_CONFIG_DIR, or ./config by
+# default) and adjust freely — the framework doesn't declare any party
+# sizes of its own, same "core has no opinion on the domain specifics"
+# discipline stats.schema.yaml already follows for character stats.
+#
+# The first declared entry is what a PartyInvite gets when the client
+# doesn't name a type explicitly.
+schema_version: 1
+party_types:
+  - key: normal
+    max_members: 5
+  - key: rush
+    max_members: 3
+  # Omitting max_members means no cap at all.
+  - key: raid
