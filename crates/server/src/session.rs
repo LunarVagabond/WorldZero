@@ -55,7 +55,30 @@ pub type EntityRoles = Arc<Mutex<HashMap<EntityId, Vec<String>>>>;
 pub struct SessionDeps {
     pub auth_provider: Arc<auth::UsernamePasswordProvider>,
     pub character_store: Arc<CharacterStore>,
+    /// The one realm this process serves (#136) — resolved at startup
+    /// from `WZ_REALM_ID` against `realm-directory::RealmStore`, never a
+    /// hardcoded placeholder. A process serving more than one realm at
+    /// once is #130's job; every login this process handles targets this
+    /// realm.
     pub realm_id: RealmId,
+    /// `realm_id`'s own open/bound policy, resolved once at startup
+    /// alongside it — cheap to cache since it can't change without an
+    /// operator editing it via `realm-directory`'s CLI mid-process, an
+    /// accepted v0 staleness window (same shape `entity_roles` already
+    /// uses). Used to decide whether a connection needs #21's lease
+    /// renewal loop below at all (a bound realm never takes a lease).
+    pub realm_open_or_bound: realm_directory::OpenOrBound,
+    /// The single login-time enforcement point (#51) — resolves which
+    /// character an account logs in with per `realm_id`'s policy, then
+    /// authorizes the login (bound-realm mismatch rejection, or
+    /// open-realm lease acquisition) before the connection is allowed to
+    /// join the world.
+    pub login_policy: Arc<realm_directory::LoginPolicy>,
+    /// #21's session lease, released on clean disconnect (below) — a
+    /// harmless no-op for a bound-realm character, since `login_policy`
+    /// never acquires a lease for one in the first place.
+    pub character_lease: Arc<character::CharacterSessionLease>,
+    pub lease_ttl: std::time::Duration,
     /// Every zone-service instance this process runs (#45) — a
     /// connection looks up its current zone's `WorldHandle`/`Sessions`
     /// here at join time, and again on every `ZoneChanged` handoff.
@@ -151,7 +174,37 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
     }
     let mut joined_channels = chat_session::JoinedChannels::new();
 
-    let character = load_or_create_character(&deps, account_id, &username).await?;
+    let character = resolve_or_create_character(&deps, account_id, &username).await?;
+    // #21's lease is keyed by `zone_service_id`, which in the real
+    // multi-process model (#130) names a whole zone-service instance —
+    // but within *this* combined process, the thing that needs to be
+    // distinguished from any other still-connected claim on the same
+    // character is the connection itself, not the process (every
+    // connection this process handles shares one process identity, so a
+    // process-wide id here would make two concurrent connections for the
+    // same character look like the same lease holder renewing, not a
+    // conflict — `acquire`'s `zone_service_id = EXCLUDED.zone_service_id`
+    // clause is exactly the case that's supposed to allow a renewal, not
+    // a second login). `entity_id`, generated fresh per connection right
+    // here (used for exactly that purpose everywhere else in this
+    // function already), is stable for this connection's whole lifetime
+    // — including across a later `ZoneChanged` hop — and unique across
+    // any other concurrent one.
+    let entity_id = EntityId::new();
+    let lease_holder_id = entity_id.to_string();
+    if let Err(e) = deps
+        .login_policy
+        .authorize_login(
+            character.id,
+            character.realm_id,
+            deps.realm_id,
+            &lease_holder_id,
+        )
+        .await
+    {
+        send_auth_error(&mut sink, e.to_string()).await?;
+        return Ok(());
+    }
     let character_id = character.id;
     let position = (character.position.0, character.position.1);
 
@@ -178,7 +231,6 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
         .assign_layer(&current_zone_id)
         .expect("default_zone_id must always resolve to a real zone in the registry");
 
-    let entity_id = EntityId::new();
     zone.world.spawn(entity_id, EntityKind::Player, position);
     deps.entity_characters
         .lock()
@@ -266,8 +318,28 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
     // ready to receive it (#155).
     zone.world.dispatch_player_join(entity_id);
 
+    // #21's lease renewal — only meaningful for an open-realm character
+    // (a bound one never held a lease in the first place, and calling
+    // `renew` for one would just log a spurious "doesn't hold a lease"
+    // warning every tick for no reason). Renews at a third of the TTL so
+    // a couple of missed ticks in a row still don't let the lease lapse
+    // out from under a still-connected character.
+    let renew_open_lease = deps.realm_open_or_bound == realm_directory::OpenOrBound::Open;
+    let mut lease_renewal =
+        tokio::time::interval((deps.lease_ttl / 3).max(std::time::Duration::from_secs(1)));
+    lease_renewal.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    lease_renewal.tick().await; // first tick fires immediately; the lease was just acquired
+
     loop {
         tokio::select! {
+            _ = lease_renewal.tick(), if renew_open_lease => {
+                if let Err(e) = deps.character_lease
+                    .renew(character_id, &lease_holder_id, deps.lease_ttl)
+                    .await
+                {
+                    tracing::warn!(error = %e, %character_id, "failed to renew character session lease");
+                }
+            }
             maybe_frame = stream.next() => {
                 let Some(frame) = maybe_frame else { break };
                 let Ok(envelope) = frame else { break };
@@ -413,6 +485,12 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
     deps.global_sessions.lock().unwrap().remove(&entity_id);
     deps.entity_characters.lock().unwrap().remove(&entity_id);
     deps.entity_roles.lock().unwrap().remove(&entity_id);
+    // #21's clean-disconnect release — a harmless no-op for a bound-realm
+    // character (never took a lease to begin with), so this runs
+    // unconditionally rather than branching on `realm_open_or_bound`.
+    if let Err(e) = deps.character_lease.release(character_id).await {
+        tracing::warn!(error = %e, %character_id, "failed to release character session lease on disconnect");
+    }
     // Character-scope (and any leftover entity-scope) cache entries for
     // this connection — keeps the shared process-wide cache from growing
     // unbounded across reconnects (#149). Zone-scope entries are never
@@ -439,14 +517,21 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
     Ok(())
 }
 
-async fn load_or_create_character(
+/// Resolves `account_id`'s character for a login into `deps.realm_id`,
+/// using `login_policy::LoginPolicy::resolve_character` (#52) rather than
+/// a plain realm-scoped lookup — that's what makes an open-realm
+/// character findable by an account regardless of which of the group's
+/// open realms it was originally created on. Still auto-creates on a
+/// miss, same as Phase 1's behavior, just via the policy-aware lookup
+/// first.
+async fn resolve_or_create_character(
     deps: &SessionDeps,
     account_id: AccountId,
     username: &str,
 ) -> Result<character::CharacterSummary> {
     if let Some(existing) = deps
-        .character_store
-        .find_by_account(account_id, deps.realm_id)
+        .login_policy
+        .resolve_character(&deps.character_store, account_id, deps.realm_id)
         .await?
     {
         return Ok(existing);

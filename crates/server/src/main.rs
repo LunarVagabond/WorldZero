@@ -1,16 +1,21 @@
 //! Combined-process runnable binary — the Phase 1 target (docs/PROPOSAL.md,
 //! "Phased Roadmap"): wires `auth`, `character`, `world`, `gateway`,
-//! `content`, and `chat` into one process a self-hoster can run end to
-//! end. `realm-directory` and `transfer` come online in later phases —
-//! `plugin-host` gets a minimal, optional slice here already (spawning
-//! one NPC per zone-service via a configured plugin's `on-zone-loaded`
-//! hook, plus live `on-message` routing, #95), matching Phase 1's
-//! "minimal plugin hook." `chat` is the first optional-service crate
-//! wired in, gated by `WZ_SERVICE_CHAT_ENABLED` per the #91/#92
+//! `content`, `chat`, and (as of #136) `realm-directory` into one process
+//! a self-hoster can run end to end. `transfer` comes online in a later
+//! phase — `plugin-host` gets a minimal, optional slice here already
+//! (spawning one NPC per zone-service via a configured plugin's
+//! `on-zone-loaded` hook, plus live `on-message` routing, #95), matching
+//! Phase 1's "minimal plugin hook." `chat` is the first optional-service
+//! crate wired in, gated by `WZ_SERVICE_CHAT_ENABLED` per the #91/#92
 //! runtime-toggle decision (#104).
 //!
 //! `cargo run -p server`. Needs, at minimum:
 //! - `WZ_POSTGRES_*` / `WZ_REDIS_*` (`.env`)
+//! - `WZ_REALM_ID` — the realm this process serves (#136); create one
+//!   first with `make realm ARGS="create <name> open|bound"`
+//!   (docs/specs/Realm_Character_Policy_Spec.md, "Managing realms
+//!   today") and pass the id it prints. A process serving more than one
+//!   realm at once is #130's job, not this one's.
 //! - `<config_dir>/content-pack.yaml` (see
 //!   `config/content-pack.example.yaml`), for **multiple** zone-service
 //!   instances (#45) — a player crosses between them by walking through
@@ -40,7 +45,9 @@
 //! one layer forever) + `WZ_LAYER_POPULATION_THRESHOLD` (default `200`
 //! — connected sessions per zone layer before a new one spins up, only
 //! consulted while layering is enabled; see `zone_registry`'s doc
-//! comment).
+//! comment), `WZ_REALM_LEASE_TTL_SECS` (default `60` — #21's open-realm
+//! session lease TTL; only consulted when `WZ_REALM_ID` names an `open`
+//! realm).
 //!
 //! A connected client speaks `auth::gateway_protocol` first (login or
 //! register), then `server::session_protocol` (move, see other entities
@@ -83,14 +90,45 @@ const DEFAULT_METRICS_ADDR: &str = "127.0.0.1:9090";
 /// doesn't layer-split a small/testing deployment for no reason.
 const DEFAULT_LAYER_POPULATION_THRESHOLD: usize = 200;
 
-/// Placeholder until `realm-directory` (#47) exists — one fixed, nil
-/// realm id every character in this phase-1 process belongs to. Safe as
-/// a placeholder specifically because it's deterministic across restarts
-/// (a random one would orphan every previously-created character from
-/// `CharacterStore::find_by_account`'s realm-scoped lookup on every
-/// restart).
-fn placeholder_realm_id() -> RealmId {
-    RealmId::from_uuid(uuid::Uuid::nil())
+/// Default session-lease TTL (#21/#51) for this process's open-realm
+/// logins, in seconds — only ever consulted when the realm this process
+/// serves (below) is `open`; a `bound` realm never takes a lease at all.
+/// Generous relative to the renewal interval `session::handle_session`
+/// runs at (`lease_ttl / 3`) so a couple of missed renewals in a row
+/// don't spuriously expire a still-connected character's lease.
+const DEFAULT_LEASE_TTL_SECS: u64 = 60;
+
+/// Resolves `WZ_REALM_ID` against `realm-directory::RealmStore` — the
+/// single realm this `server` process serves (#136; a multi-realm
+/// *process* is #130's job, out of scope here). Panics with a clear
+/// message rather than falling back to a placeholder: unlike Phase 1's
+/// `placeholder_realm_id()` (a fixed nil UUID nothing ever validated),
+/// every character created from here on is stamped with a real
+/// `realms.id` foreign-key candidate (#170), so silently inventing one
+/// would just move the failure to whenever #170's constraint lands.
+/// Create one first with `make realm ARGS="create <name> open|bound"`
+/// (docs/specs/Realm_Character_Policy_Spec.md, "Managing realms today").
+async fn resolve_realm(realms: &realm_directory::RealmStore) -> realm_directory::Realm {
+    let raw = std::env::var("WZ_REALM_ID").unwrap_or_else(|_| {
+        panic!(
+            "WZ_REALM_ID must be set to an existing realm id — \
+             create one with `make realm ARGS=\"create <name> open|bound\"` \
+             and pass the id it prints"
+        )
+    });
+    let realm_id: RealmId = raw
+        .parse()
+        .unwrap_or_else(|e| panic!("WZ_REALM_ID {raw:?} is not a valid realm id: {e}"));
+    realms
+        .get(realm_id)
+        .await
+        .unwrap_or_else(|e| panic!("failed to look up realm {realm_id}: {e}"))
+        .unwrap_or_else(|| {
+            panic!(
+                "WZ_REALM_ID {realm_id} does not name an existing realm — \
+                 create one with `make realm ARGS=\"create <name> open|bound\"` first"
+            )
+        })
 }
 
 #[tokio::main]
@@ -164,7 +202,26 @@ async fn main() {
     let role_store: Arc<dyn auth::AccountRoleStore> =
         Arc::new(auth::PostgresAccountRoleStore::new(pool.clone()));
     let character_store = Arc::new(CharacterStore::new(pool.clone(), schema, inventory_config));
-    let realm_id = placeholder_realm_id();
+
+    let realm_store = realm_directory::RealmStore::new(pool.clone());
+    let realm = resolve_realm(&realm_store).await;
+    let realm_id = realm.id;
+    tracing::info!(%realm_id, realm_name = realm.name, realm_policy = ?realm.open_or_bound, "resolved realm");
+
+    let lease_ttl_secs: u64 = std::env::var("WZ_REALM_LEASE_TTL_SECS")
+        .ok()
+        .map(|v| {
+            v.parse()
+                .expect("WZ_REALM_LEASE_TTL_SECS must be a positive integer")
+        })
+        .unwrap_or(DEFAULT_LEASE_TTL_SECS);
+    let lease_ttl = std::time::Duration::from_secs(lease_ttl_secs);
+    let login_policy = Arc::new(realm_directory::LoginPolicy::new(
+        realm_directory::RealmStore::new(pool.clone()),
+        character::CharacterSessionLease::new(pool.clone()),
+        lease_ttl,
+    ));
+    let character_lease = Arc::new(character::CharacterSessionLease::new(pool.clone()));
 
     // `None` end to end (not just an unused `ChatDeps`) when disabled —
     // no `ChannelStore`/`ChatBus` construction, no per-connection chat
@@ -447,6 +504,10 @@ async fn main() {
         auth_provider,
         character_store,
         realm_id,
+        realm_open_or_bound: realm.open_or_bound,
+        login_policy,
+        character_lease,
+        lease_ttl,
         zones,
         default_zone_id,
         entity_characters,

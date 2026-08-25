@@ -23,6 +23,7 @@ fn usage() -> ! {
          \n\
          commands:\n\
          \x20\x20create <name> <open|bound>\n\
+         \x20\x20ensure <name> <open|bound>\n\
          \x20\x20list\n\
          \x20\x20get <realm-id>\n\
          \x20\x20update <realm-id> <name> <open|bound>\n\
@@ -83,6 +84,7 @@ async fn main() -> ExitCode {
     let Some(command) = args.next() else { usage() };
     const KNOWN_COMMANDS: &[&str] = &[
         "create",
+        "ensure",
         "list",
         "get",
         "update",
@@ -108,6 +110,31 @@ async fn main() -> ExitCode {
             store.create(&name, parse_policy(&policy)).await.map(|id| {
                 println!("{id}");
             })
+        }
+        // `create`, but idempotent by name — `make quickstart` (#136) needs
+        // a "give me a realm to point WZ_REALM_ID at, reusing the same one
+        // on every re-run" primitive, and `create` alone always mints a
+        // new realm. Matches by name only (not policy) — a realm found
+        // under `name` is returned as-is even if its policy no longer
+        // matches `policy`, same as every other idempotent-if-exists tool
+        // in this codebase (e.g. `zone.manifest.yaml` is only copied if
+        // missing, never overwritten to match a changed example).
+        "ensure" => {
+            let (Some(name), Some(policy)) = (args.next(), args.next()) else {
+                usage()
+            };
+            match store.list().await {
+                Ok(realms) => match realms.into_iter().find(|r| r.name == name) {
+                    Some(existing) => {
+                        println!("{}", existing.id);
+                        Ok(())
+                    }
+                    None => store.create(&name, parse_policy(&policy)).await.map(|id| {
+                        println!("{id}");
+                    }),
+                },
+                Err(e) => Err(e),
+            }
         }
         "list" => store.list().await.map(|realms| {
             for realm in &realms {
