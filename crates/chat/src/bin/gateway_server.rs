@@ -120,19 +120,20 @@ async fn handle_session(
         }
     };
 
-    let (account_id, username, session) = match authenticate(auth_message, &auth_provider).await {
-        Ok(result) => result,
-        Err(e) => {
-            send_auth(
-                &mut sink,
-                &auth::gateway_protocol::ServerMessage::Error {
-                    message: e.to_string(),
-                },
-            )
-            .await?;
-            return Ok(());
-        }
-    };
+    let (account_id, username, session_token) =
+        match authenticate(auth_message, &auth_provider).await {
+            Ok(result) => result,
+            Err(e) => {
+                send_auth(
+                    &mut sink,
+                    &auth::gateway_protocol::ServerMessage::Error {
+                        message: e.to_string(),
+                    },
+                )
+                .await?;
+                return Ok(());
+            }
+        };
     usernames
         .write()
         .unwrap()
@@ -143,7 +144,7 @@ async fn handle_session(
         &auth::gateway_protocol::ServerMessage::Authenticated {
             account_id,
             username,
-            session_token: session.token,
+            session_token,
         },
     )
     .await?;
@@ -291,13 +292,16 @@ async fn send_auth(
         .map_err(|e| Error::wrap("chat", "failed to send to client", e))
 }
 
-/// Runs the client's `Register`/`Login` request against the real
-/// `auth` provider and, on success, issues a session — the account_id
-/// and username everything downstream in this connection trusts.
+/// Runs the client's `Register`/`Login`/`Resume` request against the
+/// real `auth` provider and, on success, returns the account_id,
+/// username, and session_token everything downstream in this connection
+/// trusts — `Resume` (#195) reuses the token the client presented
+/// (renewed in place by `SessionManager::resolve`) instead of minting a
+/// new one, same as `server::session`'s own `authenticate`.
 async fn authenticate(
     message: auth::gateway_protocol::ClientMessage,
     provider: &auth::UsernamePasswordProvider,
-) -> Result<(AccountId, String, auth::Session)> {
+) -> Result<(AccountId, String, String)> {
     use auth::gateway_protocol::ClientMessage as AuthMessage;
 
     let (account_id, username) = match message {
@@ -312,8 +316,12 @@ async fn authenticate(
             let account_id = provider.verify_credentials(&credentials).await?;
             (account_id, username)
         }
+        AuthMessage::Resume { session_token } => {
+            let (account_id, username) = provider.resume(&session_token).await?;
+            return Ok((account_id, username, session_token));
+        }
     };
 
     let session = provider.issue_session(account_id).await?;
-    Ok((account_id, username, session))
+    Ok((account_id, username, session.token))
 }

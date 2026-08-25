@@ -21,6 +21,12 @@ pub trait AccountStore: Send + Sync {
     async fn create(&self, username: &str, password_hash: &str) -> Result<AccountId>;
 
     async fn find_by_username(&self, username: &str) -> Result<Option<Account>>;
+
+    /// Looks up an account by id rather than username — #195's session
+    /// resumption needs this: a `Resume{ session_token }` only resolves
+    /// an `AccountId` (via `SessionManager::resolve`), never a username,
+    /// but `Authenticated`'s wire shape still needs one to reply with.
+    async fn find_by_id(&self, account_id: AccountId) -> Result<Option<Account>>;
 }
 
 #[derive(Default)]
@@ -53,5 +59,15 @@ impl AccountStore for InMemoryAccountStore {
 
     async fn find_by_username(&self, username: &str) -> Result<Option<Account>> {
         Ok(self.by_username.read().unwrap().get(username).cloned())
+    }
+
+    async fn find_by_id(&self, account_id: AccountId) -> Result<Option<Account>> {
+        Ok(self
+            .by_username
+            .read()
+            .unwrap()
+            .values()
+            .find(|account| account.id == account_id)
+            .cloned())
     }
 }

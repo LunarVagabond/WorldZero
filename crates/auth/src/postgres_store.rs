@@ -54,6 +54,20 @@ impl AccountStore for PostgresAccountStore {
             password_hash: row.get("password_hash"),
         }))
     }
+
+    async fn find_by_id(&self, account_id: AccountId) -> Result<Option<Account>> {
+        let row = sqlx::query("SELECT id, username, password_hash FROM accounts WHERE id = $1")
+            .bind(account_id.as_uuid())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| Error::wrap("auth", "failed to query account", e))?;
+
+        Ok(row.map(|row| Account {
+            id: AccountId::from_uuid(row.get("id")),
+            username: row.get("username"),
+            password_hash: row.get("password_hash"),
+        }))
+    }
 }
 
 fn is_unique_violation(err: &sqlx::Error) -> bool {
@@ -103,6 +117,32 @@ mod tests {
         let username = unique_username("does-not-exist");
 
         assert!(store.find_by_username(&username).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn create_then_find_by_id_round_trips() {
+        let store = store().await;
+        let username = unique_username("create-then-find-by-id");
+
+        let id = store.create(&username, "hash").await.unwrap();
+        let found = store.find_by_id(id).await.unwrap().unwrap();
+
+        assert_eq!(found.id, id);
+        assert_eq!(found.username, username);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn find_by_id_for_a_missing_account_returns_none() {
+        let store = store().await;
+        assert!(
+            store
+                .find_by_id(common::id::AccountId::new())
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]

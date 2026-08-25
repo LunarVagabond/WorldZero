@@ -37,6 +37,30 @@ impl UsernamePasswordProvider {
         let hash = hash_password(password)?;
         self.store.create(username, &hash).await
     }
+
+    /// Resumes a session from a previously-issued `session_token` (#195)
+    /// — no password re-entry. Not part of `AuthProvider` for the same
+    /// reason `register` isn't: this is session-token verification, a
+    /// concern orthogonal to which provider originally checked the
+    /// credentials, not a credentials-shaped check itself. Returns the
+    /// account id and username `Authenticated`'s wire shape needs;
+    /// `SessionManager::resolve` is what actually renews the token's TTL
+    /// (see its own doc comment for the deliberate "same token, sliding
+    /// expiration" choice) — this method never mints a new one.
+    #[tracing::instrument(skip(self, token))]
+    pub async fn resume(&self, token: &str) -> Result<(AccountId, String)> {
+        let account_id = self
+            .sessions
+            .resolve(token)
+            .await?
+            .ok_or_else(|| Error::new("auth", "session token is invalid or has expired"))?;
+        let account = self
+            .store
+            .find_by_id(account_id)
+            .await?
+            .ok_or_else(|| Error::new("auth", "account no longer exists"))?;
+        Ok((account_id, account.username))
+    }
 }
 
 #[async_trait]
@@ -152,5 +176,40 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(wrong_password.to_string(), missing_user.to_string());
+    }
+
+    // Real Redis, not run in CI — set WZ_REDIS_* and run with `-- --ignored`.
+    // `resume` (#195) is the one method here that actually calls through
+    // to `SessionManager`, unlike every other test in this module (see
+    // `provider()`'s own doc comment on why a disconnected pool is fine
+    // for those).
+    fn provider_with_real_redis() -> UsernamePasswordProvider {
+        let config = common::config::RedisConfig::from_env().expect("WZ_REDIS_* env vars set");
+        let redis =
+            common::pool::redis_pool(&config, common::pool::PoolOptions::default()).unwrap();
+        UsernamePasswordProvider::new(
+            Arc::new(InMemoryAccountStore::default()),
+            SessionManager::new(redis),
+        )
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn resume_finds_the_account_and_username_behind_a_real_token() {
+        let provider = provider_with_real_redis();
+        let account_id = provider.register("alice", "hunter2").await.unwrap();
+        let session = provider.issue_session(account_id).await.unwrap();
+
+        let (resumed_id, username) = provider.resume(&session.token).await.unwrap();
+        assert_eq!(resumed_id, account_id);
+        assert_eq!(username, "alice");
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn resume_with_an_unknown_token_is_rejected() {
+        let provider = provider_with_real_redis();
+        let err = provider.resume("not-a-real-token").await.unwrap_err();
+        assert!(err.to_string().contains("invalid or has expired"), "{err}");
     }
 }
