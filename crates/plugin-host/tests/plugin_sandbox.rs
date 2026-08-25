@@ -35,7 +35,7 @@ fn manifest() -> PluginManifest {
         r#"
 [plugin]
 name = "test-plugin"
-host_api_version = "0.8.0"
+host_api_version = "0.9.0"
 capabilities = ["spawning", "movement", "combat", "economy", "messaging"]
 message_types = [1000]
 "#,
@@ -53,7 +53,7 @@ fn restricted_manifest() -> PluginManifest {
         r#"
 [plugin]
 name = "test-plugin"
-host_api_version = "0.8.0"
+host_api_version = "0.9.0"
 capabilities = ["messaging"]
 message_types = [1000]
 "#,
@@ -66,6 +66,7 @@ struct RecordingCallbacks {
     spawned: Arc<Mutex<Vec<String>>>,
     messages: Arc<Mutex<Vec<(String, String)>>>,
     stat_deltas: Arc<Mutex<Vec<(String, String, i64)>>>,
+    character_stat_deltas: Arc<Mutex<Vec<(String, String, i64)>>>,
     moves: Arc<Mutex<Vec<(String, f64, f64)>>>,
     item_grants: Arc<Mutex<Vec<(String, String, i64)>>>,
     item_removals: Arc<Mutex<Vec<(String, String, i64)>>>,
@@ -115,6 +116,20 @@ impl HostCallbacks for RecordingCallbacks {
             .lock()
             .unwrap()
             .push((entity_id.to_string(), stat_key.to_string(), delta));
+        Ok(())
+    }
+
+    fn apply_stat_delta_for_character(
+        &mut self,
+        character_id: &str,
+        stat_key: &str,
+        delta: i64,
+    ) -> Result<(), String> {
+        self.character_stat_deltas.lock().unwrap().push((
+            character_id.to_string(),
+            stat_key.to_string(),
+            delta,
+        ));
         Ok(())
     }
 
@@ -247,6 +262,31 @@ fn a_well_behaved_plugin_spawns_an_npc_and_responds_to_interaction() {
     assert_eq!(messages[1].0, "actor-1");
     assert!(messages[1].1.contains("1000"));
     assert!(messages[1].1.contains("hello"));
+}
+
+#[test]
+#[ignore]
+fn a_plugin_sets_a_starting_stat_on_character_create() {
+    let wasm_path = fixture_dir().join("target/wasm32-wasip2/release/test_plugin.wasm");
+    let callbacks = RecordingCallbacks::default();
+
+    let host = PluginHost::new();
+    let mut plugin = host
+        .load(&manifest(), &wasm_path, Box::new(callbacks.clone()))
+        .expect("failed to load the well-behaved test plugin");
+
+    plugin
+        .on_character_create("char-1", "test-zone")
+        .expect("on_character_create should succeed");
+
+    assert_eq!(
+        callbacks.character_stat_deltas.lock().unwrap().as_slice(),
+        [(
+            "char-1".to_string(),
+            "reputation.ironclad_guild".to_string(),
+            25
+        )]
+    );
 }
 
 #[test]

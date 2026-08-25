@@ -543,6 +543,7 @@ async fn main() {
         lease_ttl,
         realm_presence,
         max_characters_per_account,
+        plugins: plugins.clone(),
         zones,
         default_zone_id,
         entity_characters,

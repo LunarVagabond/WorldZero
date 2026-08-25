@@ -69,6 +69,17 @@ pub trait HostCallbacks: Send + 'static {
         delta: i64,
     ) -> std::result::Result<(), String>;
 
+    /// Same as `apply_stat_delta`, but identifies the target by
+    /// `character_id` directly (`wit/plugin.wit`'s
+    /// `apply-stat-delta-for-character`, #194) — the counterpart for
+    /// `on_character_create`, which fires before any entity exists.
+    fn apply_stat_delta_for_character(
+        &mut self,
+        character_id: &str,
+        stat_key: &str,
+        delta: i64,
+    ) -> std::result::Result<(), String>;
+
     /// Queues a move for `entity_id` (`wit/plugin.wit`'s `move-entity`)
     /// — applied and validated on the zone's next tick through the same
     /// path a player's own movement goes through, never a direct
@@ -153,7 +164,10 @@ fn required_capability(function: &str) -> Option<&'static str> {
         "spawn-npc" => Some(CAPABILITY_SPAWNING),
         "send-message" => Some(CAPABILITY_MESSAGING),
         "move-entity" => Some(CAPABILITY_MOVEMENT),
-        "apply-stat-delta" | "report-death" | "report-respawn" => Some(CAPABILITY_COMBAT),
+        "apply-stat-delta"
+        | "apply-stat-delta-for-character"
+        | "report-death"
+        | "report-respawn" => Some(CAPABILITY_COMBAT),
         "grant-item" | "remove-item" | "modify-currency" => Some(CAPABILITY_ECONOMY),
         _ => None,
     }
@@ -215,6 +229,17 @@ impl HostCallbacks for CapabilityGatedCallbacks {
     ) -> std::result::Result<(), String> {
         self.check("apply-stat-delta")?;
         self.inner.apply_stat_delta(entity_id, stat_key, delta)
+    }
+
+    fn apply_stat_delta_for_character(
+        &mut self,
+        character_id: &str,
+        stat_key: &str,
+        delta: i64,
+    ) -> std::result::Result<(), String> {
+        self.check("apply-stat-delta-for-character")?;
+        self.inner
+            .apply_stat_delta_for_character(character_id, stat_key, delta)
     }
 
     fn move_entity(&mut self, entity_id: &str, x: f64, y: f64) -> std::result::Result<(), String> {
@@ -315,6 +340,16 @@ impl HostInterface for PluginState {
     ) -> std::result::Result<(), String> {
         self.callbacks
             .apply_stat_delta(&entity_id, &stat_key, delta)
+    }
+
+    fn apply_stat_delta_for_character(
+        &mut self,
+        character_id: String,
+        stat_key: String,
+        delta: i64,
+    ) -> std::result::Result<(), String> {
+        self.callbacks
+            .apply_stat_delta_for_character(&character_id, &stat_key, delta)
     }
 
     fn move_entity(
@@ -518,6 +553,23 @@ impl LoadedPlugin {
             .worldzero_plugin_hooks()
             .call_on_zone_loaded(&mut self.store, zone_id)
             .map_err(|e| Error::new("plugin-host", format!("on_zone_loaded hook failed: {e:#}")))
+    }
+
+    /// Live: `server::session` calls this once, right after a new
+    /// character row is created (#193/#194) and before the client's
+    /// `CharacterCreated` acknowledgement — no entity exists yet, hence
+    /// `character_id` rather than an entity id. The intended extension
+    /// point for a plugin-driven starting-stat/archetype system.
+    pub fn on_character_create(&mut self, character_id: &str, zone_id: &str) -> Result<()> {
+        self.bindings
+            .worldzero_plugin_hooks()
+            .call_on_character_create(&mut self.store, character_id, zone_id)
+            .map_err(|e| {
+                Error::new(
+                    "plugin-host",
+                    format!("on_character_create hook failed: {e:#}"),
+                )
+            })
     }
 
     pub fn on_entity_spawn(
@@ -760,6 +812,14 @@ mod tests {
         ) -> std::result::Result<(), String> {
             Ok(())
         }
+        fn apply_stat_delta_for_character(
+            &mut self,
+            _: &str,
+            _: &str,
+            _: i64,
+        ) -> std::result::Result<(), String> {
+            Ok(())
+        }
         fn move_entity(&mut self, _: &str, _: f64, _: f64) -> std::result::Result<(), String> {
             Ok(())
         }
@@ -831,6 +891,7 @@ mod tests {
         assert!(none.send_message("e1", "hi").is_err());
         assert!(none.move_entity("e1", 0.0, 0.0).is_err());
         assert!(none.apply_stat_delta("e1", "hp", -1).is_err());
+        assert!(none.apply_stat_delta_for_character("c1", "hp", -1).is_err());
         assert!(none.report_death("e1").is_err());
         assert!(none.report_respawn("e1").is_err());
         assert!(none.grant_item("e1", "torch", 1).is_err());
@@ -851,6 +912,11 @@ mod tests {
 
         let mut combat = gated(&["combat"]);
         assert!(combat.apply_stat_delta("e1", "hp", -1).is_ok());
+        assert!(
+            combat
+                .apply_stat_delta_for_character("c1", "hp", -1)
+                .is_ok()
+        );
         assert!(combat.report_death("e1").is_ok());
         assert!(combat.report_respawn("e1").is_ok());
         assert!(combat.grant_item("e1", "torch", 1).is_err());

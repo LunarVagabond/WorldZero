@@ -19,7 +19,13 @@
 // event hook that fires for something zone-specific now takes an
 // explicit `zone-id` parameter, and `on-zone-loaded(zone-id)` replaces
 // the old "on-load fires once per zone" implicit scoping — see the
-// `hooks` interface's own doc comment below for the full reasoning. See
+// `hooks` interface's own doc comment below for the full reasoning. #194
+// adds `on-character-create` and `apply-stat-delta-for-character` — the
+// character-creation extension point (starting stats, archetype/preset
+// systems built as a plugin rather than a core class/race enum), the one
+// hook that fires before any entity exists for the thing it's about,
+// hence the one narrow exception to "every id crossing this boundary is
+// an entity id." See
 // docs/specs/Plugin_API.md, "Beyond this v0 slice" for what still isn't
 // here. A WIT "world" is the actual versioning mechanism
 // (docs/PROPOSAL.md, "Interface Technology"): a breaking change bumps
@@ -27,7 +33,7 @@
 // silently changing what `plugin` means underneath existing compiled
 // plugins.
 
-package worldzero:plugin@0.8.0;
+package worldzero:plugin@0.9.0;
 
 /// What the host exposes for a plugin to call out to — nothing crosses
 /// this boundary that isn't listed here (docs/PROPOSAL.md, "Plugin
@@ -55,6 +61,18 @@ interface host {
     /// write never reaches storage). This is how a plugin actually
     /// carries out what `on-damage-calc`/`on-death`/`on-respawn` decide.
     apply-stat-delta: func(entity-id: string, stat-key: string, delta: s64) -> result<_, string>;
+
+    /// Same validated-write discipline as `apply-stat-delta`, but
+    /// identifies the target by `character-id` directly instead of an
+    /// entity id (#194) — the counterpart for `on-character-create`,
+    /// which fires before any entity/session exists for the character
+    /// being created, so there is no entity id yet to pass. Every other
+    /// function in this interface deliberately treats an id as opaque
+    /// and never as a character id directly (docs comment above); this
+    /// is the one narrow, documented exception, scoped to the one hook
+    /// that has no entity id available. Rejected if `character-id`
+    /// doesn't name a real character.
+    apply-stat-delta-for-character: func(character-id: string, stat-key: string, delta: s64) -> result<_, string>;
 
     /// Queues a move for `entity-id` to `(x, y)`, applied and validated
     /// on the zone's next tick through the exact same authoritative path
@@ -194,6 +212,28 @@ interface hooks {
     /// that zone's own spawn tables) using `zone-id` to decide what, if
     /// anything, to do for this particular zone.
     on-zone-loaded: func(zone-id: string);
+
+    /// Fired once, right after a new character row is created
+    /// (`server::character_protocol`'s `CreateCharacter`, #193) and
+    /// before the client's `CharacterCreated` acknowledgement is sent —
+    /// no entity/session exists yet for this character (it hasn't
+    /// spawned into any zone), which is why this hook carries
+    /// `character-id` rather than an entity id, and why setting starting
+    /// stats here means calling `apply-stat-delta-for-character`, not
+    /// `apply-stat-delta`. `zone-id` is the character's starting zone
+    /// (the deployment's default) — given up front since there's no
+    /// zone-service dispatch context to infer it from; this hook does
+    /// not fire from any particular zone-service's event loop. The
+    /// intended extension point for a plugin-driven archetype/preset/
+    /// starting-stat system (docs/PROPOSAL.md: "no game-specific
+    /// concept, not even HP, is privileged by the core" — class/race
+    /// selection is deliberately plugin territory, not a core concept,
+    /// #194). Listing presets *before* a client commits to
+    /// `CreateCharacter` (so a UI can show choices up front) is
+    /// explicitly out of scope here — a fire-after-creation hook can't
+    /// do that; a real "ask a plugin for a list of options" request/
+    /// response mechanism is deferred to a follow-up ticket.
+    on-character-create: func(character-id: string, zone-id: string);
 
     /// Fired after any entity (spawned by this plugin or otherwise)
     /// enters `zone-id`'s simulation — `entity-type` matches

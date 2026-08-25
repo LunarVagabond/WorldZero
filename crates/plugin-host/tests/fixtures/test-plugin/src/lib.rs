@@ -47,6 +47,18 @@ impl Guest for Plugin {
         }
     }
 
+    // Exercises apply-stat-delta-for-character end to end (#194) — sets a
+    // starting stat on a character with no entity/session yet, using the
+    // character-id-scoped host function `apply-stat-delta` can't reach
+    // for (there's no entity id at this point).
+    fn on_character_create(character_id: String, _zone_id: String) {
+        let _ = worldzero::plugin::host::apply_stat_delta_for_character(
+            &character_id,
+            "reputation.ironclad_guild",
+            25,
+        );
+    }
+
     fn on_entity_spawn(_zone_id: String, _entity_id: String, _entity_type: String) {}
 
     fn on_player_join_zone(_zone_id: String, entity_id: String) {
