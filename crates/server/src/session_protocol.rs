@@ -131,6 +131,15 @@ pub enum ClientMessage {
     /// Sets this connection's own guild's short tag/abbreviation (#179)
     /// — requires the `edit_tag` permission. Empty string clears it.
     GuildSetTag { tag: String },
+    /// Requests crafting `recipe_key` against this connection's own
+    /// character (#216) — `recipe_key` names a dev-declared entry in
+    /// `crafting.schema.yaml` (`character::CraftingSchema`). `Error` if
+    /// `recipe_key` is unknown, or if the caller's inventory doesn't
+    /// hold at least the declared amount of every input; nothing is
+    /// consumed on a rejected craft. No dedicated success reply — the
+    /// resulting inventory change arrives as ordinary `ItemChanged`
+    /// pushes (#211).
+    CraftItem { recipe_key: String },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -472,6 +481,9 @@ impl From<&ClientMessage> for proto::ClientMessage {
             ClientMessage::GuildSetTag { tag } => {
                 Kind::GuildSetTag(proto::GuildSetTag { tag: tag.clone() })
             }
+            ClientMessage::CraftItem { recipe_key } => Kind::CraftItem(proto::CraftItem {
+                recipe_key: recipe_key.clone(),
+            }),
         };
         proto::ClientMessage { kind: Some(kind) }
     }
@@ -547,6 +559,9 @@ impl TryFrom<proto::ClientMessage> for ClientMessage {
             }
             Some(Kind::GuildSetTag(proto::GuildSetTag { tag })) => {
                 Ok(ClientMessage::GuildSetTag { tag })
+            }
+            Some(Kind::CraftItem(proto::CraftItem { recipe_key })) => {
+                Ok(ClientMessage::CraftItem { recipe_key })
             }
             None => Err(Error::new(
                 "server",

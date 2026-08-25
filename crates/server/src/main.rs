@@ -36,6 +36,9 @@
 //! - `<config_dir>/character.archetypes.yaml` (see
 //!   `config/character.archetypes.example.yaml`) — the declared
 //!   character-archetype schema (#213/#212)
+//! - `<config_dir>/crafting.schema.yaml` (see
+//!   `config/crafting.schema.example.yaml`) — the declared recipe schema
+//!   (#216/#215)
 //!
 //! Optional: `WZ_SERVER_ADDR` (default `127.0.0.1:7900`),
 //! `WZ_PLUGINS_DIR` (default `<config_dir>/plugins`) — a directory of
@@ -237,6 +240,14 @@ async fn main() {
                 archetype_schema_path.display()
             )
         });
+    let crafting_schema_path = config_dir.join("crafting.schema.yaml");
+    let crafting_schema =
+        character::CraftingSchema::from_file(&crafting_schema_path).unwrap_or_else(|e| {
+            panic!(
+                "failed to load the declared recipe schema at {} (see config/crafting.schema.example.yaml): {e}",
+                crafting_schema_path.display()
+            )
+        });
     let inventory_config =
         InventoryConfig::from_env().expect("invalid WZ_INVENTORY_MAX_ITEM_TYPES");
     // #193's character-creation cap — a `server`-side policy value (like
@@ -269,6 +280,7 @@ async fn main() {
     let party_store = Arc::new(character::PartyStore::new(pool.clone(), party_schema));
     let guild_store = Arc::new(guild::GuildStore::new(pool.clone(), guild_schema));
     let archetype_schema = Arc::new(archetype_schema);
+    let crafting_schema = Arc::new(crafting_schema);
 
     let realm_store = realm_directory::RealmStore::new(pool.clone());
     let realm = resolve_realm(&realm_store).await;
@@ -603,6 +615,7 @@ async fn main() {
         realm_presence,
         max_characters_per_account,
         archetype_schema,
+        crafting_schema,
         plugins: plugins.clone(),
         zones,
         default_zone_id,

@@ -81,6 +81,9 @@ const PARTY_LEAVE_ADDR: &str = "127.0.0.1:7938";
 const GUILD_CHAT_SYNC_ADDR: &str = "127.0.0.1:7939";
 const GUILD_NO_CHAT_ADDR: &str = "127.0.0.1:7940";
 const ARCHETYPE_ADDR: &str = "127.0.0.1:7941";
+const CRAFT_ADDR: &str = "127.0.0.1:7942";
+const CRAFT_INSUFFICIENT_ADDR: &str = "127.0.0.1:7943";
+const CRAFT_UNKNOWN_RECIPE_ADDR: &str = "127.0.0.1:7944";
 
 struct ServerProcess {
     child: Child,
@@ -129,6 +132,27 @@ async fn read_character_stat(character_id: &str, key: &str) -> Option<i64> {
         .fetch_one(&pool)
         .await
         .unwrap()
+}
+
+/// Reads an item stack's quantity straight from `items` (#216's crafting
+/// tests) — a direct DB read, same "no client-facing read of my own
+/// inventory today" reasoning as `read_character_stat`. `0` (not an
+/// error) if the character owns no stack of `item_type` at all, same
+/// convention `character::CharacterStore::item_quantity` itself uses.
+async fn read_item_quantity(character_id: &str, item_type: &str) -> i64 {
+    let pg_config = common::config::PostgresConfig::from_env().expect("WZ_POSTGRES_* env vars set");
+    let pool = common::pool::postgres_pool(&pg_config, common::pool::PoolOptions::default())
+        .await
+        .expect("failed to connect to Postgres to read an item quantity");
+    let character_id: uuid::Uuid = character_id.parse().unwrap();
+    let quantity: Option<i64> =
+        sqlx::query_scalar("SELECT quantity FROM items WHERE character_id = $1 AND item_type = $2")
+            .bind(character_id)
+            .bind(item_type)
+            .fetch_optional(&pool)
+            .await
+            .unwrap();
+    quantity.unwrap_or(0)
 }
 
 /// Reads an account's id straight from `accounts.username` (#179's chat
@@ -450,6 +474,42 @@ async fn recv_chat(stream: &mut ClientStream) -> chat::gateway_protocol::ServerM
     }
 }
 
+/// Grants one of `item_type` to `stream`'s own character via the fixture
+/// plugin's `/give` chat command (#57/#211's e2e `grant-item` coverage,
+/// reused here to set up a #216 craft's declared inputs) — drains the
+/// automatic `ItemChanged` push and the plugin's own `on-item-acquire`
+/// confirmation, same two-message shape
+/// `combat_item_use_npc_interact_and_death_respawn_hooks_fire_for_real`
+/// already exercises for a single `/give`.
+async fn give_item(stream: &mut ClientStream, item_type: &str) {
+    send_chat(
+        stream,
+        &chat::gateway_protocol::ClientMessage::Send {
+            channel_id: common::id::ChannelId::new(),
+            body: format!("/give {item_type}"),
+        },
+    )
+    .await;
+    loop {
+        match recv_world(stream).await {
+            ServerMessage::ItemChanged { .. } => break,
+            ServerMessage::Moved { .. } | ServerMessage::EntitySpawned { .. } => {}
+            other => panic!("expected ItemChanged after /give {item_type}, got {other:?}"),
+        }
+    }
+    loop {
+        match recv_world(stream).await {
+            ServerMessage::PluginMessage { .. } => break,
+            ServerMessage::Moved { .. } | ServerMessage::EntitySpawned { .. } => {}
+            other => {
+                panic!(
+                    "expected the on-item-acquire confirmation after /give {item_type}, got {other:?}"
+                )
+            }
+        }
+    }
+}
+
 async fn register_and_authenticate(
     stream: &mut ClientStream,
     username: &str,
@@ -511,6 +571,11 @@ fn setup_config_dir(test_name: &str) -> PathBuf {
         config_dir.join("character.archetypes.yaml"),
     )
     .unwrap();
+    std::fs::copy(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../config/crafting.schema.example.yaml"),
+        config_dir.join("crafting.schema.yaml"),
+    )
+    .unwrap();
     // `<config_dir>/plugins/test-plugin/{plugin.toml,test_plugin.wasm}`
     // (#152's discovery convention) — only written if the compiled wasm
     // fixture actually exists, same "gracefully run with no plugin
@@ -530,7 +595,7 @@ fn setup_config_dir(test_name: &str) -> PathBuf {
             r#"
 [plugin]
 name = "test-plugin"
-host_api_version = "0.9.0"
+host_api_version = "0.10.0"
 capabilities = ["spawning", "movement", "combat", "economy", "messaging"]
 message_types = [1000]
 chat_commands = ["give"]
@@ -547,6 +612,7 @@ hooks = [
     "on-npc-interact",
     "on-item-use",
     "on-item-acquire",
+    "on-craft-complete",
 ]
 "#,
         )
@@ -597,6 +663,11 @@ fn setup_multi_plugin_config_dir(test_name: &str) -> PathBuf {
         config_dir.join("character.archetypes.yaml"),
     )
     .unwrap();
+    std::fs::copy(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../config/crafting.schema.example.yaml"),
+        config_dir.join("crafting.schema.yaml"),
+    )
+    .unwrap();
 
     let fixtures_dir =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../plugin-host/tests/fixtures");
@@ -617,7 +688,7 @@ fn setup_multi_plugin_config_dir(test_name: &str) -> PathBuf {
         r#"
 [plugin]
 name = "test-plugin"
-host_api_version = "0.9.0"
+host_api_version = "0.10.0"
 capabilities = ["spawning", "movement", "combat", "economy", "messaging"]
 message_types = [1000]
 hooks = ["on-zone-loaded", "on-player-join-zone"]
@@ -637,7 +708,7 @@ hooks = ["on-zone-loaded", "on-player-join-zone"]
         r#"
 [plugin]
 name = "second-plugin"
-host_api_version = "0.9.0"
+host_api_version = "0.10.0"
 capabilities = ["messaging"]
 message_types = [1001]
 hooks = ["on-player-join-zone"]
@@ -690,6 +761,11 @@ fn setup_content_pack_config_dir(test_name: &str) -> PathBuf {
     std::fs::copy(
         repo_config_dir.join("character.archetypes.example.yaml"),
         config_dir.join("character.archetypes.yaml"),
+    )
+    .unwrap();
+    std::fs::copy(
+        repo_config_dir.join("crafting.schema.example.yaml"),
+        config_dir.join("crafting.schema.yaml"),
     )
     .unwrap();
     config_dir
@@ -3415,6 +3491,252 @@ async fn guild_create_invite_and_leave_all_work_with_chat_disabled() {
             && members.len() == 1
         {
             break;
+        }
+    }
+}
+
+/// #216, end to end through the real `server` binary: `CraftItem` with
+/// every declared input present consumes them and grants the output
+/// exactly once, and the fixture plugin's `on-craft-complete` hook fires
+/// for real (`crates/plugin-host/tests/fixtures/test-plugin` applies a
+/// `reputation.ironclad_guild` bonus via `apply-stat-delta-for-character`,
+/// the one host function reachable from a hook that carries no entity
+/// id) — observed via the `StatChanged` push it triggers, which can only
+/// arrive after the hook actually ran.
+#[tokio::test]
+#[ignore]
+async fn craft_item_with_sufficient_inputs_succeeds_and_fires_the_hook() {
+    let config_dir = setup_config_dir("craft-success");
+    let _server = start_server(&config_dir, CRAFT_ADDR).await;
+    wait_for_port(CRAFT_ADDR).await;
+
+    let username = format!("craft-{}", uuid::Uuid::now_v7());
+    let mut stream = connect(&config_dir, CRAFT_ADDR).await;
+    send_auth(
+        &mut stream,
+        &AuthClientMessage::Register {
+            username: username.clone(),
+            password: "hunter2".to_string(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv_auth(&mut stream).await,
+        AuthServerMessage::Authenticated { .. }
+    ));
+    select_realm(&mut stream, _server.realm_id).await;
+    let character_id = select_or_create_character(&mut stream, &username).await;
+
+    loop {
+        if let ServerMessage::Joined { .. } = recv_world(&mut stream).await {
+            break;
+        }
+    }
+    // Drain this connection's own join greeting (#155).
+    loop {
+        match recv_world(&mut stream).await {
+            ServerMessage::PluginMessage { .. } => break,
+            ServerMessage::Moved { .. } => {}
+            other => panic!("expected the join greeting, got {other:?}"),
+        }
+    }
+
+    // #194: on-character-create already set reputation.ironclad_guild to
+    // 25 (no declared bounds, starts at 0) — the craft's own
+    // on-craft-complete bonus below should land on top of that.
+    assert_eq!(
+        read_character_stat(&character_id, "reputation.ironclad_guild").await,
+        Some(25)
+    );
+
+    // config/crafting.schema.example.yaml's "wolf-fang-dagger" recipe:
+    // 3 wolf-fang + 2 iron-ore -> 1 wolf-fang-dagger.
+    for _ in 0..3 {
+        give_item(&mut stream, "wolf-fang").await;
+    }
+    for _ in 0..2 {
+        give_item(&mut stream, "iron-ore").await;
+    }
+
+    send_world(
+        &mut stream,
+        &ClientMessage::CraftItem {
+            recipe_key: "wolf-fang-dagger".to_string(),
+        },
+    )
+    .await;
+
+    // Every input consumed to 0, then the output granted, in recipe
+    // declaration order (character::CharacterStore::craft_item's own
+    // documented return order).
+    let mut item_changes = Vec::new();
+    for _ in 0..3 {
+        loop {
+            match recv_world(&mut stream).await {
+                ServerMessage::ItemChanged {
+                    item_type,
+                    quantity,
+                } => {
+                    item_changes.push((item_type, quantity));
+                    break;
+                }
+                ServerMessage::Moved { .. } | ServerMessage::EntitySpawned { .. } => {}
+                other => panic!("expected ItemChanged after CraftItem, got {other:?}"),
+            }
+        }
+    }
+    assert_eq!(
+        item_changes,
+        vec![
+            ("wolf-fang".to_string(), 0),
+            ("iron-ore".to_string(), 0),
+            ("wolf-fang-dagger".to_string(), 1),
+        ]
+    );
+
+    // on-craft-complete's own apply-stat-delta-for-character (+5) —
+    // waiting for this StatChanged push (rather than reading Postgres
+    // immediately) is what actually proves the hook ran, not just that
+    // the craft itself succeeded.
+    loop {
+        match recv_world(&mut stream).await {
+            ServerMessage::StatChanged { stat_key, value } => {
+                assert_eq!(stat_key, "reputation.ironclad_guild");
+                assert_eq!(value, 30);
+                break;
+            }
+            ServerMessage::Moved { .. } | ServerMessage::EntitySpawned { .. } => {}
+            other => {
+                panic!("expected StatChanged after on-craft-complete's hook fired, got {other:?}")
+            }
+        }
+    }
+    assert_eq!(
+        read_character_stat(&character_id, "reputation.ironclad_guild").await,
+        Some(30)
+    );
+}
+
+/// #216: `CraftItem` with an insufficient input is rejected with a clear
+/// `Error` and consumes nothing at all — verified by reading the
+/// caller's inventory straight out of Postgres after the rejected
+/// attempt, same "prove nothing was touched" discipline `crafting.rs`'s
+/// own unit tests already apply at the storage layer.
+#[tokio::test]
+#[ignore]
+async fn craft_item_with_an_insufficient_input_fails_and_consumes_nothing() {
+    let config_dir = setup_config_dir("craft-insufficient");
+    let _server = start_server(&config_dir, CRAFT_INSUFFICIENT_ADDR).await;
+    wait_for_port(CRAFT_INSUFFICIENT_ADDR).await;
+
+    let username = format!("craft-insufficient-{}", uuid::Uuid::now_v7());
+    let mut stream = connect(&config_dir, CRAFT_INSUFFICIENT_ADDR).await;
+    send_auth(
+        &mut stream,
+        &AuthClientMessage::Register {
+            username: username.clone(),
+            password: "hunter2".to_string(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv_auth(&mut stream).await,
+        AuthServerMessage::Authenticated { .. }
+    ));
+    select_realm(&mut stream, _server.realm_id).await;
+    let character_id = select_or_create_character(&mut stream, &username).await;
+
+    loop {
+        if let ServerMessage::Joined { .. } = recv_world(&mut stream).await {
+            break;
+        }
+    }
+    loop {
+        match recv_world(&mut stream).await {
+            ServerMessage::PluginMessage { .. } => break,
+            ServerMessage::Moved { .. } => {}
+            other => panic!("expected the join greeting, got {other:?}"),
+        }
+    }
+
+    // Enough wolf-fang (3), but no iron-ore at all — "wolf-fang-dagger"
+    // needs 2 of the latter.
+    for _ in 0..3 {
+        give_item(&mut stream, "wolf-fang").await;
+    }
+
+    send_world(
+        &mut stream,
+        &ClientMessage::CraftItem {
+            recipe_key: "wolf-fang-dagger".to_string(),
+        },
+    )
+    .await;
+    loop {
+        match recv_world(&mut stream).await {
+            ServerMessage::Error { message } => {
+                assert!(message.contains("iron-ore"), "{message}");
+                break;
+            }
+            ServerMessage::Moved { .. } | ServerMessage::EntitySpawned { .. } => {}
+            other => panic!("expected an Error for the insufficient craft, got {other:?}"),
+        }
+    }
+
+    // Nothing consumed, nothing granted.
+    assert_eq!(read_item_quantity(&character_id, "wolf-fang").await, 3);
+    assert_eq!(read_item_quantity(&character_id, "iron-ore").await, 0);
+    assert_eq!(
+        read_item_quantity(&character_id, "wolf-fang-dagger").await,
+        0
+    );
+}
+
+/// #216: `CraftItem` naming a `recipe_key` the schema never declared is
+/// rejected with a clear `Error`, not a panic or a silent no-op.
+#[tokio::test]
+#[ignore]
+async fn craft_item_with_an_unknown_recipe_key_is_rejected() {
+    let config_dir = setup_config_dir("craft-unknown-recipe");
+    let _server = start_server(&config_dir, CRAFT_UNKNOWN_RECIPE_ADDR).await;
+    wait_for_port(CRAFT_UNKNOWN_RECIPE_ADDR).await;
+
+    let mut stream = connect(&config_dir, CRAFT_UNKNOWN_RECIPE_ADDR).await;
+    register_and_authenticate(
+        &mut stream,
+        &format!("craft-unknown-{}", uuid::Uuid::now_v7()),
+        "hunter2",
+        _server.realm_id,
+    )
+    .await;
+    loop {
+        if let ServerMessage::Joined { .. } = recv_world(&mut stream).await {
+            break;
+        }
+    }
+    loop {
+        match recv_world(&mut stream).await {
+            ServerMessage::PluginMessage { .. } => break,
+            ServerMessage::Moved { .. } => {}
+            other => panic!("expected the join greeting, got {other:?}"),
+        }
+    }
+
+    send_world(
+        &mut stream,
+        &ClientMessage::CraftItem {
+            recipe_key: "does-not-exist".to_string(),
+        },
+    )
+    .await;
+    loop {
+        match recv_world(&mut stream).await {
+            ServerMessage::Error { message } => {
+                assert!(message.contains("does-not-exist"), "{message}");
+                break;
+            }
+            ServerMessage::Moved { .. } | ServerMessage::EntitySpawned { .. } => {}
+            other => panic!("expected an Error for the unknown recipe, got {other:?}"),
         }
     }
 }

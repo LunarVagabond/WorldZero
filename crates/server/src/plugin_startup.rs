@@ -289,6 +289,15 @@ pub struct PluginRuntime {
     /// alone (declaring either already states interest, see
     /// `plugin_host::manifest::PluginDeclaration::hooks`'s doc comment).
     pub hooks: Vec<String>,
+    /// Which capabilities (`plugin_host::manifest::KNOWN_CAPABILITIES`)
+    /// this plugin declared — every other capability-gated boundary in
+    /// this codebase enforces at the host-*function*-call level
+    /// (`plugin_host::runtime::CapabilityGatedCallbacks`), but
+    /// `on-craft-complete` (#216) is gated at the hook-*firing* level
+    /// instead, since it has no corresponding host function call to gate:
+    /// `fire_on_craft_complete` (`session.rs`) only calls the hook at all
+    /// if this includes `economy`.
+    pub capabilities: Vec<String>,
     pending_spawns: Arc<Mutex<Vec<String>>>,
     pending_stat_deltas: Arc<Mutex<Vec<(String, String, i64)>>>,
     pending_character_stat_deltas: Arc<Mutex<Vec<(String, String, i64)>>>,
@@ -370,6 +379,15 @@ impl PluginRuntime {
     pub fn wants(&self, hook: &str) -> bool {
         self.hooks.iter().any(|h| h == hook)
     }
+
+    /// Whether this plugin declared `capability` in `plugin.toml`'s
+    /// `capabilities` list — see this struct's `capabilities` field doc
+    /// comment for why `on-craft-complete` needs this checked at the
+    /// hook-firing site rather than relying on
+    /// `CapabilityGatedCallbacks` alone.
+    pub fn has_capability(&self, capability: &str) -> bool {
+        self.capabilities.iter().any(|c| c == capability)
+    }
 }
 
 /// Loads one plugin instance from an already-parsed, already-validated
@@ -408,6 +426,7 @@ pub fn load_plugin(
     let message_types = manifest.plugin.message_types.clone();
     let chat_commands = manifest.plugin.chat_commands.clone();
     let hooks = manifest.plugin.hooks.clone();
+    let capabilities = manifest.plugin.capabilities.clone();
     let pending_spawns = Arc::new(Mutex::new(Vec::new()));
     let pending_stat_deltas = Arc::new(Mutex::new(Vec::new()));
     let pending_character_stat_deltas = Arc::new(Mutex::new(Vec::new()));
@@ -446,6 +465,7 @@ pub fn load_plugin(
         message_types,
         chat_commands,
         hooks,
+        capabilities,
         pending_spawns,
         pending_stat_deltas,
         pending_character_stat_deltas,

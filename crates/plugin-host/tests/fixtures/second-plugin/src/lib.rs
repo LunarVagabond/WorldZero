@@ -107,6 +107,8 @@ impl Guest for Plugin {
     }
 
     fn on_item_use(_zone_id: String, _entity_id: String, _item_type: String) {}
+
+    fn on_craft_complete(_character_id: String, _recipe_key: String) {}
 }
 
 export!(Plugin);

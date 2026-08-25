@@ -25,7 +25,11 @@
 // systems built as a plugin rather than a core class/race enum), the one
 // hook that fires before any entity exists for the thing it's about,
 // hence the one narrow exception to "every id crossing this boundary is
-// an entity id." See
+// an entity id." #216 adds `on-craft-complete` — the post-craft
+// notification for #215's generic crafting decision, gated behind the
+// `economy` capability at the firing site (`server::session`) rather
+// than through a host-function call, since it has no corresponding host
+// function to gate. See
 // docs/specs/Plugin_API.md, "Beyond this v0 slice" for what still isn't
 // here. A WIT "world" is the actual versioning mechanism
 // (docs/PROPOSAL.md, "Interface Technology"): a breaking change bumps
@@ -33,7 +37,7 @@
 // silently changing what `plugin` means underneath existing compiled
 // plugins.
 
-package worldzero:plugin@0.9.0;
+package worldzero:plugin@0.10.0;
 
 /// What the host exposes for a plugin to call out to — nothing crosses
 /// this boundary that isn't listed here (docs/PROPOSAL.md, "Plugin
@@ -327,6 +331,22 @@ interface hooks {
     /// Live (#154): fires when a client sends a `UseItem` action.
     /// `zone-id` is where it happened.
     on-item-use: func(zone-id: string, entity-id: string, item-type: string);
+
+    /// Fired once, right after a `CraftItem` request (#216, implementing
+    /// #215's crafting decision) successfully consumes its declared
+    /// inputs and grants its declared output — post-craft notification
+    /// only, no veto mechanism (#215 deliberately defaults to
+    /// post-craft-only; core already enforced the atomic exchange by the
+    /// time this fires). No entity/zone context is given — like
+    /// `on-character-create`, a craft is account/character-scoped, not
+    /// entity-scoped, so `character-id` is what's available; a plugin
+    /// wanting to react against the crafting character's stats calls
+    /// `apply-stat-delta-for-character`. `recipe-key` is the same key the
+    /// `CraftItem` request named, resolved against the dev-declared
+    /// `crafting.schema.yaml`. Gated behind the `economy` capability
+    /// (`plugin_host::manifest::CAPABILITY_ECONOMY`), the same capability
+    /// that already covers `grant-item`/`remove-item`/`modify-currency`.
+    on-craft-complete: func(character-id: string, recipe-key: string);
 }
 
 world plugin {
