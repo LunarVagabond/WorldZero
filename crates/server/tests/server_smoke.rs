@@ -71,6 +71,8 @@ const CHARACTER_CAP_ADDR: &str = "127.0.0.1:7928";
 const CHARACTER_CREATE_HOOK_ADDR: &str = "127.0.0.1:7929";
 const SESSION_RESUME_ADDR: &str = "127.0.0.1:7930";
 const SESSION_RESUME_INVALID_ADDR: &str = "127.0.0.1:7931";
+const MOVE_CORRELATION_ADDR: &str = "127.0.0.1:7932";
+const PING_PONG_ADDR: &str = "127.0.0.1:7933";
 
 struct ServerProcess {
     child: Child,
@@ -638,6 +640,7 @@ async fn connect_register_move_and_persist_across_reconnect() {
         &ClientMessage::Move {
             x: MOVE_TO.0,
             y: MOVE_TO.1,
+            seq: 1,
         },
     )
     .await;
@@ -645,11 +648,18 @@ async fn connect_register_move_and_persist_across_reconnect() {
     // Drain messages until we see our own Moved confirmation.
     loop {
         match recv_world(&mut stream).await {
-            ServerMessage::Moved { entity_id, x, y } if entity_id == own_entity_id => {
+            ServerMessage::Moved {
+                entity_id,
+                x,
+                y,
+                seq,
+                ..
+            } if entity_id == own_entity_id => {
                 assert_eq!((x, y), MOVE_TO);
+                assert_eq!(seq, 1, "should echo back the client's own sequence number");
                 break;
             }
-            ServerMessage::Rejected { reason } => {
+            ServerMessage::Rejected { reason, .. } => {
                 panic!("expected the move to be accepted, was rejected: {reason}");
             }
             _ => {}
@@ -1125,7 +1135,15 @@ async fn zone_transition_crosses_a_link_without_reconnecting() {
     // greenwood-forest's link to stonebridge-village sits at x=500,
     // y in [200,300] (config/example-zones/greenwood-forest.yaml) —
     // (505, 250) is well past it, straight-line from the origin.
-    send_world(&mut stream, &ClientMessage::Move { x: 505.0, y: 250.0 }).await;
+    send_world(
+        &mut stream,
+        &ClientMessage::Move {
+            x: 505.0,
+            y: 250.0,
+            seq: 1,
+        },
+    )
+    .await;
 
     loop {
         match recv_world(&mut stream).await {
@@ -1144,7 +1162,7 @@ async fn zone_transition_crosses_a_link_without_reconnecting() {
                 assert!(roster.is_empty(), "{roster:?}");
                 break;
             }
-            ServerMessage::Rejected { reason } => {
+            ServerMessage::Rejected { reason, .. } => {
                 panic!("expected the cross-zone move to be accepted, was rejected: {reason}");
             }
             _ => {}
@@ -1855,6 +1873,7 @@ async fn an_account_can_create_list_and_select_between_multiple_characters() {
         &ClientMessage::Move {
             x: MOVE_TO.0,
             y: MOVE_TO.1,
+            seq: 1,
         },
     )
     .await;
@@ -1864,7 +1883,7 @@ async fn an_account_can_create_list_and_select_between_multiple_characters() {
                 assert_eq!((x, y), MOVE_TO);
                 break;
             }
-            ServerMessage::Rejected { reason } => panic!("move rejected: {reason}"),
+            ServerMessage::Rejected { reason, .. } => panic!("move rejected: {reason}"),
             _ => {}
         }
     }
@@ -2114,6 +2133,7 @@ async fn a_client_resumes_a_session_with_only_the_token_no_login() {
         &ClientMessage::Move {
             x: MOVE_TO.0,
             y: MOVE_TO.1,
+            seq: 1,
         },
     )
     .await;
@@ -2123,7 +2143,7 @@ async fn a_client_resumes_a_session_with_only_the_token_no_login() {
                 assert_eq!((x, y), MOVE_TO);
                 break;
             }
-            ServerMessage::Rejected { reason } => panic!("move rejected: {reason}"),
+            ServerMessage::Rejected { reason, .. } => panic!("move rejected: {reason}"),
             _ => {}
         }
     }
@@ -2184,5 +2204,155 @@ async fn resuming_with_an_unknown_token_is_rejected() {
             assert!(message.contains("invalid or has expired"), "{message}");
         }
         other => panic!("expected an Error, got {other:?}"),
+    }
+}
+
+/// #196: several `Move` requests in flight, each with its own
+/// client-assigned `seq`, are correlated back to the right `Moved`/
+/// `Rejected` by that `seq` — not by the order responses happen to
+/// arrive in. Deliberately interleaves an accepted move between two
+/// others so a test that only checked arrival order would still pass
+/// even with a broken correlation (responses on a single connection
+/// already arrive in send order); indexing the collected outcomes by
+/// `seq` into a map, rather than reading them positionally off the
+/// wire, is what actually exercises the acceptance criterion.
+#[tokio::test]
+#[ignore]
+async fn several_in_flight_moves_correlate_to_the_right_outcome_by_sequence_number() {
+    let config_dir = setup_config_dir("move-correlation");
+    let _server = start_server(&config_dir, MOVE_CORRELATION_ADDR).await;
+    wait_for_port(MOVE_CORRELATION_ADDR).await;
+
+    let username = format!("smoke-{}", uuid::Uuid::now_v7());
+    let mut stream = connect(&config_dir, MOVE_CORRELATION_ADDR).await;
+    send_auth(
+        &mut stream,
+        &AuthClientMessage::Register {
+            username: username.clone(),
+            password: "hunter2".to_string(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv_auth(&mut stream).await,
+        AuthServerMessage::Authenticated { .. }
+    ));
+    select_realm(&mut stream, _server.realm_id).await;
+    select_or_create_character(&mut stream, &username).await;
+
+    let (own_entity_id, start) = loop {
+        if let ServerMessage::Joined {
+            entity_id, x, y, ..
+        } = recv_world(&mut stream).await
+        {
+            break (entity_id, (x, y));
+        }
+    };
+
+    // seq 11 and seq 13: small, well within the speed cap — accepted.
+    // seq 12, sandwiched between them: a huge jump — rejected as
+    // `TooFast`. If a client (or this test) trusted arrival order
+    // instead of `seq`, the middle rejection would still land second —
+    // masking a correlation bug. Matching by `seq` is what actually
+    // proves the mapping.
+    send_world(
+        &mut stream,
+        &ClientMessage::Move {
+            x: start.0 + 0.1,
+            y: start.1,
+            seq: 11,
+        },
+    )
+    .await;
+    send_world(
+        &mut stream,
+        &ClientMessage::Move {
+            x: start.0 + 400.0,
+            y: start.1,
+            seq: 12,
+        },
+    )
+    .await;
+    send_world(
+        &mut stream,
+        &ClientMessage::Move {
+            x: start.0 + 0.2,
+            y: start.1,
+            seq: 13,
+        },
+    )
+    .await;
+
+    let mut outcomes = std::collections::HashMap::new();
+    while outcomes.len() < 3 {
+        match recv_world(&mut stream).await {
+            ServerMessage::Moved {
+                entity_id, x, seq, ..
+            } if entity_id == own_entity_id => {
+                outcomes.insert(seq, Ok(x));
+            }
+            // `Rejected` doesn't carry an entity id — safe to take any of
+            // them here since this connection is the only source of
+            // traffic in the test.
+            ServerMessage::Rejected { seq, .. } => {
+                outcomes.insert(seq, Err(()));
+            }
+            _ => {}
+        }
+    }
+
+    assert_eq!(outcomes.get(&11), Some(&Ok(start.0 + 0.1)));
+    assert_eq!(outcomes.get(&12), Some(&Err(())));
+    assert_eq!(outcomes.get(&13), Some(&Ok(start.0 + 0.2)));
+}
+
+/// #196: `Ping`/`Pong` is a standalone latency probe, independent of
+/// movement traffic — a client should get a `Pong` echoing its
+/// `client_sent_at` plus the server's own wall-clock time, with no
+/// character/movement involvement at all beyond having already joined
+/// a zone.
+#[tokio::test]
+#[ignore]
+async fn ping_gets_a_pong_with_the_echoed_timestamp_and_a_server_time() {
+    let config_dir = setup_config_dir("ping-pong");
+    let _server = start_server(&config_dir, PING_PONG_ADDR).await;
+    wait_for_port(PING_PONG_ADDR).await;
+
+    let username = format!("smoke-{}", uuid::Uuid::now_v7());
+    let mut stream = connect(&config_dir, PING_PONG_ADDR).await;
+    send_auth(
+        &mut stream,
+        &AuthClientMessage::Register {
+            username: username.clone(),
+            password: "hunter2".to_string(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv_auth(&mut stream).await,
+        AuthServerMessage::Authenticated { .. }
+    ));
+    select_realm(&mut stream, _server.realm_id).await;
+    select_or_create_character(&mut stream, &username).await;
+
+    loop {
+        if let ServerMessage::Joined { .. } = recv_world(&mut stream).await {
+            break;
+        }
+    }
+
+    let client_sent_at = 123_456_789_i64;
+    send_world(&mut stream, &ClientMessage::Ping { client_sent_at }).await;
+
+    loop {
+        if let ServerMessage::Pong {
+            client_sent_at: echoed,
+            server_time,
+        } = recv_world(&mut stream).await
+        {
+            assert_eq!(echoed, client_sent_at, "should echo the client's timestamp");
+            assert!(server_time > 0, "server_time should be a real timestamp");
+            break;
+        }
     }
 }

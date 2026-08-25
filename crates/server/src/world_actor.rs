@@ -28,13 +28,26 @@ enum WorldCommand {
     Despawn {
         entity: EntityId,
     },
+    /// `seq` is the client-assigned sequence number `Moved`/`Rejected`
+    /// will echo back (#196) — `0` for a plugin-driven move
+    /// (`apply_plugin_pending_effects`'s own `request_move` call), never
+    /// a real client sequence number, which always starts at `1`.
     RequestMove {
         entity: EntityId,
         to: Point,
+        seq: u32,
     },
     PositionOf {
         entity: EntityId,
         reply: oneshot::Sender<Option<Point>>,
+    },
+    /// The zone's current tick counter (#196) — `Moved`/`Rejected` get
+    /// theirs from the tick outcomes they're built from (`Zone::tick`'s
+    /// own return, stamped by the caller in `main::handle_tick_outcomes`);
+    /// this is for the messages built *between* ticks instead (`Joined`),
+    /// which need to ask for it explicitly.
+    CurrentTick {
+        reply: oneshot::Sender<u64>,
     },
     EntitiesSnapshot {
         reply: oneshot::Sender<Vec<(EntityId, EntityKind, Point)>>,
@@ -153,8 +166,24 @@ impl WorldHandle {
         self.send(WorldCommand::Despawn { entity });
     }
 
-    pub fn request_move(&self, entity: EntityId, to: Point) {
-        self.send(WorldCommand::RequestMove { entity, to });
+    /// `seq` is the client-assigned sequence number `Moved`/`Rejected`
+    /// will echo back (#196) — see `WorldCommand::RequestMove`'s doc
+    /// comment for the `0`-means-"not a real client request" convention.
+    pub fn request_move(&self, entity: EntityId, to: Point, seq: u32) {
+        self.send(WorldCommand::RequestMove { entity, to, seq });
+    }
+
+    /// The zone's current tick counter (#196), for a message built
+    /// between ticks (`Joined`) rather than from a tick's own outcomes.
+    /// `0` (indistinguishable from "no ticks have run yet") if the actor
+    /// task is gone — same "empty/default on gone" contract as
+    /// `entities_snapshot`.
+    pub async fn current_tick(&self) -> u64 {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if !self.send(WorldCommand::CurrentTick { reply: reply_tx }) {
+            return 0;
+        }
+        reply_rx.await.unwrap_or(0)
     }
 
     /// `None` both when the entity isn't spawned and when the actor task
@@ -361,9 +390,12 @@ pub fn spawn_world_actor(
                     match command {
                         WorldCommand::Spawn { entity, kind, position } => zone.spawn(entity, kind, position),
                         WorldCommand::Despawn { entity } => zone.despawn(entity),
-                        WorldCommand::RequestMove { entity, to } => zone.request_move(entity, to),
+                        WorldCommand::RequestMove { entity, to, seq } => zone.request_move(entity, to, seq),
                         WorldCommand::PositionOf { entity, reply } => {
                             let _ = reply.send(zone.position_of(entity));
+                        }
+                        WorldCommand::CurrentTick { reply } => {
+                            let _ = reply.send(zone.current_tick());
                         }
                         WorldCommand::EntitiesSnapshot { reply } => {
                             let _ = reply.send(zone.entities());
@@ -621,7 +653,9 @@ async fn apply_plugin_pending_effects(
 ) -> Vec<(String, String, i64)> {
     for (entity_id, x, y) in pending_moves {
         match entity_id.parse::<EntityId>() {
-            Ok(entity_id) => zone.request_move(entity_id, (x, y)),
+            // `0`: a plugin-driven move (`move-entity`) has no client
+            // sequence number to echo (#196).
+            Ok(entity_id) => zone.request_move(entity_id, (x, y), 0),
             Err(_) => {
                 tracing::warn!(
                     entity_id,

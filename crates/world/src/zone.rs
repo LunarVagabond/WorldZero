@@ -42,15 +42,36 @@ pub struct Zone {
     /// data every tick, it never drives NPC movement on its own).
     /// Player entities are never present here.
     npc_routes: HashMap<EntityId, String>,
-    pending_moves: Vec<(EntityId, Point)>,
+    pending_moves: Vec<(EntityId, Point, u32)>,
+    /// How many ticks this zone has run since it was created (#196) — the
+    /// server-authoritative counter `Moved`/`Rejected`/`Joined`/
+    /// `ZoneChanged` stamp so a client can reason about ordering/staleness
+    /// against the fixed-rate simulation step, not just message-arrival
+    /// order. Starts at `0` (no ticks run yet); incremented once at the
+    /// start of every `tick()` call, so the first tick a client could
+    /// possibly observe an effect from is tick `1`.
+    tick_count: u64,
 }
 
 /// What actually happened to a queued movement request — surfaced to the
 /// caller (e.g. to tell a rejected client why) rather than silently dropped.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MovementOutcome {
-    Applied,
-    Rejected(MovementRejection),
+    /// `seq` echoes the client-assigned sequence number this outcome
+    /// resolves (`0` for a plugin/NPC-driven move — see
+    /// `MovementOutcome::seq`'s doc comment). `to` is the position this
+    /// specific move landed at — carried here rather than left for the
+    /// caller to look up afterward, because a tick can batch several
+    /// moves for the same entity; a post-batch position lookup would
+    /// hand every `Applied` outcome in the batch the entity's *final*
+    /// position instead of the one this particular move actually
+    /// produced (#196 caught this: it broke `seq`/position correlation
+    /// for anything but the last move in a batch).
+    Applied { seq: u32, to: Point },
+    Rejected {
+        seq: u32,
+        rejection: MovementRejection,
+    },
     /// The move crossed a manifest-declared `content::manifest::Link`
     /// edge (#45) — the mover is leaving this zone for `target_zone`,
     /// never a normal in-zone move. `Zone::tick` has already despawned
@@ -60,9 +81,27 @@ pub enum MovementOutcome {
     /// spawning the entity into `target_zone`'s own `Zone`/`WorldHandle`;
     /// `world` has no notion of "the other zone" to do that itself (one
     /// `Zone` per zone-service instance, per this crate's own doc comment).
-    ZoneTransition {
-        target_zone: String,
-    },
+    ZoneTransition { target_zone: String },
+}
+
+impl MovementOutcome {
+    /// The client-assigned sequence number this outcome resolves (#196)
+    /// — `0` for a move that didn't originate from a real client request
+    /// (a plugin's own `move-entity` call, e.g. NPC patrol movement,
+    /// always passes `0`; a real client's `Move` starts numbering at `1`,
+    /// see `session_protocol::ClientMessage::Move`'s doc comment).
+    /// `ZoneTransition` has no sequence of its own yet — a `ZoneChanged`
+    /// message is a much stronger signal than a bare `Moved` echo would
+    /// be, so the move that triggered a transition is a known, deliberate
+    /// gap rather than an oversight; revisit if a client integration
+    /// actually needs it.
+    pub fn seq(&self) -> Option<u32> {
+        match self {
+            MovementOutcome::Applied { seq, .. } => Some(*seq),
+            MovementOutcome::Rejected { seq, .. } => Some(*seq),
+            MovementOutcome::ZoneTransition { .. } => None,
+        }
+    }
 }
 
 impl Zone {
@@ -74,7 +113,15 @@ impl Zone {
             entities: HashMap::new(),
             npc_routes: HashMap::new(),
             pending_moves: Vec::new(),
+            tick_count: 0,
         }
+    }
+
+    /// How many ticks this zone has run since it was created (#196) — `0`
+    /// before the first `tick()` call. See the `tick_count` field's own
+    /// doc comment for the numbering convention.
+    pub fn current_tick(&self) -> u64 {
+        self.tick_count
     }
 
     pub fn spawn(&mut self, entity: EntityId, kind: EntityKind, position: Point) {
@@ -151,9 +198,13 @@ impl Zone {
     /// Queues a movement request for the next `tick` — movement is never
     /// applied immediately on receipt, only as part of the fixed-rate
     /// simulation step, so every accepted move is validated against a
-    /// consistent, known `dt`.
-    pub fn request_move(&mut self, entity: EntityId, to: Point) {
-        self.pending_moves.push((entity, to));
+    /// consistent, known `dt`. `seq` is the client-assigned sequence
+    /// number `Moved`/`Rejected` will echo back (#196) — pass `0` for a
+    /// move that didn't originate from a real client request (a plugin's
+    /// own `move-entity` call), never a real client sequence number,
+    /// which always starts at `1`.
+    pub fn request_move(&mut self, entity: EntityId, to: Point, seq: u32) {
+        self.pending_moves.push((entity, to, seq));
     }
 
     /// Advances the simulation by exactly one tick at the configured
@@ -173,11 +224,12 @@ impl Zone {
     /// in `zone::tests::tick_span_overhead_is_negligible`, not assumed.
     #[tracing::instrument(skip_all)]
     pub fn tick(&mut self) -> Vec<(EntityId, MovementOutcome)> {
+        self.tick_count += 1;
         let dt = self.config.tick_interval().as_secs_f64();
         let moves = std::mem::take(&mut self.pending_moves);
 
         let mut outcomes = Vec::with_capacity(moves.len());
-        for (entity, to) in moves {
+        for (entity, to, seq) in moves {
             let Some(from) = self.index.position_of(entity) else {
                 // Not currently spawned in this zone (e.g. despawned
                 // between the request and this tick) — nothing to move.
@@ -204,10 +256,13 @@ impl Zone {
                 if attempted_distance > max_allowed {
                     outcomes.push((
                         entity,
-                        MovementOutcome::Rejected(MovementRejection::TooFast {
-                            attempted_distance,
-                            max_allowed,
-                        }),
+                        MovementOutcome::Rejected {
+                            seq,
+                            rejection: MovementRejection::TooFast {
+                                attempted_distance,
+                                max_allowed,
+                            },
+                        },
                     ));
                     continue;
                 }
@@ -229,10 +284,10 @@ impl Zone {
             ) {
                 Ok(()) => {
                     self.index.update(entity, to);
-                    outcomes.push((entity, MovementOutcome::Applied));
+                    outcomes.push((entity, MovementOutcome::Applied { seq, to }));
                 }
                 Err(rejection) => {
-                    outcomes.push((entity, MovementOutcome::Rejected(rejection)));
+                    outcomes.push((entity, MovementOutcome::Rejected { seq, rejection }));
                 }
             }
         }
@@ -394,10 +449,19 @@ routes:
         let entity = EntityId::new();
         zone.spawn(entity, EntityKind::Player, (50.0, 50.0));
 
-        zone.request_move(entity, (50.1, 50.1));
+        zone.request_move(entity, (50.1, 50.1), 1);
         let outcomes = zone.tick();
 
-        assert_eq!(outcomes, vec![(entity, MovementOutcome::Applied)]);
+        assert_eq!(
+            outcomes,
+            vec![(
+                entity,
+                MovementOutcome::Applied {
+                    seq: 1,
+                    to: (50.1, 50.1)
+                }
+            )]
+        );
         assert_eq!(zone.position_of(entity), Some((50.1, 50.1)));
     }
 
@@ -416,12 +480,18 @@ routes:
         let entity = EntityId::new();
         zone.spawn(entity, EntityKind::Player, (99.0, 50.0));
 
-        zone.request_move(entity, (500.0, 50.0));
+        zone.request_move(entity, (500.0, 50.0), 1);
         let outcomes = zone.tick();
 
         assert!(matches!(
             outcomes[0],
-            (e, MovementOutcome::Rejected(MovementRejection::OutOfBounds)) if e == entity
+            (
+                e,
+                MovementOutcome::Rejected {
+                    seq: 1,
+                    rejection: MovementRejection::OutOfBounds
+                }
+            ) if e == entity
         ));
         assert_eq!(zone.position_of(entity), Some((99.0, 50.0)));
     }
@@ -431,7 +501,7 @@ routes:
         let mut zone = zone_with_square_bounds();
         let entity = EntityId::new();
         zone.spawn(entity, EntityKind::Player, (50.0, 50.0));
-        zone.request_move(entity, (50.1, 50.1));
+        zone.request_move(entity, (50.1, 50.1), 1);
         zone.despawn(entity);
 
         let outcomes = zone.tick();
@@ -441,10 +511,23 @@ routes:
     #[test]
     fn tick_clears_the_pending_queue_even_with_no_entities() {
         let mut zone = zone_with_square_bounds();
-        zone.request_move(EntityId::new(), (1.0, 1.0));
+        zone.request_move(EntityId::new(), (1.0, 1.0), 1);
         assert!(zone.tick().is_empty());
         // A second tick with nothing newly queued does nothing further.
         assert!(zone.tick().is_empty());
+    }
+
+    #[test]
+    fn current_tick_starts_at_zero_and_increments_once_per_tick() {
+        let mut zone = zone_with_square_bounds();
+        assert_eq!(zone.current_tick(), 0);
+
+        zone.tick();
+        assert_eq!(zone.current_tick(), 1);
+
+        zone.tick();
+        zone.tick();
+        assert_eq!(zone.current_tick(), 3);
     }
 
     #[test]
@@ -499,7 +582,7 @@ links:
         let entity = EntityId::new();
         zone.spawn(entity, EntityKind::Player, (49.0, 50.0));
 
-        zone.request_move(entity, (51.0, 50.0));
+        zone.request_move(entity, (51.0, 50.0), 1);
         let outcomes = zone.tick();
 
         assert_eq!(
@@ -546,13 +629,19 @@ links:
         let entity = EntityId::new();
         zone.spawn(entity, EntityKind::Player, (49.0, 50.0));
 
-        zone.request_move(entity, (500.1, 50.0));
+        zone.request_move(entity, (500.1, 50.0), 1);
         let outcomes = zone.tick();
 
         assert!(
             matches!(
                 outcomes.as_slice(),
-                [(e, MovementOutcome::Rejected(MovementRejection::TooFast { .. }))] if *e == entity
+                [(
+                    e,
+                    MovementOutcome::Rejected {
+                        seq: 1,
+                        rejection: MovementRejection::TooFast { .. }
+                    }
+                )] if *e == entity
             ),
             "{outcomes:?}"
         );
@@ -595,10 +684,19 @@ links:
         let entity = EntityId::new();
         zone.spawn(entity, EntityKind::Npc, (49.0, 50.0));
 
-        zone.request_move(entity, (51.0, 50.0));
+        zone.request_move(entity, (51.0, 50.0), 0);
         let outcomes = zone.tick();
 
-        assert_eq!(outcomes, vec![(entity, MovementOutcome::Applied)]);
+        assert_eq!(
+            outcomes,
+            vec![(
+                entity,
+                MovementOutcome::Applied {
+                    seq: 0,
+                    to: (51.0, 50.0)
+                }
+            )]
+        );
         assert_eq!(zone.position_of(entity), Some((51.0, 50.0)));
     }
 
@@ -624,7 +722,7 @@ links:
             let start = std::time::Instant::now();
             for i in 0..1000 {
                 let offset = if i % 2 == 0 { 0.05 } else { -0.05 };
-                zone.request_move(entity, (50.0 + offset, 50.0));
+                zone.request_move(entity, (50.0 + offset, 50.0), i as u32);
                 zone.tick();
             }
             let elapsed = start.elapsed();
