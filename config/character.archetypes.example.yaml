@@ -1,0 +1,38 @@
+# Example declared character-archetype schema — loaded by the
+# `character` crate (crates/character/src/archetype_schema.rs), see
+# docs/specs/Data_Model_Spec.md's "Character list/create/select" section.
+# Copy/rename this as character.archetypes.yaml in the config dir your
+# instance actually uses (WZ_CONFIG_DIR, or ./config by default) and
+# adjust freely — the framework doesn't declare any classes/races of its
+# own, same "core has no opinion on the domain specifics" discipline
+# stats.schema.yaml/party.schema.yaml/guild.schema.yaml already follow.
+#
+# Each archetype's `stats` map is validated against stats.schema.yaml at
+# load time — every key must be one this instance's stats.schema.yaml
+# actually declares, and every value must fall within that stat's
+# declared min/max. A stat an archetype doesn't mention here simply
+# keeps its stats.schema.yaml default.
+#
+# The first declared entry is what a fresh `CreateCharacter` gets when
+# the client passes an empty `archetype_key`.
+schema_version: 1
+archetypes:
+  - key: warrior
+    name: Warrior
+    description: A frontline fighter who trades finesse for raw durability.
+    stats:
+      hp: 100
+      mana: 10
+  - key: mage
+    name: Mage
+    description: A spellcaster whose power comes at the cost of a fragile frame.
+    stats:
+      hp: 50
+      mana: 50
+  - key: rogue
+    name: Rogue
+    description: A quick, evasive striker who favors speed over brute force.
+    stats:
+      hp: 70
+      mana: 25
+      reputation.ironclad_guild: -5

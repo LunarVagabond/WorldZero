@@ -163,6 +163,14 @@ pub struct SessionDeps {
     /// `character::CharacterStore::create` itself (see `main`'s doc
     /// comment on why this stays a `server`-side policy value).
     pub max_characters_per_account: u32,
+    /// The dev-declared character-archetype schema (#213/#212,
+    /// `character.archetypes.yaml`) — backs `ListCharacterOptions` and
+    /// resolves/validates `CreateCharacter`'s `archetype_key`. Its
+    /// stat presets were already validated against the declared
+    /// `AttributeSchema` at load time (`main`), so applying one here
+    /// (via `character_store.set_stat`) is never expected to fail on a
+    /// bounds check.
+    pub archetype_schema: Arc<character::ArchetypeSchema>,
     /// Every loaded plugin (#152: one instance, process-wide), shared
     /// with every zone actor — the character-creation loop below also
     /// dispatches into this directly (#194's `on-character-create`),
@@ -395,12 +403,31 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
                 )
                 .await?;
             }
-            character_protocol::ClientMessage::CreateCharacter { name } => {
+            character_protocol::ClientMessage::CreateCharacter {
+                name,
+                archetype_key,
+            } => {
                 if name.trim().is_empty() {
                     send_character_error(&mut sink, "character name must not be empty".to_string())
                         .await?;
                     continue;
                 }
+                // #213/#212: empty resolves to the schema's first
+                // declared entry, an unknown non-empty key is rejected
+                // before any row is created — not a panic or silent
+                // fallback.
+                let archetype = if archetype_key.trim().is_empty() {
+                    Ok(deps.archetype_schema.default_archetype())
+                } else {
+                    deps.archetype_schema.resolve(&archetype_key)
+                };
+                let archetype = match archetype {
+                    Ok(a) => a,
+                    Err(e) => {
+                        send_character_error(&mut sink, e.to_string()).await?;
+                        continue;
+                    }
+                };
                 let existing = deps
                     .character_store
                     .count_for_account(account_id, deps.realm_id)
@@ -423,6 +450,13 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
                     .await
                 {
                     Ok(id) => {
+                        // Applies the archetype's starting-stat preset
+                        // before #194's on-character-create hook fires,
+                        // so a plugin's own logic sees these values
+                        // already in place rather than racing them.
+                        for (stat_key, value) in &archetype.stats {
+                            deps.character_store.set_stat(id, stat_key, *value).await?;
+                        }
                         // #194's extension point — fires (and its
                         // starting-stat writes are applied) before the
                         // client's own acknowledgement, so a client that
@@ -447,6 +481,23 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
                     }
                     Err(e) => send_character_error(&mut sink, e.to_string()).await?,
                 }
+            }
+            character_protocol::ClientMessage::ListCharacterOptions => {
+                let archetypes = deps
+                    .archetype_schema
+                    .archetypes
+                    .iter()
+                    .map(|a| character_protocol::ArchetypeOption {
+                        key: a.key.clone(),
+                        name: a.name.clone(),
+                        description: a.description.clone(),
+                    })
+                    .collect();
+                send_character(
+                    &mut sink,
+                    &character_protocol::ServerMessage::CharacterOptions { archetypes },
+                )
+                .await?;
             }
             character_protocol::ClientMessage::SelectCharacter { character_id } => {
                 let Ok(parsed_id) = character_id.parse::<CharacterId>() else {

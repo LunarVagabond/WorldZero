@@ -8,11 +8,14 @@
 //! `ClientMessage`/`ServerMessage` enums below wrap the generated
 //! `proto` module rather than being it.
 //!
-//! Class/race/archetype selection is deliberately not part of this
-//! protocol — that's plugin territory (a future character-creation
-//! plugin hook), not core, per this project's "no game-specific concept
-//! is privileged by the core" design principle. `CreateCharacter` is
-//! strictly "reserve a name," nothing else.
+//! Class/race/archetype selection (#213, implementing #212's decision)
+//! is dev-declared config (`character.archetypes.yaml`,
+//! `character::ArchetypeSchema`), not a hardcoded enum here — this
+//! protocol only exposes it generically: `ListCharacterOptions` returns
+//! whatever a game dev declared, and `CreateCharacter.archetype_key`
+//! names one of those declared entries. `#194`'s `on-character-create`
+//! plugin hook remains the extension point for anything a declarative
+//! stat preset can't express (starting inventory, conditional logic).
 
 use common::{Error, Result};
 use gateway::Envelope;
@@ -30,12 +33,20 @@ pub enum ClientMessage {
     /// character on this realm for a bound realm, every character across
     /// the whole open-realm group for an open one).
     ListCharacters,
-    /// Reserves a new character with `name` — does not itself select or
-    /// spawn it; a separate `SelectCharacter` is still required.
-    CreateCharacter { name: String },
+    /// Reserves a new character with `name`, under the declared
+    /// archetype named by `archetype_key` — empty resolves to
+    /// `character::ArchetypeSchema::default_archetype` (the schema's
+    /// first declared entry); an unknown non-empty key is rejected.
+    /// Does not itself select or spawn the character; a separate
+    /// `SelectCharacter` is still required.
+    CreateCharacter { name: String, archetype_key: String },
     /// Picks which of this account's characters to spawn into the world
     /// with — must actually be owned by this account.
     SelectCharacter { character_id: String },
+    /// Queries the dev-declared character-archetype list
+    /// (`character.archetypes.yaml`, #213/#212) — reachable anywhere in
+    /// this pre-join phase, same as `ListCharacters`.
+    ListCharacterOptions,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -45,12 +56,21 @@ pub struct CharacterSummary {
     pub zone_id: String,
 }
 
+/// One dev-declared entry from `character.archetypes.yaml` (#213/#212).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ArchetypeOption {
+    pub key: String,
+    pub name: String,
+    pub description: String,
+}
+
 #[derive(Debug, Clone)]
 pub enum ServerMessage {
     CharacterList { characters: Vec<CharacterSummary> },
     CharacterCreated { character_id: String },
     CharacterSelected { character_id: String },
     Error { message: String },
+    CharacterOptions { archetypes: Vec<ArchetypeOption> },
 }
 
 impl ClientMessage {
@@ -96,18 +116,45 @@ impl From<proto::CharacterSummary> for CharacterSummary {
     }
 }
 
+impl From<&ArchetypeOption> for proto::ArchetypeOption {
+    fn from(option: &ArchetypeOption) -> Self {
+        proto::ArchetypeOption {
+            key: option.key.clone(),
+            name: option.name.clone(),
+            description: option.description.clone(),
+        }
+    }
+}
+
+impl From<proto::ArchetypeOption> for ArchetypeOption {
+    fn from(option: proto::ArchetypeOption) -> Self {
+        ArchetypeOption {
+            key: option.key,
+            name: option.name,
+            description: option.description,
+        }
+    }
+}
+
 impl From<&ClientMessage> for proto::ClientMessage {
     fn from(message: &ClientMessage) -> Self {
         use proto::client_message::Kind;
         let kind = match message {
             ClientMessage::ListCharacters => Kind::ListCharacters(proto::ListCharacters {}),
-            ClientMessage::CreateCharacter { name } => {
-                Kind::CreateCharacter(proto::CreateCharacter { name: name.clone() })
-            }
+            ClientMessage::CreateCharacter {
+                name,
+                archetype_key,
+            } => Kind::CreateCharacter(proto::CreateCharacter {
+                name: name.clone(),
+                archetype_key: archetype_key.clone(),
+            }),
             ClientMessage::SelectCharacter { character_id } => {
                 Kind::SelectCharacter(proto::SelectCharacter {
                     character_id: character_id.clone(),
                 })
+            }
+            ClientMessage::ListCharacterOptions => {
+                Kind::ListCharacterOptions(proto::ListCharacterOptions {})
             }
         };
         proto::ClientMessage { kind: Some(kind) }
@@ -123,11 +170,18 @@ impl TryFrom<proto::ClientMessage> for ClientMessage {
             Some(Kind::ListCharacters(proto::ListCharacters {})) => {
                 Ok(ClientMessage::ListCharacters)
             }
-            Some(Kind::CreateCharacter(proto::CreateCharacter { name })) => {
-                Ok(ClientMessage::CreateCharacter { name })
-            }
+            Some(Kind::CreateCharacter(proto::CreateCharacter {
+                name,
+                archetype_key,
+            })) => Ok(ClientMessage::CreateCharacter {
+                name,
+                archetype_key,
+            }),
             Some(Kind::SelectCharacter(proto::SelectCharacter { character_id })) => {
                 Ok(ClientMessage::SelectCharacter { character_id })
+            }
+            Some(Kind::ListCharacterOptions(proto::ListCharacterOptions {})) => {
+                Ok(ClientMessage::ListCharacterOptions)
             }
             None => Err(Error::new(
                 "server",
@@ -162,6 +216,14 @@ impl From<&ServerMessage> for proto::ServerMessage {
             ServerMessage::Error { message } => Kind::Error(proto::Error {
                 message: message.clone(),
             }),
+            ServerMessage::CharacterOptions { archetypes } => {
+                Kind::CharacterOptions(proto::CharacterOptions {
+                    archetypes: archetypes
+                        .iter()
+                        .map(proto::ArchetypeOption::from)
+                        .collect(),
+                })
+            }
         };
         proto::ServerMessage { kind: Some(kind) }
     }
@@ -185,6 +247,11 @@ impl TryFrom<proto::ServerMessage> for ServerMessage {
                 Ok(ServerMessage::CharacterSelected { character_id })
             }
             Some(Kind::Error(proto::Error { message })) => Ok(ServerMessage::Error { message }),
+            Some(Kind::CharacterOptions(proto::CharacterOptions { archetypes })) => {
+                Ok(ServerMessage::CharacterOptions {
+                    archetypes: archetypes.into_iter().map(ArchetypeOption::from).collect(),
+                })
+            }
             None => Err(Error::new(
                 "server",
                 "gateway character message has no kind set",
@@ -233,10 +300,44 @@ mod tests {
     fn create_character_round_trips_through_an_envelope() {
         let message = ClientMessage::CreateCharacter {
             name: "Aria".to_string(),
+            archetype_key: "warrior".to_string(),
         };
         let envelope = message.into_envelope().unwrap();
         let decoded = ClientMessage::from_envelope(&envelope).unwrap();
-        assert!(matches!(decoded, ClientMessage::CreateCharacter { name } if name == "Aria"));
+        assert!(matches!(
+            decoded,
+            ClientMessage::CreateCharacter { name, archetype_key }
+                if name == "Aria" && archetype_key == "warrior"
+        ));
+    }
+
+    #[test]
+    fn list_character_options_round_trips_through_an_envelope() {
+        let message = ClientMessage::ListCharacterOptions;
+        let envelope = message.into_envelope().unwrap();
+        assert_eq!(envelope.message_type, CHARACTER_MESSAGE_TYPE);
+        assert!(matches!(
+            ClientMessage::from_envelope(&envelope).unwrap(),
+            ClientMessage::ListCharacterOptions
+        ));
+    }
+
+    #[test]
+    fn character_options_round_trips_an_archetype() {
+        let message = ServerMessage::CharacterOptions {
+            archetypes: vec![ArchetypeOption {
+                key: "warrior".to_string(),
+                name: "Warrior".to_string(),
+                description: "A frontline fighter.".to_string(),
+            }],
+        };
+        let envelope = message.into_envelope().unwrap();
+        let decoded = ServerMessage::from_envelope(&envelope).unwrap();
+        assert!(matches!(
+            decoded,
+            ServerMessage::CharacterOptions { archetypes }
+                if archetypes.len() == 1 && archetypes[0].key == "warrior"
+        ));
     }
 
     #[test]
