@@ -80,7 +80,7 @@ use common::pool::{PoolOptions, postgres_pool, redis_pool};
 use content::content_pack::ContentPack;
 use content::manifest::ZoneManifest;
 use futures_util::StreamExt;
-use session::{EntityCharacters, EntityRoles, SessionDeps, Sessions};
+use session::{EntityCharacters, EntityRoles, NpcStats, SessionDeps, Sessions};
 use session_protocol::{RosterEntry, ServerMessage};
 use tokio::sync::mpsc;
 use world::{EntityKind, MovementOutcome, Point, Zone};
@@ -224,6 +224,10 @@ async fn main() {
     ));
     let role_store: Arc<dyn auth::AccountRoleStore> =
         Arc::new(auth::PostgresAccountRoleStore::new(pool.clone()));
+    // NPC-targetable stats (#197) read the same declared schema real
+    // character stats do, so this is a clone of the exact instance
+    // `character_store` gets — not a second file load that could drift.
+    let npc_attribute_schema = Arc::new(schema.clone());
     let character_store = Arc::new(CharacterStore::new(pool.clone(), schema, inventory_config));
 
     let realm_store = realm_directory::RealmStore::new(pool.clone());
@@ -273,6 +277,7 @@ async fn main() {
 
     let entity_characters: EntityCharacters = Arc::new(Mutex::new(HashMap::new()));
     let entity_roles: EntityRoles = Arc::new(Mutex::new(HashMap::new()));
+    let npc_stats: NpcStats = Arc::new(Mutex::new(HashMap::new()));
 
     // Every connected entity's outgoing channel, process-wide, regardless
     // of which zone it's currently in (#152) — backs the plugin
@@ -431,6 +436,8 @@ async fn main() {
             plugins.clone(),
             character_store.clone(),
             entity_characters.clone(),
+            npc_stats.clone(),
+            npc_attribute_schema.clone(),
             plugin_state_store.clone(),
             zone_id.clone(),
             metrics.clone(),
@@ -477,6 +484,8 @@ async fn main() {
     let layer_spawner_world_config = world_config;
     let layer_spawner_character_store = character_store.clone();
     let layer_spawner_entity_characters = entity_characters.clone();
+    let layer_spawner_npc_stats = npc_stats.clone();
+    let layer_spawner_npc_attribute_schema = npc_attribute_schema.clone();
     let layer_spawner_metrics = metrics.clone();
     let layer_spawner_registry_cell = zone_registry_cell.clone();
     let layer_spawner_plugin_state_store = plugin_state_store.clone();
@@ -494,6 +503,8 @@ async fn main() {
             layer_spawner_plugins.clone(),
             layer_spawner_character_store.clone(),
             layer_spawner_entity_characters.clone(),
+            layer_spawner_npc_stats.clone(),
+            layer_spawner_npc_attribute_schema.clone(),
             layer_spawner_plugin_state_store.clone(),
             zone_id.to_string(),
             layer_spawner_metrics.clone(),
