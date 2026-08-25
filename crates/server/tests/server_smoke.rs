@@ -471,11 +471,12 @@ async fn register_and_authenticate(
 }
 
 /// Shared per-test config dir: zone manifest, attribute schema, and a
-/// plugin manifest declaring `message_types = [1000]` (#95) — a custom
-/// manifest rather than a copy of `config/plugin.example.toml`, whose
-/// shipped `message_types` is empty (a generic starting point, not this
-/// suite's fixture). `test_name` keeps concurrently-run tests' temp dirs
-/// from colliding.
+/// plugin manifest declaring `message_types = [1000]` (#95) and
+/// `chat_commands = ["give"]` (#57/#211's e2e `grant-item` coverage) — a
+/// custom manifest rather than a copy of `config/plugin.example.toml`,
+/// whose shipped `message_types`/`chat_commands` are empty (a generic
+/// starting point, not this suite's fixture). `test_name` keeps
+/// concurrently-run tests' temp dirs from colliding.
 fn setup_config_dir(test_name: &str) -> PathBuf {
     let config_dir = std::env::temp_dir().join(format!(
         "wz-server-smoke-{test_name}-{}",
@@ -524,6 +525,7 @@ name = "test-plugin"
 host_api_version = "0.9.0"
 capabilities = ["spawning", "movement", "combat", "economy", "messaging"]
 message_types = [1000]
+chat_commands = ["give"]
 hooks = [
     "on-zone-loaded",
     "on-character-create",
@@ -919,7 +921,12 @@ async fn player_join_and_leave_hooks_fire_for_real() {
 /// before the hook is ever called, not passed through). Also covers
 /// `report-death`/`report-respawn` (the plugin-owned trigger for
 /// `on-death`/`on-respawn`) via the fixture's `die`/`respawn`
-/// `on-message` commands.
+/// `on-message` commands. And #211: every `apply-stat-delta`/
+/// `grant-item`/`remove-item`/`modify-currency` call this test already
+/// exercises for real now also proves the corresponding
+/// `StatChanged`/`ItemChanged`/`CurrencyChanged` push actually reaches
+/// the connection that owns the affected entity, with no plugin-side
+/// `send-message` involved for that half of it.
 #[tokio::test]
 #[ignore]
 async fn combat_item_use_npc_interact_and_death_respawn_hooks_fire_for_real() {
@@ -1011,6 +1018,25 @@ async fn combat_item_use_npc_interact_and_death_respawn_hooks_fire_for_real() {
         }
     }
 
+    // #211: the on-damage-calc hook's apply-stat-delta call above lands
+    // on the *target*'s own "hp" stat (100 - 3 = 97) — this is the
+    // connection that should receive StatChanged automatically, no
+    // plugin-side send-message required for this any more (the plugin
+    // fixture above only ever sends a PluginMessage to the attacker).
+    loop {
+        match recv_world(&mut target).await {
+            ServerMessage::StatChanged { stat_key, value } => {
+                assert_eq!(stat_key, "hp");
+                assert_eq!(value, 97);
+                break;
+            }
+            ServerMessage::Moved { .. } | ServerMessage::EntitySpawned { .. } => {}
+            other => panic!(
+                "expected StatChanged after on-damage-calc's apply-stat-delta, got {other:?}"
+            ),
+        }
+    }
+
     // InteractNpc: distinct from the generic trigger-volume on-interact.
     send_world(
         &mut attacker,
@@ -1030,8 +1056,54 @@ async fn combat_item_use_npc_interact_and_death_respawn_hooks_fire_for_real() {
         }
     }
 
+    // #211/#57: the "give" chat command (`test-plugin`'s `on_chat_command`)
+    // exercises a real, successful `grant-item` — plugin.toml declares
+    // `chat_commands = ["give"]`, so this is routed to the plugin instead
+    // of published as an ordinary chat message. A successful grant should
+    // push ItemChanged automatically, ahead of the plugin's own
+    // on-item-acquire confirmation (`ItemChanged` is applied during the
+    // drain that runs right after the hook call returns; the hook's own
+    // `send-message` reply for `on-item-acquire` fires after that, once
+    // the drain hands the acquired grant back to the caller).
+    send_chat(
+        &mut attacker,
+        &chat::gateway_protocol::ClientMessage::Send {
+            channel_id: common::id::ChannelId::new(),
+            body: "/give torch".to_string(),
+        },
+    )
+    .await;
+    loop {
+        match recv_world(&mut attacker).await {
+            ServerMessage::ItemChanged {
+                item_type,
+                quantity,
+            } => {
+                assert_eq!(item_type, "torch");
+                assert_eq!(quantity, 1);
+                break;
+            }
+            ServerMessage::Moved { .. } | ServerMessage::EntitySpawned { .. } => {}
+            other => {
+                panic!("expected ItemChanged after the give command's grant-item, got {other:?}")
+            }
+        }
+    }
+    loop {
+        match recv_world(&mut attacker).await {
+            ServerMessage::PluginMessage { body } => {
+                assert!(body.contains("acquired torch"), "{body}");
+                break;
+            }
+            ServerMessage::Moved { .. } | ServerMessage::EntitySpawned { .. } => {}
+            other => panic!("expected the on-item-acquire confirmation, got {other:?}"),
+        }
+    }
+
     // UseItem: the core never validates ownership itself — the hook
-    // fires regardless, the plugin decides what happens.
+    // fires regardless, the plugin decides what happens. This connection
+    // really does own one "torch" now (the give command above), so
+    // on-item-use's remove-item call actually succeeds this time.
     send_world(
         &mut attacker,
         &ClientMessage::UseItem {
@@ -1047,6 +1119,36 @@ async fn combat_item_use_npc_interact_and_death_respawn_hooks_fire_for_real() {
             }
             ServerMessage::Moved { .. } | ServerMessage::EntitySpawned { .. } => {}
             other => panic!("expected the on-item-use confirmation, got {other:?}"),
+        }
+    }
+    // #211: on-item-use's remove-item (torch: 1 -> 0) and modify-currency
+    // (+5) calls above both actually land — this connection should
+    // receive ItemChanged and CurrencyChanged automatically, no
+    // plugin-side send-message needed for either any more.
+    loop {
+        match recv_world(&mut attacker).await {
+            ServerMessage::ItemChanged {
+                item_type,
+                quantity,
+            } => {
+                assert_eq!(item_type, "torch");
+                assert_eq!(quantity, 0);
+                break;
+            }
+            ServerMessage::Moved { .. } | ServerMessage::EntitySpawned { .. } => {}
+            other => panic!("expected ItemChanged after on-item-use's remove-item, got {other:?}"),
+        }
+    }
+    loop {
+        match recv_world(&mut attacker).await {
+            ServerMessage::CurrencyChanged { balance } => {
+                assert_eq!(balance, 5);
+                break;
+            }
+            ServerMessage::Moved { .. } | ServerMessage::EntitySpawned { .. } => {}
+            other => panic!(
+                "expected CurrencyChanged after on-item-use's modify-currency, got {other:?}"
+            ),
         }
     }
 

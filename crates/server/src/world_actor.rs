@@ -17,7 +17,9 @@ use tokio::time::Instant;
 use world::{EntityKind, MovementOutcome, Point, Zone};
 
 use crate::plugin_startup::PluginRuntime;
-use crate::session::{EntityCharacters, NpcStats};
+use crate::send_to;
+use crate::session::{EntityCharacters, NpcStats, Sessions};
+use crate::session_protocol::ServerMessage;
 
 enum WorldCommand {
     Spawn {
@@ -326,6 +328,14 @@ pub fn spawn_world_actor(
     plugin_state_store: std::sync::Arc<crate::plugin_state::PluginStateStore>,
     zone_id: String,
     metrics: Option<std::sync::Arc<Metrics>>,
+    // Process-wide, not this zone's own (#211) — `apply-stat-delta`/
+    // `grant-item`/`remove-item`/`modify-currency` push
+    // `StatChanged`/`ItemChanged`/`CurrencyChanged` back to the exact
+    // connection that owns the affected entity, same map `send-message`
+    // already resolves against (`plugin_startup::PluginCallbacks`'s own
+    // `sessions` field) — an entity stays reachable across a
+    // `ZoneChanged` zone-hop without this needing to know it happened.
+    global_sessions: Sessions,
     on_tick: impl Fn(&Zone, Vec<(EntityId, MovementOutcome)>) + Send + 'static,
 ) -> WorldHandle {
     let (tx, mut rx) = mpsc::unbounded_channel::<WorldCommand>();
@@ -390,7 +400,7 @@ pub fn spawn_world_actor(
                                 }
                             }
                             drain_and_apply_plugin_effects(
-                                runtime, &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &plugin_state_store,
+                                runtime, &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &plugin_state_store, &global_sessions,
                             ).await;
                         }
                     }
@@ -447,7 +457,7 @@ pub fn spawn_world_actor(
                                 spawn_npc_from_table(&mut zone, &spawn_table_id);
                             }
                             drain_and_apply_plugin_effects(
-                                runtime, &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &plugin_state_store,
+                                runtime, &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &plugin_state_store, &global_sessions,
                             ).await;
                         }
                         WorldCommand::ChatCommand { command, args, sender_entity_id } => {
@@ -461,14 +471,14 @@ pub fn spawn_world_actor(
                                 tracing::warn!(plugin = %runtime.name, command, error = %e, "plugin on_chat_command hook failed");
                             }
                             drain_and_apply_plugin_effects(
-                                runtime, &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &plugin_state_store,
+                                runtime, &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &plugin_state_store, &global_sessions,
                             ).await;
                         }
                         WorldCommand::PlayerJoin { entity_id } => {
                             let entity_id_str = entity_id.to_string();
                             let mut plugins = plugins.lock().await;
                             fire_hook(
-                                &mut plugins, "on-player-join-zone", &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &plugin_state_store,
+                                &mut plugins, "on-player-join-zone", &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &plugin_state_store, &global_sessions,
                                 |plugin| plugin.on_player_join_zone(&zone_id, &entity_id_str),
                             ).await;
                         }
@@ -476,7 +486,7 @@ pub fn spawn_world_actor(
                             let entity_id_str = entity_id.to_string();
                             let mut plugins = plugins.lock().await;
                             fire_hook(
-                                &mut plugins, "on-player-leave-zone", &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &plugin_state_store,
+                                &mut plugins, "on-player-leave-zone", &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &plugin_state_store, &global_sessions,
                                 |plugin| plugin.on_player_leave_zone(&zone_id, &entity_id_str),
                             ).await;
                             let _ = reply.send(());
@@ -490,7 +500,7 @@ pub fn spawn_world_actor(
                             let target_str = target.to_string();
                             let mut plugins = plugins.lock().await;
                             fire_hook(
-                                &mut plugins, "on-damage-calc", &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &plugin_state_store,
+                                &mut plugins, "on-damage-calc", &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &plugin_state_store, &global_sessions,
                                 |plugin| plugin.on_damage_calc(&zone_id, &attacker_str, &target_str, &stat_key, 0),
                             ).await;
                         }
@@ -498,7 +508,7 @@ pub fn spawn_world_actor(
                             let entity_id_str = entity_id.to_string();
                             let mut plugins = plugins.lock().await;
                             fire_hook(
-                                &mut plugins, "on-item-use", &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &plugin_state_store,
+                                &mut plugins, "on-item-use", &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &plugin_state_store, &global_sessions,
                                 |plugin| plugin.on_item_use(&zone_id, &entity_id_str, &item_type),
                             ).await;
                         }
@@ -511,7 +521,7 @@ pub fn spawn_world_actor(
                             let actor_str = actor.to_string();
                             let mut plugins = plugins.lock().await;
                             fire_hook(
-                                &mut plugins, "on-npc-interact", &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &plugin_state_store,
+                                &mut plugins, "on-npc-interact", &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &plugin_state_store, &global_sessions,
                                 |plugin| plugin.on_npc_interact(&zone_id, &npc_str, &actor_str),
                             ).await;
                         }
@@ -592,6 +602,7 @@ async fn drain_and_apply_plugin_effects(
     npc_stats: &NpcStats,
     attribute_schema: &AttributeSchema,
     plugin_state_store: &crate::plugin_state::PluginStateStore,
+    global_sessions: &Sessions,
 ) {
     let zone_id = zone.manifest.id.clone();
     let moves = runtime.drain_pending_moves();
@@ -613,6 +624,7 @@ async fn drain_and_apply_plugin_effects(
         npc_stats,
         attribute_schema,
         plugin_state_store,
+        global_sessions,
     )
     .await;
     let wants_item_acquire = runtime.wants("on-item-acquire");
@@ -667,6 +679,7 @@ async fn fire_hook(
     npc_stats: &NpcStats,
     attribute_schema: &AttributeSchema,
     plugin_state_store: &crate::plugin_state::PluginStateStore,
+    global_sessions: &Sessions,
     mut call: impl FnMut(&mut plugin_host::LoadedPlugin) -> common::Result<()>,
 ) {
     for runtime in plugins.iter_mut() {
@@ -684,6 +697,7 @@ async fn fire_hook(
             npc_stats,
             attribute_schema,
             plugin_state_store,
+            global_sessions,
         )
         .await;
     }
@@ -719,6 +733,17 @@ async fn apply_plugin_pending_effects(
     npc_stats: &NpcStats,
     attribute_schema: &AttributeSchema,
     plugin_state_store: &crate::plugin_state::PluginStateStore,
+    // #211: pushes `StatChanged`/`ItemChanged`/`CurrencyChanged` to the
+    // one connection that owns whichever entity/character a write below
+    // actually landed for — never zone-broadcast, unlike `Moved`. Never
+    // touched for the NPC branch of the stat-delta loop below (an NPC
+    // has no owning connection) or for a player entity that resolved
+    // (`resolve_character` returned `Some`) but whose connection has
+    // since gone away (`send_to` itself is already a silent no-op for
+    // an entity id with no live entry — same "best effort, not a
+    // delivery guarantee" contract every other `send_to` call site in
+    // this codebase already accepts).
+    global_sessions: &Sessions,
 ) -> Vec<(String, String, i64)> {
     for (entity_id, x, y) in pending_moves {
         match entity_id.parse::<EntityId>() {
@@ -756,11 +781,23 @@ async fn apply_plugin_pending_effects(
                     );
                     continue;
                 };
-                if let Err(e) = character_store
+                match character_store
                     .apply_stat_delta(character_id, &stat_key, delta)
                     .await
                 {
-                    tracing::warn!(entity_id, stat_key, error = %e, "plugin's apply-stat-delta failed");
+                    Ok(new_value) => {
+                        send_to(
+                            global_sessions,
+                            parsed_entity_id,
+                            ServerMessage::StatChanged {
+                                stat_key: stat_key.clone(),
+                                value: new_value,
+                            },
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(entity_id, stat_key, error = %e, "plugin's apply-stat-delta failed");
+                    }
                 }
             }
             Some(EntityKind::Npc) => {
@@ -799,7 +836,19 @@ async fn apply_plugin_pending_effects(
             .grant_item(character_id, &item_type, quantity)
             .await
         {
-            Ok(new_quantity) => acquired.push((entity_id, item_type, new_quantity)),
+            Ok(new_quantity) => {
+                if let Ok(parsed_entity_id) = entity_id.parse::<EntityId>() {
+                    send_to(
+                        global_sessions,
+                        parsed_entity_id,
+                        ServerMessage::ItemChanged {
+                            item_type: item_type.clone(),
+                            quantity: new_quantity,
+                        },
+                    );
+                }
+                acquired.push((entity_id, item_type, new_quantity))
+            }
             Err(e) => {
                 tracing::warn!(entity_id, item_type, error = %e, "plugin's grant-item failed")
             }
@@ -816,11 +865,25 @@ async fn apply_plugin_pending_effects(
             );
             continue;
         };
-        if let Err(e) = character_store
+        match character_store
             .remove_item(character_id, &item_type, quantity)
             .await
         {
-            tracing::warn!(entity_id, item_type, error = %e, "plugin's remove-item failed");
+            Ok(remaining) => {
+                if let Ok(parsed_entity_id) = entity_id.parse::<EntityId>() {
+                    send_to(
+                        global_sessions,
+                        parsed_entity_id,
+                        ServerMessage::ItemChanged {
+                            item_type: item_type.clone(),
+                            quantity: remaining,
+                        },
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(entity_id, item_type, error = %e, "plugin's remove-item failed");
+            }
         }
     }
 
@@ -833,8 +896,21 @@ async fn apply_plugin_pending_effects(
             );
             continue;
         };
-        if let Err(e) = character_store.modify_currency(character_id, delta).await {
-            tracing::warn!(entity_id, error = %e, "plugin's modify-currency failed");
+        match character_store.modify_currency(character_id, delta).await {
+            Ok(new_balance) => {
+                if let Ok(parsed_entity_id) = entity_id.parse::<EntityId>() {
+                    send_to(
+                        global_sessions,
+                        parsed_entity_id,
+                        ServerMessage::CurrencyChanged {
+                            balance: new_balance,
+                        },
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(entity_id, error = %e, "plugin's modify-currency failed");
+            }
         }
     }
 

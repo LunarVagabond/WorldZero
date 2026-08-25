@@ -431,6 +431,8 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
                         fire_on_character_create(
                             &deps.plugins,
                             &deps.character_store,
+                            &deps.character_entities,
+                            &deps.global_sessions,
                             id,
                             &deps.default_zone_id,
                         )
@@ -1715,9 +1717,20 @@ async fn build_realm_summary(deps: &SessionDeps) -> Result<realm_protocol::Realm
 /// directly against `character_store` instead. A failed hook call or a
 /// rejected stat write is logged and otherwise ignored — same
 /// never-fatal discipline every other hook call site already uses.
+///
+/// A successful stat write also pushes `StatChanged` (#211), but only if
+/// `character_entities` already has a live entity for this character —
+/// this hook fires right after the character row is created, before any
+/// client has selected/joined it (see `wit/plugin.wit`'s doc comment on
+/// `on-character-create`), so the ordinary case is no live connection to
+/// push to at all; skipped silently, same "no owning connection, nothing
+/// to push" discipline the NPC branch of `apply-stat-delta` already
+/// follows.
 async fn fire_on_character_create(
     plugins: &Arc<tokio::sync::Mutex<Vec<crate::plugin_startup::PluginRuntime>>>,
     character_store: &CharacterStore,
+    character_entities: &CharacterEntities,
+    global_sessions: &Sessions,
     character_id: CharacterId,
     zone_id: &str,
 ) {
@@ -1738,11 +1751,26 @@ async fn fire_on_character_create(
                 tracing::warn!(plugin = %runtime.name, character_id = %target, "plugin apply-stat-delta-for-character called with an invalid character id");
                 continue;
             };
-            if let Err(e) = character_store
+            match character_store
                 .apply_stat_delta(target_id, &stat_key, delta)
                 .await
             {
-                tracing::warn!(plugin = %runtime.name, character_id = %target_id, stat_key, error = %e, "plugin apply-stat-delta-for-character failed");
+                Ok(new_value) => {
+                    let live_entity = character_entities.lock().unwrap().get(&target_id).copied();
+                    if let Some(entity_id) = live_entity {
+                        send_to(
+                            global_sessions,
+                            entity_id,
+                            ServerMessage::StatChanged {
+                                stat_key: stat_key.clone(),
+                                value: new_value,
+                            },
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(plugin = %runtime.name, character_id = %target_id, stat_key, error = %e, "plugin apply-stat-delta-for-character failed");
+                }
             }
         }
     }

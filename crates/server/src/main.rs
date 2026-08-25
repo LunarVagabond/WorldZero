@@ -471,6 +471,7 @@ async fn main() {
             plugin_state_store.clone(),
             zone_id.clone(),
             metrics.clone(),
+            global_sessions.clone(),
             move |zone, outcomes| {
                 handle_tick_outcomes(
                     &registry_cell,
@@ -520,6 +521,7 @@ async fn main() {
     let layer_spawner_registry_cell = zone_registry_cell.clone();
     let layer_spawner_plugin_state_store = plugin_state_store.clone();
     let layer_spawner_plugins = plugins.clone();
+    let layer_spawner_global_sessions = global_sessions.clone();
     let layer_spawner: zone_registry::LayerSpawner = Box::new(move |zone_id, manifest| {
         let zone = Zone::new(manifest.clone(), layer_spawner_world_config);
         let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
@@ -538,6 +540,7 @@ async fn main() {
             layer_spawner_plugin_state_store.clone(),
             zone_id.to_string(),
             layer_spawner_metrics.clone(),
+            layer_spawner_global_sessions.clone(),
             move |zone, outcomes| {
                 handle_tick_outcomes(
                     &registry_cell,
