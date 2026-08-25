@@ -281,6 +281,19 @@ mod tests {
         AttributeSchema::from_yaml("schema_version: 1\nstats: []\n").unwrap()
     }
 
+    /// A real, throwaway `realms` row (#170: `characters.realm_id` is a
+    /// real `FOREIGN KEY` now).
+    async fn insert_realm(pool: &sqlx::PgPool) -> RealmId {
+        let realm_id = RealmId::new();
+        sqlx::query("INSERT INTO realms (id, name, open_or_bound) VALUES ($1, $2, 'open')")
+            .bind(realm_id.as_uuid())
+            .bind(format!("Test Realm {realm_id}"))
+            .execute(pool)
+            .await
+            .unwrap();
+        realm_id
+    }
+
     // Real Postgres — set WZ_POSTGRES_* and run with `-- --ignored`.
     async fn store_with_character() -> (CharacterStore, CharacterId) {
         let config = PostgresConfig::from_env().expect("WZ_POSTGRES_* env vars set");
@@ -296,14 +309,10 @@ mod tests {
             .await
             .unwrap();
 
+        let realm_id = insert_realm(&pool).await;
         let store = CharacterStore::new(pool, schema(), Default::default());
         let character_id = store
-            .create(
-                account_id,
-                "Test Character",
-                RealmId::new(),
-                "greenwood-forest",
-            )
+            .create(account_id, "Test Character", realm_id, "greenwood-forest")
             .await
             .unwrap();
 
@@ -326,6 +335,7 @@ mod tests {
             .await
             .unwrap();
 
+        let realm_id = insert_realm(&pool).await;
         let store = CharacterStore::new(
             pool,
             schema(),
@@ -334,12 +344,7 @@ mod tests {
             },
         );
         let character_id = store
-            .create(
-                account_id,
-                "Test Character",
-                RealmId::new(),
-                "greenwood-forest",
-            )
+            .create(account_id, "Test Character", realm_id, "greenwood-forest")
             .await
             .unwrap();
 

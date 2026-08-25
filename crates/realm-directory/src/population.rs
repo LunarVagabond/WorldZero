@@ -236,13 +236,20 @@ mod tests {
             .execute(&pg_pool)
             .await
             .unwrap();
+        // #170: character.realm_id is a real foreign key now — needs an
+        // actual realms row, not just an unregistered RealmId::new().
+        let realm_store = crate::RealmStore::new(pg_pool.clone());
+        let realm_id = realm_store
+            .create("Population Test Realm", crate::OpenOrBound::Open)
+            .await
+            .unwrap();
+
         let store = CharacterStore::new(
             pg_pool,
             character::AttributeSchema::from_yaml("schema_version: 1\nstats: []\n").unwrap(),
             Default::default(),
         );
 
-        let realm_id = RealmId::new();
         store
             .create(account_id, "Aria", realm_id, "greenwood-forest")
             .await
