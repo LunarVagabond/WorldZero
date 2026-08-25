@@ -172,7 +172,7 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
         }
     };
 
-    let (account_id, username, session) =
+    let (account_id, username, session_token) =
         match authenticate(auth_message, &deps.auth_provider).await {
             Ok(result) => result,
             Err(e) => {
@@ -186,7 +186,7 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
         &auth::gateway_protocol::ServerMessage::Authenticated {
             account_id,
             username: username.clone(),
-            session_token: session.token,
+            session_token,
         },
     )
     .await?;
@@ -766,10 +766,16 @@ fn plugin_chat_command(declared_commands: &[String], body: &str) -> Option<(Stri
 async fn authenticate(
     message: auth::gateway_protocol::ClientMessage,
     provider: &auth::UsernamePasswordProvider,
-) -> Result<(AccountId, String, auth::Session)> {
+) -> Result<(AccountId, String, String)> {
     use auth::AuthProvider;
     use auth::gateway_protocol::ClientMessage as AuthMessage;
 
+    // `Resume` (#195) is the one branch that returns early with its own
+    // token instead of falling through to `issue_session` below — it
+    // reuses the token the client already presented, renewed in place by
+    // `SessionManager::resolve` (see that method's own doc comment for
+    // why: same token, sliding expiration, a deliberate bearer-token
+    // choice). `Register`/`Login` both still issue a brand new session.
     let (account_id, username) = match message {
         AuthMessage::Register { username, password } => {
             let account_id = provider.register(&username, &password).await?;
@@ -782,10 +788,14 @@ async fn authenticate(
             let account_id = provider.verify_credentials(&credentials).await?;
             (account_id, username)
         }
+        AuthMessage::Resume { session_token } => {
+            let (account_id, username) = provider.resume(&session_token).await?;
+            return Ok((account_id, username, session_token));
+        }
     };
 
     let session = provider.issue_session(account_id).await?;
-    Ok((account_id, username, session))
+    Ok((account_id, username, session.token))
 }
 
 pub(crate) fn entity_type_label(kind: EntityKind) -> String {

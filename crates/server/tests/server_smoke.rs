@@ -69,6 +69,8 @@ const REALM_MISMATCH_ADDR: &str = "127.0.0.1:7926";
 const MULTI_CHARACTER_ADDR: &str = "127.0.0.1:7927";
 const CHARACTER_CAP_ADDR: &str = "127.0.0.1:7928";
 const CHARACTER_CREATE_HOOK_ADDR: &str = "127.0.0.1:7929";
+const SESSION_RESUME_ADDR: &str = "127.0.0.1:7930";
+const SESSION_RESUME_INVALID_ADDR: &str = "127.0.0.1:7931";
 
 struct ServerProcess {
     child: Child,
@@ -2067,4 +2069,120 @@ async fn plugin_sets_a_starting_stat_via_on_character_create() {
     // elsewhere in this suite, just via the character-id-scoped variant.
     let stat = read_character_stat(&character_id, "reputation.ironclad_guild").await;
     assert_eq!(stat, Some(25), "starting stat should be set pre-spawn");
+}
+
+/// #195, end to end: a disconnected client reconnects and resumes its
+/// session using only the `session_token` an earlier `Authenticated`
+/// reply issued — no `Login` message sent at all — and lands back in the
+/// world at the same character/position, same as a real `Login`-based
+/// reconnect would.
+#[tokio::test]
+#[ignore]
+async fn a_client_resumes_a_session_with_only_the_token_no_login() {
+    let config_dir = setup_config_dir("session-resume");
+    let _server = start_server(&config_dir, SESSION_RESUME_ADDR).await;
+    wait_for_port(SESSION_RESUME_ADDR).await;
+
+    let username = format!("session-resume-{}", uuid::Uuid::now_v7());
+    let password = "hunter2";
+
+    // First connection: register, capture the issued session_token, move
+    // somewhere observable, then disconnect.
+    let mut stream = connect(&config_dir, SESSION_RESUME_ADDR).await;
+    send_auth(
+        &mut stream,
+        &AuthClientMessage::Register {
+            username: username.clone(),
+            password: password.to_string(),
+        },
+    )
+    .await;
+    let session_token = match recv_auth(&mut stream).await {
+        AuthServerMessage::Authenticated { session_token, .. } => session_token,
+        other => panic!("expected Authenticated, got {other:?}"),
+    };
+    select_realm(&mut stream, _server.realm_id).await;
+    select_or_create_character(&mut stream, &username).await;
+    assert!(matches!(
+        recv_world(&mut stream).await,
+        ServerMessage::Joined { .. }
+    ));
+
+    const MOVE_TO: (f64, f64) = (0.3, 0.2);
+    send_world(
+        &mut stream,
+        &ClientMessage::Move {
+            x: MOVE_TO.0,
+            y: MOVE_TO.1,
+        },
+    )
+    .await;
+    loop {
+        match recv_world(&mut stream).await {
+            ServerMessage::Moved { x, y, .. } => {
+                assert_eq!((x, y), MOVE_TO);
+                break;
+            }
+            ServerMessage::Rejected { reason } => panic!("move rejected: {reason}"),
+            _ => {}
+        }
+    }
+    drop(stream);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Second connection: Resume only — no Register, no Login.
+    let mut stream = connect(&config_dir, SESSION_RESUME_ADDR).await;
+    send_auth(
+        &mut stream,
+        &AuthClientMessage::Resume {
+            session_token: session_token.clone(),
+        },
+    )
+    .await;
+    match recv_auth(&mut stream).await {
+        AuthServerMessage::Authenticated {
+            username: resumed_username,
+            session_token: resumed_token,
+            ..
+        } => {
+            assert_eq!(resumed_username, username);
+            // Same token handed back, not rotated (#195's deliberate
+            // "same token, sliding expiration" choice).
+            assert_eq!(resumed_token, session_token);
+        }
+        other => panic!("expected Authenticated, got {other:?}"),
+    }
+    select_realm(&mut stream, _server.realm_id).await;
+    select_or_create_character(&mut stream, &username).await;
+    match recv_world(&mut stream).await {
+        ServerMessage::Joined { x, y, .. } => {
+            assert_eq!((x, y), MOVE_TO, "should resume at the same position")
+        }
+        other => panic!("expected Joined, got {other:?}"),
+    }
+}
+
+/// #195: an unknown/expired token produces a clear error, not a silent
+/// or ambiguous failure — the client is expected to fall back to `Login`.
+#[tokio::test]
+#[ignore]
+async fn resuming_with_an_unknown_token_is_rejected() {
+    let config_dir = setup_config_dir("session-resume-invalid");
+    let _server = start_server(&config_dir, SESSION_RESUME_INVALID_ADDR).await;
+    wait_for_port(SESSION_RESUME_INVALID_ADDR).await;
+
+    let mut stream = connect(&config_dir, SESSION_RESUME_INVALID_ADDR).await;
+    send_auth(
+        &mut stream,
+        &AuthClientMessage::Resume {
+            session_token: "not-a-real-token".to_string(),
+        },
+    )
+    .await;
+    match recv_auth(&mut stream).await {
+        AuthServerMessage::Error { message } => {
+            assert!(message.contains("invalid or has expired"), "{message}");
+        }
+        other => panic!("expected an Error, got {other:?}"),
+    }
 }

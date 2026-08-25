@@ -18,6 +18,7 @@ message ClientMessage {
   oneof kind {
     Register register = 1;
     Login login = 2;
+    Resume resume = 3;
   }
 }
 
@@ -29,6 +30,15 @@ message Register {
 message Login {
   string username = 1;
   string password = 2;
+}
+
+// Resumes a previously-authenticated session by presenting the
+// session_token an earlier Authenticated reply issued, instead of
+// re-entering a password (#195). Replied to the same way Register/Login
+// are — an Authenticated with the same token back, or an Error the
+// client should treat as "fall back to Login".
+message Resume {
+  string session_token = 1;
 }
 
 message ServerMessage {

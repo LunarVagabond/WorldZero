@@ -24,8 +24,20 @@ pub const AUTH_MESSAGE_TYPE: u16 = 1;
 
 #[derive(Debug, Clone)]
 pub enum ClientMessage {
-    Register { username: String, password: String },
-    Login { username: String, password: String },
+    Register {
+        username: String,
+        password: String,
+    },
+    Login {
+        username: String,
+        password: String,
+    },
+    /// Resumes a previously-authenticated session using a `session_token`
+    /// an earlier `Authenticated` reply issued, instead of a password
+    /// (#195) — see docs/specs/Auth_Spec.md's "Gateway handshake".
+    Resume {
+        session_token: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -72,6 +84,9 @@ impl From<&ClientMessage> for proto::ClientMessage {
                 username: username.clone(),
                 password: password.clone(),
             }),
+            ClientMessage::Resume { session_token } => Kind::Resume(proto::Resume {
+                session_token: session_token.clone(),
+            }),
         };
         proto::ClientMessage { kind: Some(kind) }
     }
@@ -88,6 +103,9 @@ impl TryFrom<proto::ClientMessage> for ClientMessage {
             }
             Some(Kind::Login(proto::Login { username, password })) => {
                 Ok(ClientMessage::Login { username, password })
+            }
+            Some(Kind::Resume(proto::Resume { session_token })) => {
+                Ok(ClientMessage::Resume { session_token })
             }
             None => Err(Error::new("auth", "gateway auth message has no kind set")),
         }
@@ -170,6 +188,18 @@ mod tests {
         assert_eq!(envelope.message_type, AUTH_MESSAGE_TYPE);
         let decoded = ClientMessage::from_envelope(&envelope).unwrap();
         assert!(matches!(decoded, ClientMessage::Login { username, .. } if username == "alice"));
+    }
+
+    #[test]
+    fn resume_round_trips_through_an_envelope() {
+        let message = ClientMessage::Resume {
+            session_token: "tok".to_string(),
+        };
+        let envelope = message.into_envelope().unwrap();
+        let decoded = ClientMessage::from_envelope(&envelope).unwrap();
+        assert!(
+            matches!(decoded, ClientMessage::Resume { session_token } if session_token == "tok")
+        );
     }
 
     #[test]

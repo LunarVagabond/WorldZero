@@ -38,6 +38,48 @@ impl SessionManager {
                 + time::Duration::seconds(SESSION_TTL_SECONDS as i64),
         })
     }
+
+    /// Resolves a `session_token` back to the account it belongs to (#195)
+    /// — `None` for an unknown or already-expired token, never an error,
+    /// since "the token doesn't resolve" is an ordinary, expected outcome
+    /// a caller (`UsernamePasswordProvider::resume`) turns into its own
+    /// clear rejection, not a storage-layer failure.
+    ///
+    /// **Sliding expiration, same token reused (a deliberate choice, not
+    /// an oversight):** a successful resolve refreshes the key's TTL back
+    /// to the full window rather than minting a new token or leaving the
+    /// original expiry untouched — the same shape an ordinary web session
+    /// cookie already has. Reusing the token (instead of rotating it on
+    /// every resume) keeps the client-side contract simple: whatever
+    /// token `Authenticated` last handed back keeps working for as long
+    /// as the connection keeps reconnecting within the TTL window, with
+    /// nothing extra for the client to track. This is a bearer-token
+    /// security model — presenting the raw token is sufficient, no second
+    /// factor — matching how the token is already stored and used today;
+    /// see docs/specs/Auth_Spec.md's "Gateway handshake" for the full
+    /// writeup of that choice.
+    #[tracing::instrument(skip(self, token))]
+    pub async fn resolve(&self, token: &str) -> Result<Option<AccountId>> {
+        let key = format!("session:{token}");
+        let mut conn = redis_connection(&self.redis).await?;
+
+        let stored: Option<String> = conn
+            .get(&key)
+            .await
+            .map_err(|e| Error::wrap("auth", "failed to look up session", e))?;
+        let Some(stored) = stored else {
+            return Ok(None);
+        };
+        let account_id: AccountId = stored
+            .parse()
+            .map_err(|e| Error::wrap("auth", "corrupt session record", e))?;
+
+        conn.expire::<_, ()>(&key, SESSION_TTL_SECONDS as i64)
+            .await
+            .map_err(|e| Error::wrap("auth", "failed to renew session", e))?;
+
+        Ok(Some(account_id))
+    }
 }
 
 fn generate_token() -> String {
@@ -94,6 +136,62 @@ mod tests {
         assert!(
             ttl > 0 && ttl as u64 <= SESSION_TTL_SECONDS,
             "unexpected TTL on the session key: {ttl}"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn resolve_finds_the_account_behind_an_issued_token() {
+        let config = RedisConfig::from_env().expect("WZ_REDIS_* env vars set");
+        let pool = redis_pool(&config, PoolOptions::default()).unwrap();
+        let manager = SessionManager::new(pool);
+
+        let account_id = AccountId::new();
+        let session = manager.issue(account_id).await.unwrap();
+
+        assert_eq!(
+            manager.resolve(&session.token).await.unwrap(),
+            Some(account_id)
+        );
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn resolve_returns_none_for_an_unknown_token() {
+        let config = RedisConfig::from_env().expect("WZ_REDIS_* env vars set");
+        let pool = redis_pool(&config, PoolOptions::default()).unwrap();
+        let manager = SessionManager::new(pool);
+
+        assert_eq!(manager.resolve("not-a-real-token").await.unwrap(), None);
+    }
+
+    /// #195's sliding-expiration choice, verified directly against
+    /// Redis's own TTL — a resolve should refresh the key back to the
+    /// full window, not leave whatever was left over from `issue`.
+    #[tokio::test]
+    #[ignore]
+    async fn resolve_renews_the_tokens_ttl() {
+        let config = RedisConfig::from_env().expect("WZ_REDIS_* env vars set");
+        let pool = redis_pool(&config, PoolOptions::default()).unwrap();
+        let manager = SessionManager::new(pool.clone());
+
+        let account_id = AccountId::new();
+        let session = manager.issue(account_id).await.unwrap();
+        let key = format!("session:{}", session.token);
+
+        // Artificially shrink the TTL so a renewal is actually observable
+        // (issuing already sets it to the full window).
+        let mut conn = redis_connection(&pool).await.unwrap();
+        conn.expire::<_, ()>(&key, 5).await.unwrap();
+        let shrunk_ttl: i64 = conn.ttl(&key).await.unwrap();
+        assert!(shrunk_ttl <= 5, "{shrunk_ttl}");
+
+        manager.resolve(&session.token).await.unwrap();
+
+        let renewed_ttl: i64 = conn.ttl(&key).await.unwrap();
+        assert!(
+            renewed_ttl > shrunk_ttl,
+            "resolve should have renewed the TTL: was {shrunk_ttl}, now {renewed_ttl}"
         );
     }
 }
