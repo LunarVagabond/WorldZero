@@ -21,6 +21,7 @@ use crate::chat_session::{self, ChatDeps};
 use crate::realm_protocol;
 use crate::session_protocol::{ClientMessage, RosterEntry, ServerMessage, WORLD_MESSAGE_TYPE};
 use crate::zone_registry::ZoneRegistry;
+use crate::{despawn_from_layer, spawn_into_layer};
 
 pub type ServerStream =
     Framed<tokio_rustls::server::TlsStream<tokio::net::TcpStream>, gateway::EnvelopeCodec>;
@@ -57,6 +58,39 @@ pub type EntityCharacters = Arc<Mutex<HashMap<EntityId, CharacterId>>>;
 /// its entity despawns (`WorldCommand::Despawn`) so this map never grows
 /// past the zone's actual live NPC population.
 pub type NpcStats = Arc<Mutex<HashMap<EntityId, HashMap<String, i64>>>>;
+
+/// `EntityCharacters`, reversed (#142) — which currently-connected entity
+/// id a given character is playing as right now, if any. `entity_id`
+/// alone can't answer "is this character's groupmate still online" at a
+/// later *login* (a fresh connection always gets a brand-new entity id,
+/// so any entity id recorded before a disconnect is already stale by the
+/// time a reconnect needs to consult it) — `CharacterId` is the stable
+/// key that survives the gap; this is how [`GroupMemberships`] (keyed by
+/// `CharacterId`, same reason) gets translated back into a live entity
+/// id `ZoneRegistry::join_layer_of` can actually use. Populated/cleared
+/// at the exact same two points as `EntityCharacters`.
+pub type CharacterEntities = Arc<Mutex<HashMap<CharacterId, EntityId>>>;
+
+/// A minimal, pairwise "who is this character currently grouped with"
+/// memory (#142) — **not** the real party/group system (#178, unbuilt):
+/// no invites, no N-member rosters, no disband semantics, just "the last
+/// entity this character successfully `JoinGroupLayer`'d onto, and vice
+/// versa," recorded automatically as a side effect of that live action
+/// (`session::handle_session`'s `ClientMessage::JoinGroupLayer` arm).
+/// Exists so #142's own reconnect-placement acceptance criterion is
+/// real, not test-only: a login looks itself up here (keyed by
+/// `CharacterId`, stable across the disconnect gap `EntityCharacters`
+/// alone can't survive) and, if its groupmate is still connected
+/// somewhere in the zone, lands on that layer instead of wherever
+/// population balancing alone would put it. Selecting a *different*
+/// character at login than the one that was grouped naturally finds no
+/// entry here (a different key) and falls through to an ordinary login —
+/// exactly the "no recovery attempted" behavior the ticket asks for,
+/// with no extra bookkeeping needed. #178 is expected to layer real
+/// invite/accept/N-member/disband semantics on top of — or in place of —
+/// this, not be blocked by it; this ticket only needed *a* query shape
+/// to satisfy its own reconnect criterion, not the final one.
+pub type GroupMemberships = Arc<Mutex<HashMap<CharacterId, CharacterId>>>;
 
 /// Which roles (docs/specs/Auth_Spec.md, "Account roles", #114/#124) the
 /// account behind a connected player entity holds — populated once at
@@ -131,6 +165,11 @@ pub struct SessionDeps {
     /// zone) — never silently drops the connection over a stale zone_id.
     pub default_zone_id: String,
     pub entity_characters: EntityCharacters,
+    /// `EntityCharacters` reversed, for `GroupMemberships` reconnect
+    /// lookups (#142) — see its own doc comment.
+    pub character_entities: CharacterEntities,
+    /// See [`GroupMemberships`]'s own doc comment (#142).
+    pub group_memberships: GroupMemberships,
     /// Backs `EntityRoles` population at join time (#124) — `auth` (like
     /// `character`) is always wired in this combined process, so this is
     /// never optional the way `chat`/`metrics` are.
@@ -443,20 +482,53 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
         );
         deps.default_zone_id.clone()
     };
+    // Reconnecting to a still-live group (#142) is the one case initial
+    // connection resolution needs to consult group state at all — looked
+    // up *before* population-balanced assignment, which only runs if
+    // this comes back empty (no recorded groupmate, or that groupmate
+    // isn't actually online in this zone right now). Selecting a
+    // different character than the one that was grouped naturally finds
+    // no entry here (a different key) and falls straight through to an
+    // ordinary login — see `GroupMemberships`'s own doc comment.
+    let groupmate_layer = deps
+        .group_memberships
+        .lock()
+        .unwrap()
+        .get(&character_id)
+        .copied()
+        .and_then(|groupmate_character_id| {
+            deps.character_entities
+                .lock()
+                .unwrap()
+                .get(&groupmate_character_id)
+                .copied()
+        })
+        .and_then(|groupmate_entity_id| {
+            deps.zones
+                .join_layer_of(&current_zone_id, groupmate_entity_id)
+        });
+
     // Population-balanced layer assignment (#50) happens once, here, at
     // initial join — see `zone_registry`'s doc comment for why a later
     // zone-link transition or mid-connection `ZoneChanged` (below) always
     // lands on layer 0 instead rather than going through this too.
-    let mut zone = deps
-        .zones
-        .assign_layer(&current_zone_id)
-        .expect("default_zone_id must always resolve to a real zone in the registry");
+    let mut zone = match groupmate_layer {
+        Some(zone) => zone,
+        None => deps
+            .zones
+            .assign_layer(&current_zone_id)
+            .expect("default_zone_id must always resolve to a real zone in the registry"),
+    };
 
     zone.world.spawn(entity_id, EntityKind::Player, position);
     deps.entity_characters
         .lock()
         .unwrap()
         .insert(entity_id, character_id);
+    deps.character_entities
+        .lock()
+        .unwrap()
+        .insert(character_id, entity_id);
     let roles = deps.role_store.roles_for(account_id).await?;
     deps.entity_roles.lock().unwrap().insert(entity_id, roles);
 
@@ -606,6 +678,65 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
                                 }
                             }
                         }
+                        Ok(ClientMessage::JoinGroupLayer { other_entity_id }) => {
+                            let Ok(other_entity_id) = other_entity_id.parse::<EntityId>() else {
+                                send_world(&mut sink, &ServerMessage::Error {
+                                    message: format!("{other_entity_id:?} is not a valid entity id"),
+                                }).await?;
+                                continue;
+                            };
+                            // #142: the placement primitive a group/party
+                            // system calls — no membership check of its
+                            // own, that's the group system's job (still
+                            // unbuilt, #178). Resolves against *any*
+                            // currently-spawned entity id in this zone.
+                            match deps.zones.join_layer_of(&current_zone_id, other_entity_id) {
+                                Some(target) if !std::sync::Arc::ptr_eq(&target.sessions, &zone.sessions) => {
+                                    let Some(position) = zone.world.position_of(entity_id).await else {
+                                        // Already despawned/disconnecting —
+                                        // nothing to move.
+                                        continue;
+                                    };
+                                    despawn_from_layer(&zone, entity_id);
+                                    let message = spawn_into_layer(
+                                        &target,
+                                        current_zone_id.clone(),
+                                        entity_id,
+                                        position,
+                                        outgoing_tx.clone(),
+                                    ).await;
+                                    send_world(&mut sink, &message).await?;
+                                    zone = target;
+
+                                    // Records this pairing for reconnect
+                                    // placement (#142's `GroupMemberships`,
+                                    // see its own doc comment) — only when
+                                    // the target resolves to a real
+                                    // character (a player, not e.g. an NPC
+                                    // — the move itself works against any
+                                    // entity, but "group membership" only
+                                    // means something between two players).
+                                    if let Some(other_character_id) = deps
+                                        .entity_characters
+                                        .lock()
+                                        .unwrap()
+                                        .get(&other_entity_id)
+                                        .copied()
+                                    {
+                                        let mut memberships =
+                                            deps.group_memberships.lock().unwrap();
+                                        memberships.insert(character_id, other_character_id);
+                                        memberships.insert(other_character_id, character_id);
+                                    }
+                                }
+                                // Already on other_entity_id's layer, or
+                                // other_entity_id isn't spawned anywhere in
+                                // this zone right now — no move needed
+                                // (acceptance criteria: unaffected unless a
+                                // cross-layer move is actually needed).
+                                _ => {}
+                            }
+                        }
                         Err(e) => {
                             send_world(&mut sink, &ServerMessage::Error { message: e.to_string() }).await?;
                         }
@@ -719,6 +850,10 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
     zone.sessions.lock().unwrap().remove(&entity_id);
     deps.global_sessions.lock().unwrap().remove(&entity_id);
     deps.entity_characters.lock().unwrap().remove(&entity_id);
+    deps.character_entities
+        .lock()
+        .unwrap()
+        .remove(&character_id);
     deps.entity_roles.lock().unwrap().remove(&entity_id);
     // #21's clean-disconnect release — a harmless no-op for a bound-realm
     // character (never took a lease to begin with), so this runs

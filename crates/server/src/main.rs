@@ -80,7 +80,10 @@ use common::pool::{PoolOptions, postgres_pool, redis_pool};
 use content::content_pack::ContentPack;
 use content::manifest::ZoneManifest;
 use futures_util::StreamExt;
-use session::{EntityCharacters, EntityRoles, NpcStats, SessionDeps, Sessions};
+use session::{
+    CharacterEntities, EntityCharacters, EntityRoles, GroupMemberships, NpcStats, SessionDeps,
+    Sessions,
+};
 use session_protocol::{RosterEntry, ServerMessage};
 use tokio::sync::mpsc;
 use world::{EntityKind, MovementOutcome, Point, Zone};
@@ -276,8 +279,10 @@ async fn main() {
     };
 
     let entity_characters: EntityCharacters = Arc::new(Mutex::new(HashMap::new()));
+    let character_entities: CharacterEntities = Arc::new(Mutex::new(HashMap::new()));
     let entity_roles: EntityRoles = Arc::new(Mutex::new(HashMap::new()));
     let npc_stats: NpcStats = Arc::new(Mutex::new(HashMap::new()));
+    let group_memberships: GroupMemberships = Arc::new(Mutex::new(HashMap::new()));
 
     // Every connected entity's outgoing channel, process-wide, regardless
     // of which zone it's currently in (#152) — backs the plugin
@@ -558,6 +563,8 @@ async fn main() {
         zones,
         default_zone_id,
         entity_characters,
+        character_entities,
+        group_memberships,
         role_store,
         entity_roles,
         plugin_message_types,
@@ -779,12 +786,34 @@ async fn complete_zone_transition(
     };
 
     let entry: Point = zones.entry_point(&source_zone_id, &target_zone_id);
-    target.world.spawn(entity_id, EntityKind::Player, entry);
-    target
-        .sessions
-        .lock()
-        .unwrap()
-        .insert(entity_id, sender.clone());
+    let message = spawn_into_layer(&target, target_zone_id, entity_id, entry, sender.clone()).await;
+    if let Ok(envelope) = message.into_envelope() {
+        let _ = sender.send(envelope);
+    }
+}
+
+/// Spawns `entity_id` into `target` (some layer of `target_zone_id`) at
+/// `position`, registers `sender` in its `Sessions`, broadcasts
+/// `EntitySpawned` to everyone else already there, and returns the
+/// `ZoneChanged` message the connection itself should be told —
+/// everything a zone/layer handoff needs on the *arrival* side, shared
+/// by [`complete_zone_transition`] (crossing a manifest-declared zone
+/// link) and `session`'s `JoinGroupLayer` handling (crossing layers of
+/// the *same* zone, #142) — both are structurally the same "despawn
+/// here, spawn there, tell the connection" move, differing only in
+/// where `target`/`position` come from. Doesn't send the returned
+/// message itself — callers differ in how they reach the connection
+/// (a background task's `mpsc::Sender` vs. `session::handle_session`'s
+/// own `sink`, already mid-await on this same connection).
+async fn spawn_into_layer(
+    target: &ZoneRuntime,
+    target_zone_id: String,
+    entity_id: EntityId,
+    position: Point,
+    sender: mpsc::UnboundedSender<gateway::Envelope>,
+) -> ServerMessage {
+    target.world.spawn(entity_id, EntityKind::Player, position);
+    target.sessions.lock().unwrap().insert(entity_id, sender);
 
     let roster: Vec<RosterEntry> = target
         .world
@@ -806,27 +835,44 @@ async fn complete_zone_transition(
         ServerMessage::EntitySpawned {
             entity_id: entity_id.to_string(),
             entity_type: session::entity_type_label(EntityKind::Player),
-            x: entry.0,
-            y: entry.1,
+            x: position.0,
+            y: position.1,
         },
     );
 
-    // The *destination* zone's own tick counter (#196) — each
-    // zone-service instance ticks independently, so this is a fresh
-    // baseline for the new zone, not a continuation of the source
-    // zone's.
+    // The destination layer's own tick counter (#196) — each
+    // zone-service/layer instance ticks independently, so this is a
+    // fresh baseline, not a continuation of wherever the entity was
+    // before.
     let tick = target.world.current_tick().await;
-    let message = ServerMessage::ZoneChanged {
+    ServerMessage::ZoneChanged {
         zone_id: target_zone_id,
         entity_id: entity_id.to_string(),
-        x: entry.0,
-        y: entry.1,
+        x: position.0,
+        y: position.1,
         roster,
         tick,
-    };
-    if let Ok(envelope) = message.into_envelope() {
-        let _ = sender.send(envelope);
     }
+}
+
+/// Despawns `entity_id` out of `source` (some layer/zone's `ZoneRuntime`)
+/// and broadcasts `EntityDespawned` to everyone else there — the
+/// departure-side counterpart to [`spawn_into_layer`], used wherever a
+/// connection is leaving a `Sessions` map for good (a real zone-link
+/// crossing already had this shape inline in `handle_tick_outcomes`,
+/// since `Zone::tick` itself despawns from the world for that case; a
+/// same-zone layer move (#142) needs it done explicitly here instead,
+/// since nothing about the move is a simulated movement outcome).
+fn despawn_from_layer(source: &ZoneRuntime, entity_id: EntityId) {
+    source.world.despawn(entity_id);
+    source.sessions.lock().unwrap().remove(&entity_id);
+    broadcast_except(
+        &source.sessions,
+        entity_id,
+        ServerMessage::EntityDespawned {
+            entity_id: entity_id.to_string(),
+        },
+    );
 }
 
 fn broadcast_all(sessions: &Sessions, message: ServerMessage) {

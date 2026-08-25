@@ -56,6 +56,16 @@ pub enum ClientMessage {
     /// the target actually is a currently-spawned NPC before ever
     /// calling the configured plugin's `on-npc-interact` hook (#154).
     InteractNpc { npc_entity_id: String },
+    /// Requests moving this connection's own entity onto whichever layer
+    /// of the *current* zone `other_entity_id` is already spawned into
+    /// (#142) — the live layer-reassignment primitive a group/party
+    /// system calls once it decides two players should end up together.
+    /// The server performs the placement unconditionally against any
+    /// currently-spawned entity id in this zone, with no membership
+    /// check of its own — a no-op if `other_entity_id` isn't spawned
+    /// anywhere in this zone, or is already on this connection's own
+    /// layer.
+    JoinGroupLayer { other_entity_id: String },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -247,6 +257,11 @@ impl From<&ClientMessage> for proto::ClientMessage {
             ClientMessage::InteractNpc { npc_entity_id } => Kind::InteractNpc(proto::InteractNpc {
                 npc_entity_id: npc_entity_id.clone(),
             }),
+            ClientMessage::JoinGroupLayer { other_entity_id } => {
+                Kind::JoinGroupLayer(proto::JoinGroupLayer {
+                    other_entity_id: other_entity_id.clone(),
+                })
+            }
         };
         proto::ClientMessage { kind: Some(kind) }
     }
@@ -274,6 +289,9 @@ impl TryFrom<proto::ClientMessage> for ClientMessage {
             }
             Some(Kind::InteractNpc(proto::InteractNpc { npc_entity_id })) => {
                 Ok(ClientMessage::InteractNpc { npc_entity_id })
+            }
+            Some(Kind::JoinGroupLayer(proto::JoinGroupLayer { other_entity_id })) => {
+                Ok(ClientMessage::JoinGroupLayer { other_entity_id })
             }
             None => Err(Error::new(
                 "server",
@@ -511,6 +529,19 @@ mod tests {
             decoded,
             ServerMessage::Pong { client_sent_at, server_time }
                 if client_sent_at == 12345 && server_time == 67890
+        ));
+    }
+
+    #[test]
+    fn join_group_layer_round_trips_through_an_envelope() {
+        let message = ClientMessage::JoinGroupLayer {
+            other_entity_id: "some-entity-id".to_string(),
+        };
+        let envelope = message.into_envelope().unwrap();
+        let decoded = ClientMessage::from_envelope(&envelope).unwrap();
+        assert!(matches!(
+            decoded,
+            ClientMessage::JoinGroupLayer { other_entity_id } if other_entity_id == "some-entity-id"
         ));
     }
 

@@ -142,6 +142,22 @@ pub struct WorldHandle {
     queue_depth: Option<IntGauge>,
 }
 
+#[cfg(test)]
+impl WorldHandle {
+    /// A `WorldHandle` with no actor task actually listening on the
+    /// other end — every command silently goes nowhere. Only for tests
+    /// (`zone_registry`'s `join_layer_of` tests, #142) that need a real
+    /// `ZoneRuntime` to populate a `Sessions` map against, but never
+    /// exercise `.world` itself.
+    pub fn detached_for_test() -> Self {
+        let (commands, _rx) = mpsc::unbounded_channel();
+        Self {
+            commands,
+            queue_depth: None,
+        }
+    }
+}
+
 impl WorldHandle {
     /// Every `WorldCommand` send goes through here — the one place that
     /// increments `queue_depth`, so no dispatch method below can forget

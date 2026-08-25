@@ -74,6 +74,8 @@ const SESSION_RESUME_INVALID_ADDR: &str = "127.0.0.1:7931";
 const MOVE_CORRELATION_ADDR: &str = "127.0.0.1:7932";
 const PING_PONG_ADDR: &str = "127.0.0.1:7933";
 const NPC_STATS_ADDR: &str = "127.0.0.1:7934";
+const GROUP_LAYER_ADDR: &str = "127.0.0.1:7935";
+const GROUP_LAYER_RECONNECT_ADDR: &str = "127.0.0.1:7936";
 
 struct ServerProcess {
     child: Child,
@@ -2467,6 +2469,206 @@ async fn attacking_an_npc_applies_real_stats_and_kills_it_at_zero() {
             }
             ServerMessage::Moved { .. } | ServerMessage::EntitySpawned { .. } => {}
             other => panic!("expected the last-death query reply, got {other:?}"),
+        }
+    }
+}
+
+/// #142: two connections a low population threshold forces onto separate
+/// layers of the same zone (same setup as
+/// `a_low_population_threshold_isolates_two_joining_connections_onto_separate_layers`
+/// above — proven isolated first, same as that test) start seeing each
+/// other live once the second sends `JoinGroupLayer` naming the first:
+/// its `ZoneChanged` roster includes the first's entity, and the first
+/// observes the second's `EntitySpawned` broadcast — proving a real
+/// cross-layer move happened, not just that the message didn't error.
+#[tokio::test]
+#[ignore]
+async fn join_group_layer_moves_a_connection_onto_its_groupmates_live_layer() {
+    let config_dir = setup_content_pack_config_dir("group-layer");
+    let _server = start_server_with_env(
+        &config_dir,
+        GROUP_LAYER_ADDR,
+        false,
+        &[("WZ_LAYER_POPULATION_THRESHOLD", "1")],
+    )
+    .await;
+    wait_for_port(GROUP_LAYER_ADDR).await;
+
+    let mut first = connect(&config_dir, GROUP_LAYER_ADDR).await;
+    register_and_authenticate(
+        &mut first,
+        &format!("group-layer-a-{}", uuid::Uuid::now_v7()),
+        "hunter2",
+        _server.realm_id,
+    )
+    .await;
+    let first_entity_id = loop {
+        if let ServerMessage::Joined {
+            entity_id, roster, ..
+        } = recv_world(&mut first).await
+        {
+            assert!(roster.is_empty(), "{roster:?}");
+            break entity_id;
+        }
+    };
+
+    let mut second = connect(&config_dir, GROUP_LAYER_ADDR).await;
+    register_and_authenticate(
+        &mut second,
+        &format!("group-layer-b-{}", uuid::Uuid::now_v7()),
+        "hunter2",
+        _server.realm_id,
+    )
+    .await;
+    loop {
+        if let ServerMessage::Joined { roster, .. } = recv_world(&mut second).await {
+            // With the threshold forcing a separate layer, the second
+            // connection does *not* see the first yet — confirms the two
+            // really do start on different layers, same as the
+            // isolation test above.
+            assert!(roster.is_empty(), "{roster:?}");
+            break;
+        }
+    }
+
+    send_world(
+        &mut second,
+        &ClientMessage::JoinGroupLayer {
+            other_entity_id: first_entity_id.clone(),
+        },
+    )
+    .await;
+
+    // second lands on first's layer: a ZoneChanged whose roster now
+    // includes first.
+    match recv_world(&mut second).await {
+        ServerMessage::ZoneChanged { roster, .. } => {
+            assert!(
+                roster
+                    .iter()
+                    .any(|entry| entry.entity_id == first_entity_id),
+                "{roster:?}"
+            );
+        }
+        other => panic!("expected ZoneChanged from the group-layer join, got {other:?}"),
+    }
+
+    // first observes second actually arriving live — the real,
+    // observable proof the move happened, not just that second's own
+    // ZoneChanged said so.
+    match recv_world(&mut first).await {
+        ServerMessage::EntitySpawned { .. } => {}
+        other => panic!("expected second's EntitySpawned, got {other:?}"),
+    }
+}
+
+/// #142's second acceptance criterion: a player *reconnecting* to a
+/// group they were already in before disconnecting lands back on that
+/// group's current layer, not wherever population balancing alone would
+/// put them. `second` joins `first`'s layer live (same mechanism as the
+/// test above, which is what records `GroupMemberships`), disconnects,
+/// then logs back in as the *same* character — with the population
+/// threshold still forcing a fresh connection onto a brand-new layer,
+/// landing back on `first`'s layer at all is only possible because
+/// login itself consulted the recorded group state.
+#[tokio::test]
+#[ignore]
+async fn reconnecting_to_a_still_live_group_lands_on_its_current_layer() {
+    let config_dir = setup_content_pack_config_dir("group-layer-reconnect");
+    let _server = start_server_with_env(
+        &config_dir,
+        GROUP_LAYER_RECONNECT_ADDR,
+        false,
+        &[("WZ_LAYER_POPULATION_THRESHOLD", "1")],
+    )
+    .await;
+    wait_for_port(GROUP_LAYER_RECONNECT_ADDR).await;
+
+    let mut first = connect(&config_dir, GROUP_LAYER_RECONNECT_ADDR).await;
+    register_and_authenticate(
+        &mut first,
+        &format!("group-reconnect-a-{}", uuid::Uuid::now_v7()),
+        "hunter2",
+        _server.realm_id,
+    )
+    .await;
+    let first_entity_id = loop {
+        if let ServerMessage::Joined { entity_id, .. } = recv_world(&mut first).await {
+            break entity_id;
+        }
+    };
+
+    let second_username = format!("group-reconnect-b-{}", uuid::Uuid::now_v7());
+    let mut second = connect(&config_dir, GROUP_LAYER_RECONNECT_ADDR).await;
+    register_and_authenticate(&mut second, &second_username, "hunter2", _server.realm_id).await;
+    loop {
+        if let ServerMessage::Joined { roster, .. } = recv_world(&mut second).await {
+            // Separate layer, same as the isolation/group-join tests
+            // above — confirms the threshold really did split them
+            // before the group action below brings them together.
+            assert!(roster.is_empty(), "{roster:?}");
+            break;
+        }
+    }
+
+    send_world(
+        &mut second,
+        &ClientMessage::JoinGroupLayer {
+            other_entity_id: first_entity_id.clone(),
+        },
+    )
+    .await;
+    match recv_world(&mut second).await {
+        ServerMessage::ZoneChanged { roster, .. } => {
+            assert!(
+                roster
+                    .iter()
+                    .any(|entry| entry.entity_id == first_entity_id),
+                "{roster:?}"
+            );
+        }
+        other => panic!("expected ZoneChanged from the group-layer join, got {other:?}"),
+    }
+    // Drain first's observation of second's arrival before disconnecting
+    // second, so it doesn't confuse the reconnect roster check below.
+    match recv_world(&mut first).await {
+        ServerMessage::EntitySpawned { .. } => {}
+        other => panic!("expected second's EntitySpawned, got {other:?}"),
+    }
+
+    drop(second);
+    // Give the session task a moment to notice the disconnect and clean
+    // up before reconnecting as the same character.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let mut second = connect(&config_dir, GROUP_LAYER_RECONNECT_ADDR).await;
+    send_auth(
+        &mut second,
+        &AuthClientMessage::Login {
+            username: second_username.clone(),
+            password: "hunter2".to_string(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv_auth(&mut second).await,
+        AuthServerMessage::Authenticated { .. }
+    ));
+    select_realm(&mut second, _server.realm_id).await;
+    // Same character name resolves to the same existing character via
+    // `select_or_create_character`'s "select if it already exists"
+    // branch — the same character that was grouped, not a new one.
+    select_or_create_character(&mut second, &second_username).await;
+
+    loop {
+        if let ServerMessage::Joined { roster, .. } = recv_world(&mut second).await {
+            assert!(
+                roster
+                    .iter()
+                    .any(|entry| entry.entity_id == first_entity_id),
+                "reconnect should have landed on first's layer, not a fresh one: {roster:?}"
+            );
+            break;
         }
     }
 }
