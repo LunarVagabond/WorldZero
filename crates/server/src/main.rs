@@ -33,6 +33,9 @@
 //! - `<config_dir>/guild.schema.yaml` (see
 //!   `config/guild.schema.example.yaml`) — the declared guild rank
 //!   schema (#179)
+//! - `<config_dir>/character.archetypes.yaml` (see
+//!   `config/character.archetypes.example.yaml`) — the declared
+//!   character-archetype schema (#213/#212)
 //!
 //! Optional: `WZ_SERVER_ADDR` (default `127.0.0.1:7900`),
 //! `WZ_PLUGINS_DIR` (default `<config_dir>/plugins`) — a directory of
@@ -223,6 +226,17 @@ async fn main() {
             guild_schema_path.display()
         )
     });
+    // #213/#212 — validated at load against the same declared attribute
+    // schema `schema` names below (a clone, since `schema` itself is
+    // moved into `CharacterStore::new` shortly after).
+    let archetype_schema_path = config_dir.join("character.archetypes.yaml");
+    let archetype_schema =
+        character::ArchetypeSchema::from_file(&archetype_schema_path, &schema).unwrap_or_else(|e| {
+            panic!(
+                "failed to load the declared character archetype schema at {} (see config/character.archetypes.example.yaml): {e}",
+                archetype_schema_path.display()
+            )
+        });
     let inventory_config =
         InventoryConfig::from_env().expect("invalid WZ_INVENTORY_MAX_ITEM_TYPES");
     // #193's character-creation cap — a `server`-side policy value (like
@@ -254,6 +268,7 @@ async fn main() {
     let character_store = Arc::new(CharacterStore::new(pool.clone(), schema, inventory_config));
     let party_store = Arc::new(character::PartyStore::new(pool.clone(), party_schema));
     let guild_store = Arc::new(guild::GuildStore::new(pool.clone(), guild_schema));
+    let archetype_schema = Arc::new(archetype_schema);
 
     let realm_store = realm_directory::RealmStore::new(pool.clone());
     let realm = resolve_realm(&realm_store).await;
@@ -584,6 +599,7 @@ async fn main() {
         lease_ttl,
         realm_presence,
         max_characters_per_account,
+        archetype_schema,
         plugins: plugins.clone(),
         zones,
         default_zone_id,
