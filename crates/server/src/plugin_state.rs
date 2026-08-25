@@ -145,6 +145,15 @@ mod tests {
             .await
             .unwrap();
 
+        // #170: character.realm_id is a real foreign key now — needs an
+        // actual realms row, not just a bare UUID.
+        let realm_id = uuid::Uuid::now_v7();
+        sqlx::query("INSERT INTO realms (id, name, open_or_bound) VALUES ($1, 'Plugin State Test Realm', 'open')")
+            .bind(realm_id)
+            .execute(pool)
+            .await
+            .unwrap();
+
         let character_id = CharacterId::new();
         sqlx::query(
             "INSERT INTO characters (id, account_id, name, realm_id, zone_id) \
@@ -152,7 +161,7 @@ mod tests {
         )
         .bind(character_id.as_uuid())
         .bind(account_id.as_uuid())
-        .bind(uuid::Uuid::nil())
+        .bind(realm_id)
         .execute(pool)
         .await
         .unwrap();

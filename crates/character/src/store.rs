@@ -394,6 +394,20 @@ stats:
         .unwrap()
     }
 
+    /// A real, throwaway `realms` row (#170: `characters.realm_id` is a
+    /// real `FOREIGN KEY` now — every character-creating test needs an
+    /// actual realm to point at, not just an unregistered `RealmId::new()`).
+    async fn insert_realm(pool: &sqlx::PgPool) -> RealmId {
+        let realm_id = RealmId::new();
+        sqlx::query("INSERT INTO realms (id, name, open_or_bound) VALUES ($1, $2, 'open')")
+            .bind(realm_id.as_uuid())
+            .bind(format!("Test Realm {realm_id}"))
+            .execute(pool)
+            .await
+            .unwrap();
+        realm_id
+    }
+
     // Real Postgres — set WZ_POSTGRES_* and run with `-- --ignored`.
     // Inserts its own throwaway account (character.account_id is a real FK)
     // rather than depending on the `auth` crate just for test setup.
@@ -411,14 +425,10 @@ stats:
             .await
             .unwrap();
 
+        let realm_id = insert_realm(&pool).await;
         let store = CharacterStore::new(pool, schema(), Default::default());
         let character_id = store
-            .create(
-                account_id,
-                "Test Character",
-                RealmId::new(),
-                "greenwood-forest",
-            )
+            .create(account_id, "Test Character", realm_id, "greenwood-forest")
             .await
             .unwrap();
 
@@ -438,11 +448,12 @@ stats:
             .execute(&pool)
             .await
             .unwrap();
+        let realm_id = insert_realm(&pool).await;
 
         (
             CharacterStore::new(pool, schema(), Default::default()),
             account_id,
-            RealmId::new(),
+            realm_id,
         )
     }
 
@@ -509,8 +520,13 @@ stats:
 
         // A second character on a different realm must not be counted
         // against this one.
+        let config = PostgresConfig::from_env().expect("WZ_POSTGRES_* env vars set");
+        let pool = postgres_pool(&config, PoolOptions::default())
+            .await
+            .unwrap();
+        let other_realm_id = insert_realm(&pool).await;
         store
-            .create(account_id, "Bram", RealmId::new(), "greenwood-forest")
+            .create(account_id, "Bram", other_realm_id, "greenwood-forest")
             .await
             .unwrap();
         assert_eq!(store.count_for_realm(realm_id).await.unwrap(), 1);
@@ -614,8 +630,13 @@ stats:
             .await
             .unwrap();
         // A different realm — must never show up in the list above.
+        let config = PostgresConfig::from_env().expect("WZ_POSTGRES_* env vars set");
+        let pool = postgres_pool(&config, PoolOptions::default())
+            .await
+            .unwrap();
+        let other_realm_id = insert_realm(&pool).await;
         store
-            .create(account_id, "Elsewhere", RealmId::new(), "greenwood-forest")
+            .create(account_id, "Elsewhere", other_realm_id, "greenwood-forest")
             .await
             .unwrap();
 
@@ -696,8 +717,13 @@ stats:
             .create(account_id, "Bram", realm_id, "greenwood-forest")
             .await
             .unwrap();
+        let config = PostgresConfig::from_env().expect("WZ_POSTGRES_* env vars set");
+        let pool = postgres_pool(&config, PoolOptions::default())
+            .await
+            .unwrap();
+        let other_realm_id = insert_realm(&pool).await;
         store
-            .create(account_id, "Elsewhere", RealmId::new(), "greenwood-forest")
+            .create(account_id, "Elsewhere", other_realm_id, "greenwood-forest")
             .await
             .unwrap();
 
@@ -830,14 +856,10 @@ stats:
             .execute(&pool)
             .await
             .unwrap();
+        let realm_id = insert_realm(&pool).await;
         let store = CharacterStore::new(pool, unbounded_schema, Default::default());
         let character_id = store
-            .create(
-                account_id,
-                "Test Character",
-                RealmId::new(),
-                "greenwood-forest",
-            )
+            .create(account_id, "Test Character", realm_id, "greenwood-forest")
             .await
             .unwrap();
 
