@@ -31,6 +31,9 @@ use std::time::Duration;
 use auth::gateway_protocol::{
     ClientMessage as AuthClientMessage, ServerMessage as AuthServerMessage,
 };
+use character_protocol_support::{
+    ClientMessage as CharacterClientMessage, ServerMessage as CharacterServerMessage,
+};
 use futures_util::{SinkExt, StreamExt};
 use realm_protocol_support::{
     ClientMessage as RealmClientMessage, ServerMessage as RealmServerMessage,
@@ -47,6 +50,9 @@ mod server_test_support;
 #[path = "../src/realm_protocol.rs"]
 mod realm_protocol_support;
 
+#[path = "../src/character_protocol.rs"]
+mod character_protocol_support;
+
 const ADDR: &str = "127.0.0.1:7910";
 const CHAT_ADDR: &str = "127.0.0.1:7911";
 const CHAT_DISABLED_ADDR: &str = "127.0.0.1:7912";
@@ -60,6 +66,8 @@ const OPEN_LEASE_ADDR: &str = "127.0.0.1:7923";
 const BOUND_REALM_ADDR: &str = "127.0.0.1:7924";
 const REALM_LIST_ADDR: &str = "127.0.0.1:7925";
 const REALM_MISMATCH_ADDR: &str = "127.0.0.1:7926";
+const MULTI_CHARACTER_ADDR: &str = "127.0.0.1:7927";
+const CHARACTER_CAP_ADDR: &str = "127.0.0.1:7928";
 
 struct ServerProcess {
     child: Child,
@@ -269,6 +277,62 @@ async fn select_realm(stream: &mut ClientStream, realm_id: common::id::RealmId) 
     ));
 }
 
+async fn send_character(stream: &mut ClientStream, message: &CharacterClientMessage) {
+    stream.send(message.into_envelope().unwrap()).await.unwrap();
+}
+
+async fn recv_character(stream: &mut ClientStream) -> CharacterServerMessage {
+    let envelope = tokio::time::timeout(STEP_TIMEOUT, stream.next())
+        .await
+        .expect("timed out waiting for a character response")
+        .expect("connection closed")
+        .unwrap();
+    CharacterServerMessage::from_envelope(&envelope).unwrap()
+}
+
+/// Character selection (#193) — creates a character named `name` if the
+/// account doesn't have one by that name yet on the already-selected
+/// realm, otherwise selects the existing one, then confirms the
+/// selection. Mirrors Phase 1's old "one auto-created character per
+/// account" behavior for tests that don't care about multi-character
+/// specifics; the dedicated multi-character tests below drive
+/// `ListCharacters`/`CreateCharacter`/`SelectCharacter` directly instead.
+async fn select_or_create_character(stream: &mut ClientStream, name: &str) -> String {
+    send_character(stream, &CharacterClientMessage::ListCharacters).await;
+    let characters = match recv_character(stream).await {
+        CharacterServerMessage::CharacterList { characters } => characters,
+        other => panic!("expected a CharacterList, got {other:?}"),
+    };
+    let character_id = if let Some(existing) = characters.into_iter().find(|c| c.name == name) {
+        existing.character_id
+    } else {
+        send_character(
+            stream,
+            &CharacterClientMessage::CreateCharacter {
+                name: name.to_string(),
+            },
+        )
+        .await;
+        match recv_character(stream).await {
+            CharacterServerMessage::CharacterCreated { character_id } => character_id,
+            other => panic!("expected a CharacterCreated, got {other:?}"),
+        }
+    };
+
+    send_character(
+        stream,
+        &CharacterClientMessage::SelectCharacter {
+            character_id: character_id.clone(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv_character(stream).await,
+        CharacterServerMessage::CharacterSelected { .. }
+    ));
+    character_id
+}
+
 async fn send_world(stream: &mut ClientStream, message: &ClientMessage) {
     stream.send(message.into_envelope().unwrap()).await.unwrap();
 }
@@ -323,6 +387,7 @@ async fn register_and_authenticate(
         AuthServerMessage::Authenticated { .. }
     ));
     select_realm(stream, realm_id).await;
+    select_or_create_character(stream, username).await;
 }
 
 /// Shared per-test config dir: zone manifest, attribute schema, and a
@@ -525,6 +590,7 @@ async fn connect_register_move_and_persist_across_reconnect() {
         AuthServerMessage::Authenticated { .. }
     ));
     select_realm(&mut stream, _server.realm_id).await;
+    select_or_create_character(&mut stream, &username).await;
 
     let own_entity_id = loop {
         if let ServerMessage::Joined {
@@ -597,7 +663,7 @@ async fn connect_register_move_and_persist_across_reconnect() {
     send_auth(
         &mut stream,
         &AuthClientMessage::Login {
-            username,
+            username: username.clone(),
             password: password.to_string(),
         },
     )
@@ -607,6 +673,10 @@ async fn connect_register_move_and_persist_across_reconnect() {
         AuthServerMessage::Authenticated { .. }
     ));
     select_realm(&mut stream, _server.realm_id).await;
+    // Same character name as the first connection created — resolves to
+    // the same existing character via `select_or_create_character`'s
+    // "select if it already exists" branch, not a fresh one.
+    select_or_create_character(&mut stream, &username).await;
 
     loop {
         if let ServerMessage::Joined { x, y, .. } = recv_world(&mut stream).await {
@@ -651,6 +721,7 @@ async fn player_join_and_leave_hooks_fire_for_real() {
         AuthServerMessage::Authenticated { .. }
     ));
     select_realm(&mut stream, _server.realm_id).await;
+    select_or_create_character(&mut stream, &username).await;
 
     let own_entity_id = loop {
         if let ServerMessage::Joined { entity_id, .. } = recv_world(&mut stream).await {
@@ -676,10 +747,11 @@ async fn player_join_and_leave_hooks_fire_for_real() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     let mut stream = connect(&config_dir, PLAYER_SESSION_ADDR).await;
+    let second_username = format!("smoke-{}", uuid::Uuid::now_v7());
     send_auth(
         &mut stream,
         &AuthClientMessage::Register {
-            username: format!("smoke-{}", uuid::Uuid::now_v7()),
+            username: second_username.clone(),
             password: password.to_string(),
         },
     )
@@ -689,6 +761,7 @@ async fn player_join_and_leave_hooks_fire_for_real() {
         AuthServerMessage::Authenticated { .. }
     ));
     select_realm(&mut stream, _server.realm_id).await;
+    select_or_create_character(&mut stream, &second_username).await;
     loop {
         if let ServerMessage::Joined { .. } = recv_world(&mut stream).await {
             break;
@@ -1442,11 +1515,29 @@ async fn a_second_login_to_the_same_open_realm_character_is_rejected_while_the_f
         AuthServerMessage::Authenticated { .. }
     ));
     select_realm(&mut second, _server.realm_id).await;
-    match recv_auth(&mut second).await {
-        AuthServerMessage::Error { message } => {
+
+    // `authorize_login` now runs at `SelectCharacter` time (#193), not
+    // right after realm selection — list, then select the same character
+    // the first connection is using, and expect that specific selection
+    // to be rejected.
+    send_character(&mut second, &CharacterClientMessage::ListCharacters).await;
+    let character_id = match recv_character(&mut second).await {
+        CharacterServerMessage::CharacterList { characters } => {
+            assert_eq!(characters.len(), 1, "{characters:?}");
+            characters[0].character_id.clone()
+        }
+        other => panic!("expected a CharacterList, got {other:?}"),
+    };
+    send_character(
+        &mut second,
+        &CharacterClientMessage::SelectCharacter { character_id },
+    )
+    .await;
+    match recv_character(&mut second).await {
+        CharacterServerMessage::Error { message } => {
             assert!(message.contains("already logged in elsewhere"), "{message}");
         }
-        other => panic!("expected the second login to be rejected, got {other:?}"),
+        other => panic!("expected the second selection to be rejected, got {other:?}"),
     }
 }
 
@@ -1493,14 +1584,15 @@ async fn a_bound_realm_login_resolves_and_authorizes_through_the_real_policy() {
     // one), and persist.
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // Reconnect: resolved via `login_policy::resolve_character`'s bound
-    // branch, then authorized — the same character, not a freshly
-    // auto-created one.
+    // Reconnect: listed via `login_policy::list_characters`'s bound
+    // branch, then selected and authorized — the same character, not a
+    // freshly created one (`select_or_create_character` finds it by name
+    // rather than creating a second one).
     let mut stream = connect(&config_dir, BOUND_REALM_ADDR).await;
     send_auth(
         &mut stream,
         &AuthClientMessage::Login {
-            username,
+            username: username.clone(),
             password: password.to_string(),
         },
     )
@@ -1510,6 +1602,7 @@ async fn a_bound_realm_login_resolves_and_authorizes_through_the_real_policy() {
         AuthServerMessage::Authenticated { .. }
     ));
     select_realm(&mut stream, _server.realm_id).await;
+    select_or_create_character(&mut stream, &username).await;
     assert!(matches!(
         recv_world(&mut stream).await,
         ServerMessage::Joined { .. }
@@ -1633,4 +1726,269 @@ async fn select_realm_rejects_a_realm_this_process_does_not_serve() {
         matches!(closed, None | Some(Err(_))),
         "expected the connection to close after a rejected realm selection, got {closed:?}"
     );
+}
+
+/// #193, end to end, with more than one character on one account (the
+/// ticket's own acceptance criteria): list, create two, list again, then
+/// prove selection actually determines *which* character's state loads
+/// — not just "a" character — by moving one of the two, reconnecting,
+/// and confirming each selection loads that specific character's own
+/// position.
+#[tokio::test]
+#[ignore]
+async fn an_account_can_create_list_and_select_between_multiple_characters() {
+    let config_dir = setup_config_dir("multi-character");
+    let _server = start_server(&config_dir, MULTI_CHARACTER_ADDR).await;
+    wait_for_port(MULTI_CHARACTER_ADDR).await;
+
+    let username = format!("multi-character-{}", uuid::Uuid::now_v7());
+    let password = "hunter2";
+
+    let mut stream = connect(&config_dir, MULTI_CHARACTER_ADDR).await;
+    send_auth(
+        &mut stream,
+        &AuthClientMessage::Register {
+            username: username.clone(),
+            password: password.to_string(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv_auth(&mut stream).await,
+        AuthServerMessage::Authenticated { .. }
+    ));
+    select_realm(&mut stream, _server.realm_id).await;
+
+    // No characters yet.
+    send_character(&mut stream, &CharacterClientMessage::ListCharacters).await;
+    match recv_character(&mut stream).await {
+        CharacterServerMessage::CharacterList { characters } => {
+            assert!(characters.is_empty(), "{characters:?}");
+        }
+        other => panic!("expected an empty CharacterList, got {other:?}"),
+    }
+
+    // Create two.
+    send_character(
+        &mut stream,
+        &CharacterClientMessage::CreateCharacter {
+            name: "Aria".to_string(),
+        },
+    )
+    .await;
+    let aria_id = match recv_character(&mut stream).await {
+        CharacterServerMessage::CharacterCreated { character_id } => character_id,
+        other => panic!("expected a CharacterCreated, got {other:?}"),
+    };
+    send_character(
+        &mut stream,
+        &CharacterClientMessage::CreateCharacter {
+            name: "Bram".to_string(),
+        },
+    )
+    .await;
+    let bram_id = match recv_character(&mut stream).await {
+        CharacterServerMessage::CharacterCreated { character_id } => character_id,
+        other => panic!("expected a CharacterCreated, got {other:?}"),
+    };
+    assert_ne!(aria_id, bram_id);
+
+    // List reflects both.
+    send_character(&mut stream, &CharacterClientMessage::ListCharacters).await;
+    match recv_character(&mut stream).await {
+        CharacterServerMessage::CharacterList { characters } => {
+            let mut names: Vec<_> = characters.iter().map(|c| c.name.clone()).collect();
+            names.sort();
+            assert_eq!(
+                names,
+                vec!["Aria".to_string(), "Bram".to_string()],
+                "{characters:?}"
+            );
+        }
+        other => panic!("expected a CharacterList, got {other:?}"),
+    }
+
+    // Select Bram specifically, move it, disconnect.
+    send_character(
+        &mut stream,
+        &CharacterClientMessage::SelectCharacter {
+            character_id: bram_id.clone(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv_character(&mut stream).await,
+        CharacterServerMessage::CharacterSelected { .. }
+    ));
+    assert!(matches!(
+        recv_world(&mut stream).await,
+        ServerMessage::Joined { .. }
+    ));
+    const MOVE_TO: (f64, f64) = (0.3, 0.2);
+    send_world(
+        &mut stream,
+        &ClientMessage::Move {
+            x: MOVE_TO.0,
+            y: MOVE_TO.1,
+        },
+    )
+    .await;
+    loop {
+        match recv_world(&mut stream).await {
+            ServerMessage::Moved { x, y, .. } => {
+                assert_eq!((x, y), MOVE_TO);
+                break;
+            }
+            ServerMessage::Rejected { reason } => panic!("move rejected: {reason}"),
+            _ => {}
+        }
+    }
+    drop(stream);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Reconnect, select Aria — untouched by Bram's move, still at origin.
+    // Proves selection determines *which* character's state loads.
+    let mut stream = connect(&config_dir, MULTI_CHARACTER_ADDR).await;
+    send_auth(
+        &mut stream,
+        &AuthClientMessage::Login {
+            username: username.clone(),
+            password: password.to_string(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv_auth(&mut stream).await,
+        AuthServerMessage::Authenticated { .. }
+    ));
+    select_realm(&mut stream, _server.realm_id).await;
+    send_character(
+        &mut stream,
+        &CharacterClientMessage::SelectCharacter {
+            character_id: aria_id,
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv_character(&mut stream).await,
+        CharacterServerMessage::CharacterSelected { .. }
+    ));
+    match recv_world(&mut stream).await {
+        ServerMessage::Joined { x, y, .. } => assert_eq!(
+            (x, y),
+            (0.0, 0.0),
+            "Aria should be untouched by Bram's move"
+        ),
+        other => panic!("expected Joined, got {other:?}"),
+    }
+    drop(stream);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Reconnect once more, select Bram — should be where it was moved to.
+    let mut stream = connect(&config_dir, MULTI_CHARACTER_ADDR).await;
+    send_auth(
+        &mut stream,
+        &AuthClientMessage::Login {
+            username,
+            password: password.to_string(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv_auth(&mut stream).await,
+        AuthServerMessage::Authenticated { .. }
+    ));
+    select_realm(&mut stream, _server.realm_id).await;
+    send_character(
+        &mut stream,
+        &CharacterClientMessage::SelectCharacter {
+            character_id: bram_id,
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv_character(&mut stream).await,
+        CharacterServerMessage::CharacterSelected { .. }
+    ));
+    match recv_world(&mut stream).await {
+        ServerMessage::Joined { x, y, .. } => {
+            assert_eq!((x, y), MOVE_TO, "Bram should be where it was moved to")
+        }
+        other => panic!("expected Joined, got {other:?}"),
+    }
+}
+
+/// #193's character-creation cap — a third `CreateCharacter` is rejected
+/// once `WZ_CHARACTER_MAX_PER_ACCOUNT` is reached, and the connection
+/// stays open and usable afterward (the account can still select one of
+/// its existing characters).
+#[tokio::test]
+#[ignore]
+async fn character_creation_is_rejected_once_the_per_account_cap_is_reached() {
+    let config_dir = setup_config_dir("character-cap");
+    let _server = start_server_with_env(
+        &config_dir,
+        CHARACTER_CAP_ADDR,
+        true,
+        &[("WZ_CHARACTER_MAX_PER_ACCOUNT", "2")],
+    )
+    .await;
+    wait_for_port(CHARACTER_CAP_ADDR).await;
+
+    let username = format!("character-cap-{}", uuid::Uuid::now_v7());
+    let password = "hunter2";
+
+    let mut stream = connect(&config_dir, CHARACTER_CAP_ADDR).await;
+    send_auth(
+        &mut stream,
+        &AuthClientMessage::Register {
+            username: username.clone(),
+            password: password.to_string(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv_auth(&mut stream).await,
+        AuthServerMessage::Authenticated { .. }
+    ));
+    select_realm(&mut stream, _server.realm_id).await;
+
+    for name in ["Aria", "Bram"] {
+        send_character(
+            &mut stream,
+            &CharacterClientMessage::CreateCharacter {
+                name: name.to_string(),
+            },
+        )
+        .await;
+        assert!(matches!(
+            recv_character(&mut stream).await,
+            CharacterServerMessage::CharacterCreated { .. }
+        ));
+    }
+
+    // A third exceeds the cap.
+    send_character(
+        &mut stream,
+        &CharacterClientMessage::CreateCharacter {
+            name: "Cato".to_string(),
+        },
+    )
+    .await;
+    match recv_character(&mut stream).await {
+        CharacterServerMessage::Error { message } => {
+            assert!(message.contains("character limit reached"), "{message}");
+        }
+        other => panic!("expected the cap to reject creation, got {other:?}"),
+    }
+
+    // The connection is still open and usable — the account can still
+    // select one of its existing characters.
+    send_character(&mut stream, &CharacterClientMessage::ListCharacters).await;
+    match recv_character(&mut stream).await {
+        CharacterServerMessage::CharacterList { characters } => {
+            assert_eq!(characters.len(), 2, "{characters:?}");
+        }
+        other => panic!("expected a CharacterList, got {other:?}"),
+    }
 }

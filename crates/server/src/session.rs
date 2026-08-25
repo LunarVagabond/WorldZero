@@ -16,6 +16,7 @@ use tokio::sync::mpsc;
 use tokio_util::codec::Framed;
 use world::EntityKind;
 
+use crate::character_protocol;
 use crate::chat_session::{self, ChatDeps};
 use crate::realm_protocol;
 use crate::session_protocol::{ClientMessage, RosterEntry, ServerMessage, WORLD_MESSAGE_TYPE};
@@ -91,6 +92,11 @@ pub struct SessionDeps {
     /// regardless of `realm_open_or_bound` (docs/specs/Data_Model_Spec.md:
     /// "a live-connection count needs to work for bound realms too").
     pub realm_presence: Arc<realm_directory::RealmPresence>,
+    /// #193's character-creation cap, per account per realm
+    /// (`WZ_CHARACTER_MAX_PER_ACCOUNT`) — enforced here, not inside
+    /// `character::CharacterStore::create` itself (see `main`'s doc
+    /// comment on why this stays a `server`-side policy value).
+    pub max_characters_per_account: u32,
     /// Every zone-service instance this process runs (#45) — a
     /// connection looks up its current zone's `WorldHandle`/`Sessions`
     /// here at join time, and again on every `ZoneChanged` handoff.
@@ -238,7 +244,6 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
         }
     }
 
-    let character = resolve_or_create_character(&deps, account_id, &username).await?;
     // #21's lease is keyed by `zone_service_id`, which in the real
     // multi-process model (#130) names a whole zone-service instance —
     // but within *this* combined process, the thing that needs to be
@@ -256,19 +261,128 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
     // any other concurrent one.
     let entity_id = EntityId::new();
     let lease_holder_id = entity_id.to_string();
-    if let Err(e) = deps
-        .login_policy
-        .authorize_login(
-            character.id,
-            character.realm_id,
-            deps.realm_id,
-            &lease_holder_id,
-        )
-        .await
-    {
-        send_auth_error(&mut sink, e.to_string()).await?;
-        return Ok(());
-    }
+
+    // Character list/create/select (#193) — unlike realm selection above,
+    // a rejected `SelectCharacter` (e.g. `authorize_login` finding this
+    // particular character already leased elsewhere) doesn't close the
+    // connection: the account may own other characters that aren't
+    // contended, so the loop keeps going rather than forcing a full
+    // reconnect just to try a different one.
+    let character = loop {
+        let Some(frame) = stream.next().await else {
+            return Ok(());
+        };
+        let envelope = frame.map_err(|e| Error::wrap("server", "connection error", e))?;
+        let character_message = match character_protocol::ClientMessage::from_envelope(&envelope) {
+            Ok(m) => m,
+            Err(e) => {
+                send_character_error(&mut sink, e.to_string()).await?;
+                return Ok(());
+            }
+        };
+        match character_message {
+            character_protocol::ClientMessage::ListCharacters => {
+                let characters = deps
+                    .login_policy
+                    .list_characters(&deps.character_store, account_id, deps.realm_id)
+                    .await?
+                    .into_iter()
+                    .map(|c| character_protocol::CharacterSummary {
+                        character_id: c.id.to_string(),
+                        name: c.name,
+                        zone_id: c.zone_id,
+                    })
+                    .collect();
+                send_character(
+                    &mut sink,
+                    &character_protocol::ServerMessage::CharacterList { characters },
+                )
+                .await?;
+            }
+            character_protocol::ClientMessage::CreateCharacter { name } => {
+                if name.trim().is_empty() {
+                    send_character_error(&mut sink, "character name must not be empty".to_string())
+                        .await?;
+                    continue;
+                }
+                let existing = deps
+                    .character_store
+                    .count_for_account(account_id, deps.realm_id)
+                    .await?;
+                if existing >= i64::from(deps.max_characters_per_account) {
+                    send_character_error(
+                        &mut sink,
+                        format!(
+                            "character limit reached: {existing} already exist on this realm, \
+                             limit is {} (WZ_CHARACTER_MAX_PER_ACCOUNT)",
+                            deps.max_characters_per_account
+                        ),
+                    )
+                    .await?;
+                    continue;
+                }
+                match deps
+                    .character_store
+                    .create(account_id, &name, deps.realm_id, &deps.default_zone_id)
+                    .await
+                {
+                    Ok(id) => {
+                        send_character(
+                            &mut sink,
+                            &character_protocol::ServerMessage::CharacterCreated {
+                                character_id: id.to_string(),
+                            },
+                        )
+                        .await?;
+                    }
+                    Err(e) => send_character_error(&mut sink, e.to_string()).await?,
+                }
+            }
+            character_protocol::ClientMessage::SelectCharacter { character_id } => {
+                let Ok(parsed_id) = character_id.parse::<CharacterId>() else {
+                    send_character_error(
+                        &mut sink,
+                        format!("{character_id:?} is not a valid character id"),
+                    )
+                    .await?;
+                    continue;
+                };
+                let Some(character) = deps
+                    .character_store
+                    .get_for_account(parsed_id, account_id)
+                    .await?
+                else {
+                    send_character_error(
+                        &mut sink,
+                        format!("{character_id:?} is not one of your characters"),
+                    )
+                    .await?;
+                    continue;
+                };
+                if let Err(e) = deps
+                    .login_policy
+                    .authorize_login(
+                        character.id,
+                        character.realm_id,
+                        deps.realm_id,
+                        &lease_holder_id,
+                    )
+                    .await
+                {
+                    send_character_error(&mut sink, e.to_string()).await?;
+                    continue;
+                }
+                send_character(
+                    &mut sink,
+                    &character_protocol::ServerMessage::CharacterSelected {
+                        character_id: character.id.to_string(),
+                    },
+                )
+                .await?;
+                break character;
+            }
+        }
+    };
     let character_id = character.id;
     let position = (character.position.0, character.position.1);
 
@@ -604,39 +718,6 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
     Ok(())
 }
 
-/// Resolves `account_id`'s character for a login into `deps.realm_id`,
-/// using `login_policy::LoginPolicy::resolve_character` (#52) rather than
-/// a plain realm-scoped lookup — that's what makes an open-realm
-/// character findable by an account regardless of which of the group's
-/// open realms it was originally created on. Still auto-creates on a
-/// miss, same as Phase 1's behavior, just via the policy-aware lookup
-/// first.
-async fn resolve_or_create_character(
-    deps: &SessionDeps,
-    account_id: AccountId,
-    username: &str,
-) -> Result<character::CharacterSummary> {
-    if let Some(existing) = deps
-        .login_policy
-        .resolve_character(&deps.character_store, account_id, deps.realm_id)
-        .await?
-    {
-        return Ok(existing);
-    }
-
-    let id = deps
-        .character_store
-        .create(account_id, username, deps.realm_id, &deps.default_zone_id)
-        .await?;
-    Ok(character::CharacterSummary {
-        id,
-        name: username.to_string(),
-        realm_id: deps.realm_id,
-        zone_id: deps.default_zone_id.clone(),
-        position: (0.0, 0.0, 0.0),
-    })
-}
-
 /// Matches a chat `Send`'s `body` against `declared_commands` (a
 /// plugin's `plugin.toml` `chat_commands`, without leading slashes) —
 /// `body` must start with `/`, and everything up to the first space (or
@@ -765,6 +846,20 @@ async fn send_realm(sink: &mut ServerSink, message: &realm_protocol::ServerMessa
 
 async fn send_realm_error(sink: &mut ServerSink, message: String) -> Result<()> {
     send_realm(sink, &realm_protocol::ServerMessage::Error { message }).await
+}
+
+async fn send_character(
+    sink: &mut ServerSink,
+    message: &character_protocol::ServerMessage,
+) -> Result<()> {
+    let envelope = message.into_envelope()?;
+    sink.send(envelope)
+        .await
+        .map_err(|e| Error::wrap("server", "failed to send to client", e))
+}
+
+async fn send_character_error(sink: &mut ServerSink, message: String) -> Result<()> {
+    send_character(sink, &character_protocol::ServerMessage::Error { message }).await
 }
 
 /// Builds #192's `RealmList` entry for the one realm this process

@@ -143,6 +143,38 @@ impl LoginPolicy {
             }
         }
     }
+
+    /// The list-all counterpart to [`Self::resolve_character`] (#193) —
+    /// same policy-aware branch, same "which lookup matches this realm's
+    /// policy" reasoning, just returning every character instead of the
+    /// single most-recent one. Errs if `target_realm_id` doesn't name a
+    /// real realm.
+    pub async fn list_characters(
+        &self,
+        character_store: &CharacterStore,
+        account_id: AccountId,
+        target_realm_id: RealmId,
+    ) -> Result<Vec<CharacterSummary>> {
+        let realm = self.realms.get(target_realm_id).await?.ok_or_else(|| {
+            Error::new(
+                "realm-directory",
+                format!("no realm with id {target_realm_id}"),
+            )
+        })?;
+
+        match realm.open_or_bound {
+            OpenOrBound::Bound => {
+                character_store
+                    .list_by_account(account_id, target_realm_id)
+                    .await
+            }
+            OpenOrBound::Open => {
+                character_store
+                    .list_by_account_in_open_realms(account_id)
+                    .await
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -432,5 +464,67 @@ mod tests {
             .authorize_login(character_id, resolved.realm_id, realm_b, "zone-service-b")
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn list_characters_on_a_bound_realm_never_includes_another_realms_character() {
+        let pool = pool().await;
+        let realms = RealmStore::new(pool.clone());
+        let home_realm_id = realms
+            .create("Bound Home List", OpenOrBound::Bound)
+            .await
+            .unwrap();
+        let other_realm_id = realms
+            .create("Bound Other List", OpenOrBound::Bound)
+            .await
+            .unwrap();
+        let account_id = create_account(&pool).await;
+        let store = character_store(pool.clone());
+        let character_id = store
+            .create(account_id, "Aria", home_realm_id, "greenwood-forest")
+            .await
+            .unwrap();
+        store
+            .create(account_id, "Elsewhere", other_realm_id, "greenwood-forest")
+            .await
+            .unwrap();
+
+        let listed = policy(pool)
+            .list_characters(&store, account_id, home_realm_id)
+            .await
+            .unwrap();
+        assert_eq!(listed.len(), 1, "{listed:?}");
+        assert_eq!(listed[0].id, character_id);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn list_characters_on_an_open_realm_spans_the_whole_group() {
+        let pool = pool().await;
+        let realms = RealmStore::new(pool.clone());
+        let home_realm_id = realms
+            .create("Open Home List", OpenOrBound::Open)
+            .await
+            .unwrap();
+        let other_realm_id = realms
+            .create("Open Other List", OpenOrBound::Open)
+            .await
+            .unwrap();
+        let account_id = create_account(&pool).await;
+        let store = character_store(pool.clone());
+        let character_id = store
+            .create(account_id, "Aria", home_realm_id, "greenwood-forest")
+            .await
+            .unwrap();
+
+        // Listed via the *other* open realm — same "any realm in the
+        // group" reach as `resolve_character`.
+        let listed = policy(pool)
+            .list_characters(&store, account_id, other_realm_id)
+            .await
+            .unwrap();
+        assert_eq!(listed.len(), 1, "{listed:?}");
+        assert_eq!(listed[0].id, character_id);
     }
 }

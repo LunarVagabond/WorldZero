@@ -47,15 +47,19 @@
 //! consulted while layering is enabled; see `zone_registry`'s doc
 //! comment), `WZ_REALM_LEASE_TTL_SECS` (default `60` — #21's open-realm
 //! session lease TTL; only consulted when `WZ_REALM_ID` names an `open`
-//! realm).
+//! realm), `WZ_CHARACTER_MAX_PER_ACCOUNT` (default `5` — #193's
+//! character-creation cap, per account per realm).
 //!
 //! A connected client speaks `auth::gateway_protocol` first (login or
-//! register), then `server::session_protocol` (move, see other entities
-//! move, zone transitions) and, when chat is enabled,
+//! register), then `server::realm_protocol` (realm discovery/selection,
+//! #192), then `server::character_protocol` (character list/create/
+//! select, #193), then `server::session_protocol` (move, see other
+//! entities move, zone transitions) and, when chat is enabled,
 //! `chat::gateway_protocol` (join/leave/send) over the same connection —
 //! same gateway-first-authenticate pattern as `chat`'s standalone
 //! gateway demo (docs/specs/Auth_Spec.md, "Gateway handshake").
 
+mod character_protocol;
 mod chat_session;
 mod plugin_startup;
 mod plugin_state;
@@ -98,6 +102,12 @@ const DEFAULT_LAYER_POPULATION_THRESHOLD: usize = 200;
 /// runs at (`lease_ttl / 3`) so a couple of missed renewals in a row
 /// don't spuriously expire a still-connected character's lease.
 const DEFAULT_LEASE_TTL_SECS: u64 = 60;
+
+/// Default cap on how many characters one account may create per realm
+/// (#193) — generous, same "solid default, never a wall" spirit as
+/// `character::InventoryConfig`'s own default; a self-hoster with an
+/// unusual policy overrides via `WZ_CHARACTER_MAX_PER_ACCOUNT`.
+const DEFAULT_MAX_CHARACTERS_PER_ACCOUNT: u32 = 5;
 
 /// Resolves `WZ_REALM_ID` against `realm-directory::RealmStore` — the
 /// single realm this `server` process serves (#136; a multi-realm
@@ -192,6 +202,18 @@ async fn main() {
     });
     let inventory_config =
         InventoryConfig::from_env().expect("invalid WZ_INVENTORY_MAX_ITEM_TYPES");
+    // #193's character-creation cap — a `server`-side policy value (like
+    // `WZ_LAYER_POPULATION_THRESHOLD`), not pushed down into
+    // `character::CharacterStore` itself, since `CharacterStore::create`
+    // stays a raw insert with no policy opinion of its own (matching
+    // `RealmStore`/`character`'s existing "storage vs. policy" split).
+    let max_characters_per_account: u32 = std::env::var("WZ_CHARACTER_MAX_PER_ACCOUNT")
+        .ok()
+        .map(|v| {
+            v.parse()
+                .expect("WZ_CHARACTER_MAX_PER_ACCOUNT must be a positive integer")
+        })
+        .unwrap_or(DEFAULT_MAX_CHARACTERS_PER_ACCOUNT);
 
     let account_store: Arc<dyn auth::AccountStore> =
         Arc::new(auth::PostgresAccountStore::new(pool.clone()));
@@ -520,6 +542,7 @@ async fn main() {
         character_lease,
         lease_ttl,
         realm_presence,
+        max_characters_per_account,
         zones,
         default_zone_id,
         entity_characters,
