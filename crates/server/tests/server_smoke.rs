@@ -80,6 +80,7 @@ const PARTY_DECLINE_ADDR: &str = "127.0.0.1:7937";
 const PARTY_LEAVE_ADDR: &str = "127.0.0.1:7938";
 const GUILD_CHAT_SYNC_ADDR: &str = "127.0.0.1:7939";
 const GUILD_NO_CHAT_ADDR: &str = "127.0.0.1:7940";
+const ARCHETYPE_ADDR: &str = "127.0.0.1:7941";
 
 struct ServerProcess {
     child: Child,
@@ -390,6 +391,7 @@ async fn select_or_create_character(stream: &mut ClientStream, name: &str) -> St
             stream,
             &CharacterClientMessage::CreateCharacter {
                 name: name.to_string(),
+                archetype_key: String::new(),
             },
         )
         .await;
@@ -502,6 +504,12 @@ fn setup_config_dir(test_name: &str) -> PathBuf {
         config_dir.join("guild.schema.yaml"),
     )
     .unwrap();
+    std::fs::copy(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../config/character.archetypes.example.yaml"),
+        config_dir.join("character.archetypes.yaml"),
+    )
+    .unwrap();
     // `<config_dir>/plugins/test-plugin/{plugin.toml,test_plugin.wasm}`
     // (#152's discovery convention) — only written if the compiled wasm
     // fixture actually exists, same "gracefully run with no plugin
@@ -579,6 +587,12 @@ fn setup_multi_plugin_config_dir(test_name: &str) -> PathBuf {
     std::fs::copy(
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../config/guild.schema.example.yaml"),
         config_dir.join("guild.schema.yaml"),
+    )
+    .unwrap();
+    std::fs::copy(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../config/character.archetypes.example.yaml"),
+        config_dir.join("character.archetypes.yaml"),
     )
     .unwrap();
 
@@ -669,6 +683,11 @@ fn setup_content_pack_config_dir(test_name: &str) -> PathBuf {
     std::fs::copy(
         repo_config_dir.join("guild.schema.example.yaml"),
         config_dir.join("guild.schema.yaml"),
+    )
+    .unwrap();
+    std::fs::copy(
+        repo_config_dir.join("character.archetypes.example.yaml"),
+        config_dir.join("character.archetypes.yaml"),
     )
     .unwrap();
     config_dir
@@ -1900,6 +1919,7 @@ async fn an_account_can_create_list_and_select_between_multiple_characters() {
         &mut stream,
         &CharacterClientMessage::CreateCharacter {
             name: "Aria".to_string(),
+            archetype_key: String::new(),
         },
     )
     .await;
@@ -1911,6 +1931,7 @@ async fn an_account_can_create_list_and_select_between_multiple_characters() {
         &mut stream,
         &CharacterClientMessage::CreateCharacter {
             name: "Bram".to_string(),
+            archetype_key: String::new(),
         },
     )
     .await;
@@ -2086,6 +2107,7 @@ async fn character_creation_is_rejected_once_the_per_account_cap_is_reached() {
             &mut stream,
             &CharacterClientMessage::CreateCharacter {
                 name: name.to_string(),
+                archetype_key: String::new(),
             },
         )
         .await;
@@ -2100,6 +2122,7 @@ async fn character_creation_is_rejected_once_the_per_account_cap_is_reached() {
         &mut stream,
         &CharacterClientMessage::CreateCharacter {
             name: "Cato".to_string(),
+            archetype_key: String::new(),
         },
     )
     .await;
@@ -2158,6 +2181,7 @@ async fn plugin_sets_a_starting_stat_via_on_character_create() {
         &mut stream,
         &CharacterClientMessage::CreateCharacter {
             name: "Aria".to_string(),
+            archetype_key: String::new(),
         },
     )
     .await;
@@ -2172,6 +2196,122 @@ async fn plugin_sets_a_starting_stat_via_on_character_create() {
     // elsewhere in this suite, just via the character-id-scoped variant.
     let stat = read_character_stat(&character_id, "reputation.ironclad_guild").await;
     assert_eq!(stat, Some(25), "starting stat should be set pre-spawn");
+}
+
+/// #213/#212, end to end through the real `server` binary:
+/// `ListCharacterOptions` returns the declared archetype list from
+/// `config/character.archetypes.example.yaml`, and `CreateCharacter`
+/// with an explicit `archetype_key` applies that archetype's starting
+/// stats — observed here the same way `plugin_sets_a_starting_stat_via_on_character_create`
+/// does, by reading `characters.stats` straight out of Postgres right
+/// after `CharacterCreated` comes back.
+#[tokio::test]
+#[ignore]
+async fn list_character_options_and_create_with_an_archetype() {
+    let config_dir = setup_config_dir("archetype");
+    let _server = start_server(&config_dir, ARCHETYPE_ADDR).await;
+    wait_for_port(ARCHETYPE_ADDR).await;
+
+    let username = format!("archetype-{}", uuid::Uuid::now_v7());
+    let password = "hunter2";
+
+    let mut stream = connect(&config_dir, ARCHETYPE_ADDR).await;
+    send_auth(
+        &mut stream,
+        &AuthClientMessage::Register {
+            username: username.clone(),
+            password: password.to_string(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv_auth(&mut stream).await,
+        AuthServerMessage::Authenticated { .. }
+    ));
+    select_realm(&mut stream, _server.realm_id).await;
+
+    // Reachable before any character exists — same pre-join phase
+    // ListCharacters already is.
+    send_character(&mut stream, &CharacterClientMessage::ListCharacterOptions).await;
+    let archetypes = match recv_character(&mut stream).await {
+        CharacterServerMessage::CharacterOptions { archetypes } => archetypes,
+        other => panic!("expected CharacterOptions, got {other:?}"),
+    };
+    let mut keys: Vec<_> = archetypes.iter().map(|a| a.key.clone()).collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        vec![
+            "mage".to_string(),
+            "rogue".to_string(),
+            "warrior".to_string()
+        ],
+        "{archetypes:?}"
+    );
+    let mage = archetypes.iter().find(|a| a.key == "mage").unwrap();
+    assert_eq!(mage.name, "Mage");
+    assert!(!mage.description.is_empty());
+
+    // Creating with an explicit archetype_key applies that archetype's
+    // preset (hp: 50, mana: 50 per config/character.archetypes.example.yaml).
+    send_character(
+        &mut stream,
+        &CharacterClientMessage::CreateCharacter {
+            name: "Elowen".to_string(),
+            archetype_key: "mage".to_string(),
+        },
+    )
+    .await;
+    let mage_id = match recv_character(&mut stream).await {
+        CharacterServerMessage::CharacterCreated { character_id } => character_id,
+        other => panic!("expected a CharacterCreated, got {other:?}"),
+    };
+    assert_eq!(read_character_stat(&mage_id, "hp").await, Some(50));
+    assert_eq!(read_character_stat(&mage_id, "mana").await, Some(50));
+
+    // An empty archetype_key resolves to the first declared entry
+    // (warrior: hp 100, mana 10).
+    send_character(
+        &mut stream,
+        &CharacterClientMessage::CreateCharacter {
+            name: "Bram".to_string(),
+            archetype_key: String::new(),
+        },
+    )
+    .await;
+    let default_id = match recv_character(&mut stream).await {
+        CharacterServerMessage::CharacterCreated { character_id } => character_id,
+        other => panic!("expected a CharacterCreated, got {other:?}"),
+    };
+    assert_eq!(read_character_stat(&default_id, "hp").await, Some(100));
+    assert_eq!(read_character_stat(&default_id, "mana").await, Some(10));
+
+    // An unknown key is rejected with a clear error, not a panic or
+    // silent fallback — and no character is created for it.
+    send_character(
+        &mut stream,
+        &CharacterClientMessage::CreateCharacter {
+            name: "Ghost".to_string(),
+            archetype_key: "necromancer".to_string(),
+        },
+    )
+    .await;
+    match recv_character(&mut stream).await {
+        CharacterServerMessage::Error { message } => {
+            assert!(message.contains("unknown archetype"), "{message}");
+        }
+        other => panic!("expected an Error for an unknown archetype, got {other:?}"),
+    }
+    send_character(&mut stream, &CharacterClientMessage::ListCharacters).await;
+    match recv_character(&mut stream).await {
+        CharacterServerMessage::CharacterList { characters } => {
+            assert!(
+                characters.iter().all(|c| c.name != "Ghost"),
+                "{characters:?}"
+            );
+        }
+        other => panic!("expected a CharacterList, got {other:?}"),
+    }
 }
 
 /// #195, end to end: a disconnected client reconnects and resumes its

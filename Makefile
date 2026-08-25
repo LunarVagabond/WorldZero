@@ -68,6 +68,8 @@ quickstart:
 	@[ -f config/zone.manifest.yaml ] || cp config/zone.manifest.example.yaml config/zone.manifest.yaml
 	@[ -f config/stats.schema.yaml ] || cp config/stats.schema.example.yaml config/stats.schema.yaml
 	@[ -f config/party.schema.yaml ] || cp config/party.schema.example.yaml config/party.schema.yaml
+	@[ -f config/guild.schema.yaml ] || cp config/guild.schema.example.yaml config/guild.schema.yaml
+	@[ -f config/character.archetypes.yaml ] || cp config/character.archetypes.example.yaml config/character.archetypes.yaml
 	rustup target add wasm32-wasip2
 	$(CARGO) build --manifest-path $(EXAMPLE_PLUGIN_DIR)/Cargo.toml --target wasm32-wasip2 --release
 	$(CARGO) build -p server
