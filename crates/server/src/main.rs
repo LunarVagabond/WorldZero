@@ -478,9 +478,7 @@ async fn main() {
                 if let Err(e) = runtime.plugin.on_zone_loaded(&zone_id) {
                     tracing::warn!(plugin = %runtime.name, zone_id, error = %e, "plugin on_zone_loaded hook failed");
                 }
-                for spawn_table_id in runtime.drain_pending_spawns() {
-                    world_actor::spawn_npc_from_table(&mut zone, &spawn_table_id);
-                }
+                world_actor::spawn_requested_npcs(runtime, &mut zone, &zone_id);
             }
         }
 

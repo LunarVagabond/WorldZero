@@ -586,15 +586,28 @@ impl LoadedPlugin {
             })
     }
 
+    /// Live (#214): `server::world_actor::spawn_npc_from_table`'s caller
+    /// calls this back into the same plugin whose `spawn-npc` request
+    /// caused the spawn, right after the real entity is created —
+    /// `spawn_table_id` is the correlation token that call requested (see
+    /// `wit/plugin.wit`'s `on-entity-spawn` doc comment for why a plugin
+    /// needs it).
     pub fn on_entity_spawn(
         &mut self,
         zone_id: &str,
         entity_id: &str,
         entity_type: &str,
+        spawn_table_id: &str,
     ) -> Result<()> {
         self.bindings
             .worldzero_plugin_hooks()
-            .call_on_entity_spawn(&mut self.store, zone_id, entity_id, entity_type)
+            .call_on_entity_spawn(
+                &mut self.store,
+                zone_id,
+                entity_id,
+                entity_type,
+                spawn_table_id,
+            )
             .map_err(|e| Error::new("plugin-host", format!("on_entity_spawn hook failed: {e:#}")))
     }
 

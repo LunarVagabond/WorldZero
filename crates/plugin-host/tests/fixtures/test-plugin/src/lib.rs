@@ -59,7 +59,53 @@ impl Guest for Plugin {
         );
     }
 
-    fn on_entity_spawn(_zone_id: String, _entity_id: String, _entity_type: String) {}
+    // Live (#214): fires back to this plugin right after a real NPC it
+    // requested via `spawn-npc` actually spawns, carrying the
+    // `spawn_table_id` that caused it. Exercises the actual correlation
+    // mechanism this hook exists for: `spawn-track`'s chat command below
+    // records a per-call label in zone-scope plugin state *before*
+    // calling `spawn-npc`, and this hook consumes it, so two `spawn-npc`
+    // calls for the same table (`wolf-pack-01`) in a row can still be
+    // told apart by whichever real entity id lands here for each one —
+    // `which-wolf` then reads the result back out. Also demonstrates the
+    // original ticket's motivating use case directly: keying entity-scoped
+    // state (`PluginStateScope::Entity`) by the real id the moment it's
+    // known, rather than a zone-scoped workaround.
+    fn on_entity_spawn(zone_id: String, entity_id: String, entity_type: String, spawn_table_id: String) {
+        let _ = worldzero::plugin::host::plugin_state_set(
+            &worldzero::plugin::host::PluginStateScope::Entity(entity_id.clone()),
+            "spawned-from-table",
+            spawn_table_id.as_bytes(),
+        );
+        let _ = worldzero::plugin::host::plugin_state_set(
+            &worldzero::plugin::host::PluginStateScope::Entity(entity_id.clone()),
+            "spawned-with-entity-type",
+            entity_type.as_bytes(),
+        );
+
+        // "pending-spawn-label" is set by `spawn-track` just before its
+        // `spawn-npc` call — absent (or already consumed/empty) for any
+        // `on-entity-spawn` this plugin didn't specifically ask to be
+        // tracked (e.g. `on_zone_loaded`'s own startup wolf), so those are
+        // left alone rather than mis-attributed to a stale label.
+        let scope = worldzero::plugin::host::PluginStateScope::Zone(zone_id);
+        let Some(label) = worldzero::plugin::host::plugin_state_get(&scope, "pending-spawn-label")
+            .ok()
+            .flatten()
+            .filter(|bytes| !bytes.is_empty())
+            .map(|bytes| String::from_utf8_lossy(&bytes).to_string())
+        else {
+            return;
+        };
+        let _ = worldzero::plugin::host::plugin_state_set(
+            &scope,
+            &format!("spawn-result-{label}"),
+            entity_id.as_bytes(),
+        );
+        // Consumed — the next untracked `on-entity-spawn` (from this or
+        // any other spawn-table-id) must not pick up a stale label.
+        let _ = worldzero::plugin::host::plugin_state_set(&scope, "pending-spawn-label", b"");
+    }
 
     fn on_player_join_zone(_zone_id: String, entity_id: String) {
         let _ = worldzero::plugin::host::send_message(&entity_id, &format!("welcome, {entity_id}"));
@@ -275,6 +321,42 @@ impl Guest for Plugin {
                 &worldzero::plugin::host::PluginStateScope::Zone(zone_id),
                 "note",
                 args.as_bytes(),
+            );
+            return;
+        }
+        // Exercises `spawn-npc` correlation end to end (#214): `args` is
+        // an arbitrary per-call label the caller picks (the test uses
+        // "a"/"b" for two back-to-back calls against the same spawn
+        // table) — recorded under zone-scope plugin state right before
+        // the `spawn-npc` call, then consumed by `on_entity_spawn` above
+        // once the real entity actually lands, so `which-wolf` below can
+        // read back which real entity id resulted from *this specific*
+        // call, not just "a" wolf from the table in general.
+        if command == "spawn-track" {
+            let _ = worldzero::plugin::host::plugin_state_set(
+                &worldzero::plugin::host::PluginStateScope::Zone(zone_id),
+                "pending-spawn-label",
+                args.as_bytes(),
+            );
+            let result = worldzero::plugin::host::spawn_npc("wolf-pack-01");
+            let _ = worldzero::plugin::host::send_message(
+                &sender_entity_id,
+                &format!("spawn-track {args}: requested ({result:?})"),
+            );
+            return;
+        }
+        if command == "which-wolf" {
+            let value = worldzero::plugin::host::plugin_state_get(
+                &worldzero::plugin::host::PluginStateScope::Zone(zone_id),
+                &format!("spawn-result-{args}"),
+            )
+            .ok()
+            .flatten()
+            .map(|bytes| String::from_utf8_lossy(&bytes).to_string())
+            .unwrap_or_else(|| "<not spawned yet>".to_string());
+            let _ = worldzero::plugin::host::send_message(
+                &sender_entity_id,
+                &format!("which-wolf {args}: {value}"),
             );
             return;
         }

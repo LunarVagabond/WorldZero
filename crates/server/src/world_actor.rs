@@ -454,9 +454,7 @@ pub fn spawn_world_actor(
                             if let Err(e) = runtime.plugin.on_message(&zone_id, message_type, &sender_entity_id, &payload) {
                                 tracing::warn!(plugin = %runtime.name, message_type, error = %e, "plugin on_message hook failed");
                             }
-                            for spawn_table_id in runtime.drain_pending_spawns() {
-                                spawn_npc_from_table(&mut zone, &spawn_table_id);
-                            }
+                            spawn_requested_npcs(runtime, &mut zone, &zone_id);
                             drain_and_apply_plugin_effects(
                                 runtime, &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &currency_schema, &plugin_state_store, &global_sessions,
                             ).await;
@@ -471,6 +469,16 @@ pub fn spawn_world_actor(
                             if let Err(e) = runtime.plugin.on_chat_command(&zone_id, &command, &args, &sender_entity_id_str) {
                                 tracing::warn!(plugin = %runtime.name, command, error = %e, "plugin on_chat_command hook failed");
                             }
+                            // A `spawn-npc` call made from an `on-chat-command`
+                            // handler previously had its request silently
+                            // dropped here — nothing drained
+                            // `pending_spawns` on this path (unlike
+                            // `PluginMessage` above), so the plugin's own
+                            // `spawn-npc` call would queue a request nothing
+                            // ever resolved into a real entity. Fixed
+                            // alongside #214 since the correlation test
+                            // below exercises exactly this path.
+                            spawn_requested_npcs(runtime, &mut zone, &zone_id);
                             drain_and_apply_plugin_effects(
                                 runtime, &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &currency_schema, &plugin_state_store, &global_sessions,
                             ).await;
@@ -976,9 +984,14 @@ async fn apply_plugin_pending_effects(
 /// Spawns one NPC from a zone manifest's declared spawn table, at that
 /// table's first point — used both to seed the zone from a plugin's
 /// `on_load` requests before this actor starts (`main`) and from later
-/// `on_message`-triggered `spawn-npc` calls once the plugin is running
-/// live on this task (#95).
-pub fn spawn_npc_from_table(zone: &mut Zone, spawn_table_id: &str) {
+/// `on_message`/`on_chat_command`-triggered `spawn-npc` calls once the
+/// plugin is running live on this task (#95). Returns the real
+/// `(entity_id, entity_type)` on success — `None` on an unknown or empty
+/// spawn table, already logged here, nothing further for the caller to
+/// do. The caller (`spawn_requested_npcs`) uses the returned pair to fire
+/// `on-entity-spawn` back to the requesting plugin (#214) — this
+/// function itself has no plugin handle to call that with.
+pub fn spawn_npc_from_table(zone: &mut Zone, spawn_table_id: &str) -> Option<(EntityId, String)> {
     let Some(table) = zone
         .manifest
         .spawn_tables
@@ -986,13 +999,14 @@ pub fn spawn_npc_from_table(zone: &mut Zone, spawn_table_id: &str) {
         .find(|table| table.id == spawn_table_id)
     else {
         tracing::warn!(spawn_table_id, "plugin requested an unknown spawn table");
-        return;
+        return None;
     };
     let Some(point) = table.points.first().copied() else {
         tracing::warn!(spawn_table_id, "plugin requested an empty spawn table");
-        return;
+        return None;
     };
     let route_id = table.route_id.clone();
+    let entity_type = table.entity_type.clone();
 
     let entity_id = EntityId::new();
     match &route_id {
@@ -1000,4 +1014,38 @@ pub fn spawn_npc_from_table(zone: &mut Zone, spawn_table_id: &str) {
         None => zone.spawn(entity_id, EntityKind::Npc, point),
     }
     tracing::info!(%entity_id, spawn_table_id, ?route_id, "spawned NPC from plugin");
+    Some((entity_id, entity_type))
+}
+
+/// Drains `runtime`'s pending `spawn-npc` requests, spawns each real NPC
+/// into `zone` via `spawn_npc_from_table`, and fires `on-entity-spawn`
+/// back to `runtime` for each one that actually spawned, carrying the
+/// `spawn-table-id` that caused it — the correlation a plugin needs to
+/// match a specific `spawn-npc` call it made to the resulting real entity
+/// id, since `spawn-npc` itself can't synchronously return one (#214).
+/// Shared by every call site that drains a plugin's pending spawns (the
+/// `on-zone-loaded` startup seeding in `main`, and every later
+/// `on-message`/`on-chat-command` dispatch below) so this firing behavior
+/// is identical no matter which hook queued the request. Only fires back
+/// to `runtime` itself — never a fan-out to every loaded plugin — since
+/// only the plugin that made the request has any correlation token to
+/// consume.
+pub fn spawn_requested_npcs(runtime: &mut PluginRuntime, zone: &mut Zone, zone_id: &str) {
+    let wants_entity_spawn = runtime.wants("on-entity-spawn");
+    for spawn_table_id in runtime.drain_pending_spawns() {
+        let Some((entity_id, entity_type)) = spawn_npc_from_table(zone, &spawn_table_id) else {
+            continue;
+        };
+        if !wants_entity_spawn {
+            continue;
+        }
+        let entity_id_str = entity_id.to_string();
+        if let Err(e) =
+            runtime
+                .plugin
+                .on_entity_spawn(zone_id, &entity_id_str, &entity_type, &spawn_table_id)
+        {
+            tracing::warn!(plugin = %runtime.name, %entity_id, spawn_table_id, error = %e, "plugin on_entity_spawn hook failed");
+        }
+    }
 }

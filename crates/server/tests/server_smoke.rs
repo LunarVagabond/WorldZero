@@ -81,6 +81,7 @@ const PARTY_LEAVE_ADDR: &str = "127.0.0.1:7938";
 const GUILD_CHAT_SYNC_ADDR: &str = "127.0.0.1:7939";
 const GUILD_NO_CHAT_ADDR: &str = "127.0.0.1:7940";
 const ARCHETYPE_ADDR: &str = "127.0.0.1:7941";
+const SPAWN_CORRELATION_ADDR: &str = "127.0.0.1:7942";
 
 struct ServerProcess {
     child: Child,
@@ -538,10 +539,11 @@ name = "test-plugin"
 host_api_version = "0.10.0"
 capabilities = ["spawning", "movement", "combat", "economy", "messaging"]
 message_types = [1000]
-chat_commands = ["give"]
+chat_commands = ["give", "spawn-track", "which-wolf"]
 hooks = [
     "on-zone-loaded",
     "on-character-create",
+    "on-entity-spawn",
     "on-player-join-zone",
     "on-player-leave-zone",
     "on-interact",
@@ -3436,4 +3438,132 @@ async fn guild_create_invite_and_leave_all_work_with_chat_disabled() {
             break;
         }
     }
+}
+
+/// #214: `spawn-npc`'s host callback can't synchronously return a real
+/// entity id — the real entity is only created once the caller drains
+/// the request outside the sandboxed WASM call (`wit/plugin.wit`'s
+/// `spawn-npc`/`on-entity-spawn` doc comments). A plugin instead
+/// correlates a specific `spawn-npc` call to the real entity it caused by
+/// consuming `on-entity-spawn`'s `spawn-table-id` parameter.
+/// `test-plugin`'s `spawn-track`/`which-wolf` chat commands (this file's
+/// `setup_config_dir`) exercise that correlation for real: two
+/// back-to-back `spawn-track` calls against the same spawn table
+/// (`wolf-pack-01`) must resolve to two distinct, real entity ids, each
+/// one correctly attributed to the specific call that requested it — not
+/// the old `spawn_table_id`-echoed-back placeholder, and not just
+/// whichever spawn happened to land last.
+#[tokio::test]
+#[ignore]
+async fn spawn_npc_correlates_to_the_real_entity_via_on_entity_spawn() {
+    let config_dir = setup_config_dir("spawn-correlation");
+    let _server = start_server(&config_dir, SPAWN_CORRELATION_ADDR).await;
+    wait_for_port(SPAWN_CORRELATION_ADDR).await;
+
+    let mut client = connect(&config_dir, SPAWN_CORRELATION_ADDR).await;
+    register_and_authenticate(
+        &mut client,
+        &format!("spawn-correlation-{}", uuid::Uuid::now_v7()),
+        "hunter2",
+        _server.realm_id,
+    )
+    .await;
+    loop {
+        if let ServerMessage::Joined { .. } = recv_world(&mut client).await {
+            break;
+        }
+    }
+    // Drain this connection's own join greeting (#155).
+    loop {
+        match recv_world(&mut client).await {
+            ServerMessage::PluginMessage { .. } => break,
+            ServerMessage::Moved { .. } | ServerMessage::EntitySpawned { .. } => {}
+            other => panic!("expected the join greeting, got {other:?}"),
+        }
+    }
+
+    // Two `spawn-track` calls, back to back, both against `wolf-pack-01`
+    // — same table both times, so `spawn-table-id` alone can't tell them
+    // apart; `on_entity_spawn`'s fixture handler uses the per-call label
+    // this command records right before its own `spawn-npc` call (see
+    // `test-plugin`'s doc comments) to attribute the resulting real
+    // entity to the correct call.
+    for label in ["a", "b"] {
+        send_chat(
+            &mut client,
+            &chat::gateway_protocol::ClientMessage::Send {
+                channel_id: common::id::ChannelId::new(),
+                body: format!("/spawn-track {label}"),
+            },
+        )
+        .await;
+        loop {
+            match recv_world(&mut client).await {
+                ServerMessage::PluginMessage { body } => {
+                    assert!(
+                        body.starts_with(&format!("spawn-track {label}: requested")),
+                        "{body}"
+                    );
+                    break;
+                }
+                ServerMessage::Moved { .. } | ServerMessage::EntitySpawned { .. } => {}
+                other => panic!("expected the spawn-track {label} confirmation, got {other:?}"),
+            }
+        }
+    }
+
+    let mut which_wolf = Vec::new();
+    for label in ["a", "b"] {
+        send_chat(
+            &mut client,
+            &chat::gateway_protocol::ClientMessage::Send {
+                channel_id: common::id::ChannelId::new(),
+                body: format!("/which-wolf {label}"),
+            },
+        )
+        .await;
+        let prefix = format!("which-wolf {label}: ");
+        let value = loop {
+            match recv_world(&mut client).await {
+                ServerMessage::PluginMessage { body } => {
+                    break body
+                        .strip_prefix(&prefix)
+                        .unwrap_or_else(|| panic!("{body:?} missing prefix {prefix:?}"))
+                        .to_string();
+                }
+                ServerMessage::Moved { .. } | ServerMessage::EntitySpawned { .. } => {}
+                other => panic!("expected the which-wolf {label} reply, got {other:?}"),
+            }
+        };
+        which_wolf.push(value);
+    }
+    let entity_a = which_wolf[0].clone();
+    let entity_b = which_wolf[1].clone();
+
+    // Real, distinct, parseable entity ids for both — not "<not spawned
+    // yet>" (correlation never fired) and not the same id twice
+    // (correlation collapsed both calls onto whichever spawn happened
+    // last) — is the actual proof the mechanism works end to end.
+    assert_ne!(
+        entity_a, "<not spawned yet>",
+        "spawn-track a never resolved"
+    );
+    assert_ne!(
+        entity_b, "<not spawned yet>",
+        "spawn-track b never resolved"
+    );
+    assert_ne!(
+        entity_a, entity_b,
+        "spawn-track's two calls against the same spawn table must correlate to two distinct real entities"
+    );
+    entity_a
+        .parse::<common::id::EntityId>()
+        .unwrap_or_else(|_| {
+            panic!("expected a real entity id for spawn-track a, got {entity_a:?}")
+        });
+    entity_b
+        .parse::<common::id::EntityId>()
+        .unwrap_or_else(|_| {
+            panic!("expected a real entity id for spawn-track b, got {entity_b:?}")
+        });
 }
