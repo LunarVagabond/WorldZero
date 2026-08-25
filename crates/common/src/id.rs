@@ -161,6 +161,14 @@ pub type ChannelId = Id<ChannelMarker>;
 pub struct PartyMarker;
 pub type PartyId = Id<PartyMarker>;
 
+/// A guild's durable identity (#179) — unlike `PartyId`, guild membership
+/// is keyed by `AccountId`, not `CharacterId` (see `guild::GuildStore`'s
+/// own doc comment for why: it matches `chat_channel_members`' existing
+/// `account_id` keying, and a guild persists across a single character's
+/// logout/deletion, unlike a party).
+pub struct GuildMarker;
+pub type GuildId = Id<GuildMarker>;
+
 #[cfg(test)]
 mod tests {
     use super::*;

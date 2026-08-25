@@ -1,0 +1,32 @@
+# Example declared guild rank schema — loaded by the `guild` crate
+# (crates/guild/src/schema.rs), see docs/specs/Chat_Spec.md's "Guild
+# system" section. Copy/rename this as guild.schema.yaml in the config
+# dir your instance actually uses (WZ_CONFIG_DIR, or ./config by
+# default) and adjust freely — the framework doesn't declare any rank
+# names or permission assignments of its own, same "core has no opinion
+# on the domain specifics" discipline stats.schema.yaml/party.schema.yaml
+# already follow.
+#
+# The first declared entry is always the guild's founder/leader rank —
+# whoever creates a guild is placed there, and only that rank may
+# disband the guild or promote/demote anyone into or out of it. That's
+# enforced by `guild::GuildStore` itself, not something you configure
+# here. The last declared entry is what a fresh invite's accepter joins
+# at.
+#
+# `permissions` is a list drawn from a fixed core-defined set: invite,
+# kick, promote, demote, edit_motd, edit_tag, rename. Omit the field (or
+# leave it empty) for a rank that can't do anything but be a member.
+schema_version: 1
+ranks:
+  - key: leader
+    name: Guild Master
+    permissions: [invite, kick, promote, demote, edit_motd, edit_tag, rename]
+  - key: officer
+    name: Officer
+    permissions: [invite, kick, edit_motd]
+  - key: veteran
+    name: Veteran
+    permissions: [invite]
+  - key: member
+    name: Member
