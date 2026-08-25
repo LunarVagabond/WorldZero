@@ -32,6 +32,9 @@ use auth::gateway_protocol::{
     ClientMessage as AuthClientMessage, ServerMessage as AuthServerMessage,
 };
 use futures_util::{SinkExt, StreamExt};
+use realm_protocol_support::{
+    ClientMessage as RealmClientMessage, ServerMessage as RealmServerMessage,
+};
 use server_test_support::{ClientMessage, ServerMessage};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_rustls::TlsConnector;
@@ -40,6 +43,9 @@ use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName};
 
 #[path = "../src/session_protocol.rs"]
 mod server_test_support;
+
+#[path = "../src/realm_protocol.rs"]
+mod realm_protocol_support;
 
 const ADDR: &str = "127.0.0.1:7910";
 const CHAT_ADDR: &str = "127.0.0.1:7911";
@@ -52,9 +58,14 @@ const COMBAT_ADDR: &str = "127.0.0.1:7921";
 const MULTI_PLUGIN_ADDR: &str = "127.0.0.1:7922";
 const OPEN_LEASE_ADDR: &str = "127.0.0.1:7923";
 const BOUND_REALM_ADDR: &str = "127.0.0.1:7924";
+const REALM_LIST_ADDR: &str = "127.0.0.1:7925";
+const REALM_MISMATCH_ADDR: &str = "127.0.0.1:7926";
 
 struct ServerProcess {
     child: Child,
+    /// The realm this process was started to serve (#136/#192) — tests
+    /// need this to send `SelectRealm` after authenticating.
+    realm_id: common::id::RealmId,
 }
 
 impl Drop for ServerProcess {
@@ -157,12 +168,18 @@ async fn start_server_with_env(
     // zone-transition test) deliberately have no `plugins/` dir at all,
     // and `discover_plugins` treats that as the ordinary "no plugins
     // configured" case, not an error.
+    let mut realm_id = default_realm_id;
     for (key, value) in extra_env {
         command.env(key, value);
+        if *key == "WZ_REALM_ID" {
+            realm_id = value
+                .parse()
+                .expect("extra_env WZ_REALM_ID must be a valid realm id");
+        }
     }
 
     let child = command.spawn().expect("failed to start the server binary");
-    ServerProcess { child }
+    ServerProcess { child, realm_id }
 }
 
 async fn wait_for_port(addr: &str) {
@@ -220,6 +237,38 @@ async fn recv_auth(stream: &mut ClientStream) -> AuthServerMessage {
     AuthServerMessage::from_envelope(&envelope).unwrap()
 }
 
+async fn send_realm(stream: &mut ClientStream, message: &RealmClientMessage) {
+    stream.send(message.into_envelope().unwrap()).await.unwrap();
+}
+
+async fn recv_realm(stream: &mut ClientStream) -> RealmServerMessage {
+    let envelope = tokio::time::timeout(STEP_TIMEOUT, stream.next())
+        .await
+        .expect("timed out waiting for a realm response")
+        .expect("connection closed")
+        .unwrap();
+    RealmServerMessage::from_envelope(&envelope).unwrap()
+}
+
+/// Sends `SelectRealm{ realm_id }` and asserts it's accepted — every test
+/// does this immediately after authenticating (#192's realm-selection
+/// step is mandatory on the wire, even though a single-realm deployment
+/// never needs a picker UI client-side — see `realm_protocol`'s doc
+/// comment).
+async fn select_realm(stream: &mut ClientStream, realm_id: common::id::RealmId) {
+    send_realm(
+        stream,
+        &RealmClientMessage::SelectRealm {
+            realm_id: realm_id.to_string(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv_realm(stream).await,
+        RealmServerMessage::RealmSelected { .. }
+    ));
+}
+
 async fn send_world(stream: &mut ClientStream, message: &ClientMessage) {
     stream.send(message.into_envelope().unwrap()).await.unwrap();
 }
@@ -255,7 +304,12 @@ async fn recv_chat(stream: &mut ClientStream) -> chat::gateway_protocol::ServerM
     }
 }
 
-async fn register_and_authenticate(stream: &mut ClientStream, username: &str, password: &str) {
+async fn register_and_authenticate(
+    stream: &mut ClientStream,
+    username: &str,
+    password: &str,
+    realm_id: common::id::RealmId,
+) {
     send_auth(
         stream,
         &AuthClientMessage::Register {
@@ -268,6 +322,7 @@ async fn register_and_authenticate(stream: &mut ClientStream, username: &str, pa
         recv_auth(stream).await,
         AuthServerMessage::Authenticated { .. }
     ));
+    select_realm(stream, realm_id).await;
 }
 
 /// Shared per-test config dir: zone manifest, attribute schema, and a
@@ -469,6 +524,7 @@ async fn connect_register_move_and_persist_across_reconnect() {
         recv_auth(&mut stream).await,
         AuthServerMessage::Authenticated { .. }
     ));
+    select_realm(&mut stream, _server.realm_id).await;
 
     let own_entity_id = loop {
         if let ServerMessage::Joined {
@@ -550,6 +606,7 @@ async fn connect_register_move_and_persist_across_reconnect() {
         recv_auth(&mut stream).await,
         AuthServerMessage::Authenticated { .. }
     ));
+    select_realm(&mut stream, _server.realm_id).await;
 
     loop {
         if let ServerMessage::Joined { x, y, .. } = recv_world(&mut stream).await {
@@ -593,6 +650,7 @@ async fn player_join_and_leave_hooks_fire_for_real() {
         recv_auth(&mut stream).await,
         AuthServerMessage::Authenticated { .. }
     ));
+    select_realm(&mut stream, _server.realm_id).await;
 
     let own_entity_id = loop {
         if let ServerMessage::Joined { entity_id, .. } = recv_world(&mut stream).await {
@@ -630,6 +688,7 @@ async fn player_join_and_leave_hooks_fire_for_real() {
         recv_auth(&mut stream).await,
         AuthServerMessage::Authenticated { .. }
     ));
+    select_realm(&mut stream, _server.realm_id).await;
     loop {
         if let ServerMessage::Joined { .. } = recv_world(&mut stream).await {
             break;
@@ -682,6 +741,7 @@ async fn combat_item_use_npc_interact_and_death_respawn_hooks_fire_for_real() {
         &mut attacker,
         &format!("attacker-{}", uuid::Uuid::now_v7()),
         "hunter2",
+        _server.realm_id,
     )
     .await;
     let (_attacker_id, npc_id) = loop {
@@ -711,6 +771,7 @@ async fn combat_item_use_npc_interact_and_death_respawn_hooks_fire_for_real() {
         &mut target,
         &format!("target-{}", uuid::Uuid::now_v7()),
         "hunter2",
+        _server.realm_id,
     )
     .await;
     let target_id = loop {
@@ -856,6 +917,7 @@ async fn two_independent_plugins_fan_out_a_shared_hook_and_keep_message_types_se
         &mut stream,
         &format!("multi-plugin-{}", uuid::Uuid::now_v7()),
         "hunter2",
+        _server.realm_id,
     )
     .await;
     let own_entity_id = loop {
@@ -949,6 +1011,7 @@ async fn zone_transition_crosses_a_link_without_reconnecting() {
         &mut stream,
         &format!("zone-transition-{}", uuid::Uuid::now_v7()),
         "hunter2",
+        _server.realm_id,
     )
     .await;
 
@@ -1015,6 +1078,7 @@ async fn a_low_population_threshold_isolates_two_joining_connections_onto_separa
         &mut first,
         &format!("layer-isolation-a-{}", uuid::Uuid::now_v7()),
         "hunter2",
+        _server.realm_id,
     )
     .await;
     let first_roster = loop {
@@ -1029,6 +1093,7 @@ async fn a_low_population_threshold_isolates_two_joining_connections_onto_separa
         &mut second,
         &format!("layer-isolation-b-{}", uuid::Uuid::now_v7()),
         "hunter2",
+        _server.realm_id,
     )
     .await;
     let second_roster = loop {
@@ -1068,6 +1133,7 @@ async fn layering_disabled_keeps_connections_on_the_same_layer_regardless_of_thr
         &mut first,
         &format!("layer-disabled-a-{}", uuid::Uuid::now_v7()),
         "hunter2",
+        _server.realm_id,
     )
     .await;
     let first_entity_id = loop {
@@ -1081,6 +1147,7 @@ async fn layering_disabled_keeps_connections_on_the_same_layer_regardless_of_thr
         &mut second,
         &format!("layer-disabled-b-{}", uuid::Uuid::now_v7()),
         "hunter2",
+        _server.realm_id,
     )
     .await;
     let second_roster = loop {
@@ -1116,6 +1183,7 @@ async fn chat_join_send_and_receive_across_two_connections() {
         &mut alice,
         &format!("chat-alice-{}", uuid::Uuid::now_v7()),
         "hunter2",
+        _server.realm_id,
     )
     .await;
     // Drain the world `Joined` message every connection gets right after
@@ -1131,6 +1199,7 @@ async fn chat_join_send_and_receive_across_two_connections() {
         &mut bob,
         &format!("chat-bob-{}", uuid::Uuid::now_v7()),
         "hunter2",
+        _server.realm_id,
     )
     .await;
     assert!(matches!(
@@ -1197,6 +1266,7 @@ async fn chat_disabled_returns_a_clear_error() {
         &mut stream,
         &format!("chat-disabled-{}", uuid::Uuid::now_v7()),
         "hunter2",
+        _server.realm_id,
     )
     .await;
     assert!(matches!(
@@ -1252,6 +1322,7 @@ async fn metrics_endpoint_serves_prometheus_text() {
         &mut stream,
         &format!("metrics-{}", uuid::Uuid::now_v7()),
         "hunter2",
+        _server.realm_id,
     )
     .await;
     assert!(matches!(
@@ -1346,7 +1417,7 @@ async fn a_second_login_to_the_same_open_realm_character_is_rejected_while_the_f
     // First connection stays open for the rest of this test — its lease
     // is never released.
     let mut first = connect(&config_dir, OPEN_LEASE_ADDR).await;
-    register_and_authenticate(&mut first, &username, password).await;
+    register_and_authenticate(&mut first, &username, password, _server.realm_id).await;
     assert!(matches!(
         recv_world(&mut first).await,
         ServerMessage::Joined { .. }
@@ -1354,6 +1425,9 @@ async fn a_second_login_to_the_same_open_realm_character_is_rejected_while_the_f
 
     // Second connection, same account: `authorize_login` should refuse
     // it — the first connection's lease on this character is still held.
+    // Realm selection itself still succeeds (that's a separate, earlier
+    // step, #192) — the rejection only happens once login-policy
+    // enforcement runs afterward.
     let mut second = connect(&config_dir, OPEN_LEASE_ADDR).await;
     send_auth(
         &mut second,
@@ -1367,6 +1441,7 @@ async fn a_second_login_to_the_same_open_realm_character_is_rejected_while_the_f
         recv_auth(&mut second).await,
         AuthServerMessage::Authenticated { .. }
     ));
+    select_realm(&mut second, _server.realm_id).await;
     match recv_auth(&mut second).await {
         AuthServerMessage::Error { message } => {
             assert!(message.contains("already logged in elsewhere"), "{message}");
@@ -1407,7 +1482,7 @@ async fn a_bound_realm_login_resolves_and_authorizes_through_the_real_policy() {
     let password = "hunter2";
 
     let mut stream = connect(&config_dir, BOUND_REALM_ADDR).await;
-    register_and_authenticate(&mut stream, &username, password).await;
+    register_and_authenticate(&mut stream, &username, password, _server.realm_id).await;
     assert!(matches!(
         recv_world(&mut stream).await,
         ServerMessage::Joined { .. }
@@ -1434,8 +1509,128 @@ async fn a_bound_realm_login_resolves_and_authorizes_through_the_real_policy() {
         recv_auth(&mut stream).await,
         AuthServerMessage::Authenticated { .. }
     ));
+    select_realm(&mut stream, _server.realm_id).await;
     assert!(matches!(
         recv_world(&mut stream).await,
         ServerMessage::Joined { .. }
     ));
+}
+
+/// #192, end to end: `ListRealms` reports the one realm this process
+/// serves with real numbers, both before and after this connection
+/// itself joins — proving `character_count`/`live_connection_count`
+/// (#137) are read live, not hardcoded/cached at startup.
+#[tokio::test]
+#[ignore]
+async fn list_realms_reports_the_one_served_realm_with_live_numbers() {
+    let config_dir = setup_config_dir("realm-list");
+    let _server = start_server(&config_dir, REALM_LIST_ADDR).await;
+    wait_for_port(REALM_LIST_ADDR).await;
+
+    // First connection: registers, selects, and fully joins — so there's
+    // a real character and a real live connection on this realm by the
+    // time the second connection asks about it. `ListRealms` is only
+    // ever handled during the pre-join realm-selection phase (#192), so
+    // this connection can't re-query after joining — a second, still-
+    // unjoined connection is what actually exercises "live," not a
+    // second request on the same one.
+    let mut joined = connect(&config_dir, REALM_LIST_ADDR).await;
+    register_and_authenticate(
+        &mut joined,
+        &format!("realm-list-a-{}", uuid::Uuid::now_v7()),
+        "hunter2",
+        _server.realm_id,
+    )
+    .await;
+    assert!(matches!(
+        recv_world(&mut joined).await,
+        ServerMessage::Joined { .. }
+    ));
+
+    // Second connection: authenticated, but deliberately stops short of
+    // selecting a realm — queries the list instead, and should see the
+    // first connection's character and live presence already reflected.
+    let mut observer = connect(&config_dir, REALM_LIST_ADDR).await;
+    send_auth(
+        &mut observer,
+        &AuthClientMessage::Register {
+            username: format!("realm-list-b-{}", uuid::Uuid::now_v7()),
+            password: "hunter2".to_string(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv_auth(&mut observer).await,
+        AuthServerMessage::Authenticated { .. }
+    ));
+
+    send_realm(&mut observer, &RealmClientMessage::ListRealms).await;
+    match recv_realm(&mut observer).await {
+        RealmServerMessage::RealmList { realms } => {
+            assert_eq!(realms.len(), 1, "{realms:?}");
+            let realm = &realms[0];
+            assert_eq!(realm.realm_id, _server.realm_id.to_string());
+            assert_eq!(realm.open_or_bound, "open");
+            assert_eq!(realm.character_count, 1, "{realm:?}");
+            assert_eq!(realm.live_connection_count, 1, "{realm:?}");
+        }
+        other => panic!("expected a RealmList, got {other:?}"),
+    }
+}
+
+/// #192: `SelectRealm` naming a realm other than the one this process
+/// serves is rejected with a clear error, and the connection is closed
+/// rather than left hanging — the same "one process, one realm" rule
+/// #136 enforces at login, enforced here one step earlier in the
+/// handshake instead.
+#[tokio::test]
+#[ignore]
+async fn select_realm_rejects_a_realm_this_process_does_not_serve() {
+    let config_dir = setup_config_dir("realm-mismatch");
+    let _server = start_server(&config_dir, REALM_MISMATCH_ADDR).await;
+    wait_for_port(REALM_MISMATCH_ADDR).await;
+    let other_realm_id = create_realm(realm_directory::OpenOrBound::Open).await;
+
+    let username = format!("realm-mismatch-{}", uuid::Uuid::now_v7());
+    let password = "hunter2";
+
+    let mut stream = connect(&config_dir, REALM_MISMATCH_ADDR).await;
+    send_auth(
+        &mut stream,
+        &AuthClientMessage::Register {
+            username: username.clone(),
+            password: password.to_string(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv_auth(&mut stream).await,
+        AuthServerMessage::Authenticated { .. }
+    ));
+
+    send_realm(
+        &mut stream,
+        &RealmClientMessage::SelectRealm {
+            realm_id: other_realm_id.to_string(),
+        },
+    )
+    .await;
+    match recv_realm(&mut stream).await {
+        RealmServerMessage::Error { message } => {
+            assert!(message.contains("only serves realm"), "{message}");
+        }
+        other => panic!("expected a realm Error, got {other:?}"),
+    }
+
+    // The connection is closed after a rejected selection, not left open
+    // waiting for a valid one — `Ok(None)` is a clean EOF, `Ok(Some(Err(_)))`
+    // a reset; either means "closed." A `Err(_)` (timeout) would mean it's
+    // still open, which is the failure case this asserts against.
+    let closed = tokio::time::timeout(STEP_TIMEOUT, stream.next())
+        .await
+        .expect("connection should have closed, not stayed open");
+    assert!(
+        matches!(closed, None | Some(Err(_))),
+        "expected the connection to close after a rejected realm selection, got {closed:?}"
+    );
 }

@@ -1,0 +1,60 @@
+// Wire schema for `server::realm_protocol` — `message_type` 2
+// (docs/specs/Networking_Spec.md's catalog). Realm discovery/selection,
+// slotted between the auth handshake (`message_type` 1) and world-join
+// (`message_type` 200) — see `crates/auth/proto/auth.proto`'s header
+// comment for the same note on why `server::realm_protocol`'s Rust enum
+// wraps this rather than being generated from it directly.
+
+syntax = "proto3";
+
+package worldzero.realm;
+
+message ClientMessage {
+  oneof kind {
+    ListRealms list_realms = 1;
+    SelectRealm select_realm = 2;
+  }
+}
+
+message ListRealms {}
+
+// realm_id as a plain string, same "opaque id crossing the wire" as
+// every other id in this protocol suite (auth.proto/session.proto).
+message SelectRealm {
+  string realm_id = 1;
+}
+
+message ServerMessage {
+  oneof kind {
+    RealmList realm_list = 1;
+    RealmSelected realm_selected = 2;
+    Error error = 3;
+  }
+}
+
+// One realm this connection could log into — today that's always
+// exactly the one realm the `server` process serving this connection
+// itself serves (#136); a process serving more than one at once is
+// #130's job, not this protocol's. open_or_bound is "open" or "bound".
+message RealmSummary {
+  string realm_id = 1;
+  string name = 2;
+  string open_or_bound = 3;
+  int64 character_count = 4;
+  uint64 live_connection_count = 5;
+}
+
+message RealmList {
+  repeated RealmSummary realms = 1;
+}
+
+// Acknowledges a successful SelectRealm — echoes the realm_id back so
+// the client has explicit confirmation of what it's now connected to,
+// rather than inferring success from the absence of an Error.
+message RealmSelected {
+  string realm_id = 1;
+}
+
+message Error {
+  string message = 1;
+}

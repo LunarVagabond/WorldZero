@@ -17,6 +17,7 @@ use tokio_util::codec::Framed;
 use world::EntityKind;
 
 use crate::chat_session::{self, ChatDeps};
+use crate::realm_protocol;
 use crate::session_protocol::{ClientMessage, RosterEntry, ServerMessage, WORLD_MESSAGE_TYPE};
 use crate::zone_registry::ZoneRegistry;
 
@@ -61,6 +62,10 @@ pub struct SessionDeps {
     /// once is #130's job; every login this process handles targets this
     /// realm.
     pub realm_id: RealmId,
+    /// `realm_id`'s display name, resolved once at startup alongside it
+    /// — #192's `RealmList` reports this, same staleness acceptance as
+    /// `realm_open_or_bound` below.
+    pub realm_name: String,
     /// `realm_id`'s own open/bound policy, resolved once at startup
     /// alongside it — cheap to cache since it can't change without an
     /// operator editing it via `realm-directory`'s CLI mid-process, an
@@ -79,6 +84,13 @@ pub struct SessionDeps {
     /// never acquires a lease for one in the first place.
     pub character_lease: Arc<character::CharacterSessionLease>,
     pub lease_ttl: std::time::Duration,
+    /// #137's live-connection counter, backing #192's `RealmList`
+    /// (`live_connection_count`) — registered at join, refreshed
+    /// alongside the lease renewal loop below, removed at disconnect.
+    /// Unlike `character_lease`, this applies to every connection
+    /// regardless of `realm_open_or_bound` (docs/specs/Data_Model_Spec.md:
+    /// "a live-connection count needs to work for bound realms too").
+    pub realm_presence: Arc<realm_directory::RealmPresence>,
     /// Every zone-service instance this process runs (#45) — a
     /// connection looks up its current zone's `WorldHandle`/`Sessions`
     /// here at join time, and again on every `ZoneChanged` handoff.
@@ -174,6 +186,58 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
     }
     let mut joined_channels = chat_session::JoinedChannels::new();
 
+    // Realm discovery/selection (#192) — a client can request the realm
+    // list any number of times, but must settle on `SelectRealm{ realm_id }`
+    // naming the one realm this process serves (#136) before this
+    // connection is allowed any further. "Skippable" for a single-realm
+    // deployment means no realm-picker UI is required client-side — the
+    // client can send `SelectRealm` immediately with a realm id it
+    // already knows, without ever calling `ListRealms` first — not that
+    // this step itself can be omitted from the wire.
+    loop {
+        let Some(frame) = stream.next().await else {
+            return Ok(());
+        };
+        let envelope = frame.map_err(|e| Error::wrap("server", "connection error", e))?;
+        let realm_message = match realm_protocol::ClientMessage::from_envelope(&envelope) {
+            Ok(m) => m,
+            Err(e) => {
+                send_realm_error(&mut sink, e.to_string()).await?;
+                return Ok(());
+            }
+        };
+        match realm_message {
+            realm_protocol::ClientMessage::ListRealms => {
+                let realm = build_realm_summary(&deps).await?;
+                send_realm(
+                    &mut sink,
+                    &realm_protocol::ServerMessage::RealmList {
+                        realms: vec![realm],
+                    },
+                )
+                .await?;
+            }
+            realm_protocol::ClientMessage::SelectRealm { realm_id } => {
+                match realm_protocol::validate_selection(&realm_id, deps.realm_id) {
+                    Ok(selected) => {
+                        send_realm(
+                            &mut sink,
+                            &realm_protocol::ServerMessage::RealmSelected {
+                                realm_id: selected.to_string(),
+                            },
+                        )
+                        .await?;
+                        break;
+                    }
+                    Err(e) => {
+                        send_realm_error(&mut sink, e.to_string()).await?;
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
+
     let character = resolve_or_create_character(&deps, account_id, &username).await?;
     // #21's lease is keyed by `zone_service_id`, which in the real
     // multi-process model (#130) names a whole zone-service instance —
@@ -207,6 +271,13 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
     }
     let character_id = character.id;
     let position = (character.position.0, character.position.1);
+
+    // #137's live-connection registration — applies regardless of
+    // open/bound (unlike `character_lease` above), see `realm_presence`'s
+    // own doc comment on `SessionDeps`.
+    deps.realm_presence
+        .connect(deps.realm_id, entity_id.as_uuid())
+        .await?;
 
     // A character's persisted `zone_id` might name a zone this content
     // pack no longer declares (the pack changed since they last logged
@@ -318,26 +389,32 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
     // ready to receive it (#155).
     zone.world.dispatch_player_join(entity_id);
 
-    // #21's lease renewal — only meaningful for an open-realm character
-    // (a bound one never held a lease in the first place, and calling
-    // `renew` for one would just log a spurious "doesn't hold a lease"
-    // warning every tick for no reason). Renews at a third of the TTL so
-    // a couple of missed ticks in a row still don't let the lease lapse
-    // out from under a still-connected character.
+    // #21's lease renewal (open realms only — a bound one never held a
+    // lease in the first place, and calling `renew` for one would just
+    // log a spurious "doesn't hold a lease" warning every tick for no
+    // reason) and #137's live-connection heartbeat (every realm, open or
+    // bound — see `realm_presence`'s doc comment on `SessionDeps`), both
+    // on the same interval since they're the same "how stale can this
+    // connection's liveness signal get" question. A third of the TTL so
+    // a couple of missed ticks in a row don't let either lapse out from
+    // under a still-connected character.
     let renew_open_lease = deps.realm_open_or_bound == realm_directory::OpenOrBound::Open;
-    let mut lease_renewal =
+    let mut heartbeat_interval =
         tokio::time::interval((deps.lease_ttl / 3).max(std::time::Duration::from_secs(1)));
-    lease_renewal.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    lease_renewal.tick().await; // first tick fires immediately; the lease was just acquired
+    heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    heartbeat_interval.tick().await; // first tick fires immediately; both were just acquired
 
     loop {
         tokio::select! {
-            _ = lease_renewal.tick(), if renew_open_lease => {
-                if let Err(e) = deps.character_lease
+            _ = heartbeat_interval.tick() => {
+                if renew_open_lease && let Err(e) = deps.character_lease
                     .renew(character_id, &lease_holder_id, deps.lease_ttl)
                     .await
                 {
                     tracing::warn!(error = %e, %character_id, "failed to renew character session lease");
+                }
+                if let Err(e) = deps.realm_presence.connect(deps.realm_id, entity_id.as_uuid()).await {
+                    tracing::warn!(error = %e, %character_id, "failed to renew realm presence heartbeat");
                 }
             }
             maybe_frame = stream.next() => {
@@ -490,6 +567,16 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
     // unconditionally rather than branching on `realm_open_or_bound`.
     if let Err(e) = deps.character_lease.release(character_id).await {
         tracing::warn!(error = %e, %character_id, "failed to release character session lease on disconnect");
+    }
+    // #137's clean-disconnect deregistration — runs unconditionally, same
+    // as the lease release above (applies to every realm, not just open
+    // ones).
+    if let Err(e) = deps
+        .realm_presence
+        .disconnect(deps.realm_id, entity_id.as_uuid())
+        .await
+    {
+        tracing::warn!(error = %e, %character_id, "failed to remove realm presence on disconnect");
     }
     // Character-scope (and any leftover entity-scope) cache entries for
     // this connection — keeps the shared process-wide cache from growing
@@ -667,6 +754,39 @@ async fn send_auth_error(sink: &mut ServerSink, message: String) -> Result<()> {
         &auth::gateway_protocol::ServerMessage::Error { message },
     )
     .await
+}
+
+async fn send_realm(sink: &mut ServerSink, message: &realm_protocol::ServerMessage) -> Result<()> {
+    let envelope = message.into_envelope()?;
+    sink.send(envelope)
+        .await
+        .map_err(|e| Error::wrap("server", "failed to send to client", e))
+}
+
+async fn send_realm_error(sink: &mut ServerSink, message: String) -> Result<()> {
+    send_realm(sink, &realm_protocol::ServerMessage::Error { message }).await
+}
+
+/// Builds #192's `RealmList` entry for the one realm this process
+/// serves — `character_count`/`live_connection_count` are read fresh
+/// from `realm_presence::population` on every call (not cached), so a
+/// client polling `ListRealms` sees current numbers.
+async fn build_realm_summary(deps: &SessionDeps) -> Result<realm_protocol::RealmSummary> {
+    let population = deps
+        .realm_presence
+        .population(&deps.character_store, deps.realm_id)
+        .await?;
+    let open_or_bound = match deps.realm_open_or_bound {
+        realm_directory::OpenOrBound::Open => "open",
+        realm_directory::OpenOrBound::Bound => "bound",
+    };
+    Ok(realm_protocol::RealmSummary {
+        realm_id: deps.realm_id.to_string(),
+        name: deps.realm_name.clone(),
+        open_or_bound: open_or_bound.to_string(),
+        character_count: population.character_count,
+        live_connection_count: population.live_connections,
+    })
 }
 
 #[cfg(test)]

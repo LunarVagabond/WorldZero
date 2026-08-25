@@ -24,6 +24,16 @@ make realm ARGS="unassign-zone greenwood-forest"
 
 Needs `WZ_POSTGRES_*` (`.env`, loaded automatically by `make`) and migration `0007_create_realms` applied (`make migrate`). Run `make realm` with no `ARGS` for the full command list. Same hand-rolled-CLI convention as `make migrate`/`content`'s `validate` bin — see `crates/realm-directory/src/bin/realm.rs`.
 
+## Realm selection (#192)
+
+A connecting client's view of "here are the realm(s) this server serves, pick one" — `server::realm_protocol`, `message_type` 2 (docs/specs/Networking_Spec.md's catalog note), slotted between the auth handshake (`message_type` 1) and world-join (`message_type` 200).
+
+- Right after `Authenticated`, a connection must send `SelectRealm { realm_id }` before anything else is accepted — `ListRealms` (no fields) can be sent any number of times first to discover what to select, using #137's live `character_count`/`live_connection_count` numbers, but it's never required: a client that already knows its realm id (a single-realm game has no reason to build a picker UI at all) can send `SelectRealm` immediately. "Skippable" in this sense — no UI required for a single-realm deployment — not "the network step itself can be omitted."
+- `SelectRealm` must name the one realm the `server` process handling this connection actually serves (#136, `WZ_REALM_ID`) — anything else is rejected with a clear `Error` and the connection is closed. A process serving more than one realm at once, where a real choice between distinct realms would exist, is #130's job; the wire shape (`RealmList.realms` is already `repeated`) is ready for that without a protocol change, but today's `server` never has more than one entry to offer.
+- A successful `SelectRealm` gets `RealmSelected { realm_id }` back, and only then does `resolve_or_create_character`/`LoginPolicy::authorize_login` (#51/#136) run — the realm choice genuinely gates login-policy resolution, not just a rubber-stamp step before it.
+- `ListRealms`/`SelectRealm` are only handled during this pre-join phase — once a connection has joined the world, the same `message_type` is no longer routed (world/chat/plugin traffic owns the connection from there); a real realm-switch mid-session would need a reconnect, same as today's zone-transition-free "one realm per connection" model.
+- #137's `RealmPresence` (`character_count`/`live_connection_count`) is registered at world-join (not at `SelectRealm`), renewed alongside #21's lease for the life of the connection, and deregistered on disconnect — see `server::session::handle_session`'s wiring.
+
 ## Open realms: concurrency control
 
 **The problem this section exists to answer:** `docs/PROPOSAL.md` says open-realm character state needs "appropriate locking/versioning" without saying what that is. This is that design.
@@ -71,10 +81,10 @@ This satisfies #53's "no partial-transfer state" and "failed transfer leaves the
 
 | Question | Answer | Where enforced |
 |---|---|---|
-| Where does open/bound live? | Per-realm field on the `realm-directory` registry | #47 (field exists), #51 (enforced, not yet wired into `server`) |
+| Where does open/bound live? | Per-realm field on the `realm-directory` registry | #47 (field exists), #51 (enforced, wired into `server` as of #136) |
 | How is open-realm split-brain prevented? | A `character_sessions` lease table, checked at login/reconnect only | `character::CharacterSessionLease`, consumed by `realm-directory::LoginPolicy` (#51) |
 | Do bound realms need the lease? | No — skipped entirely | `character` |
-| How is an open-realm character found regardless of which open realm it's on? | A join against `realms` matching any `open` realm, never a bound one | `CharacterStore::find_by_account_in_open_realms`, consumed by `LoginPolicy::resolve_character` (#52, not yet wired into `server`) |
+| How is an open-realm character found regardless of which open realm it's on? | A join against `realms` matching any `open` realm, never a bound one | `CharacterStore::find_by_account_in_open_realms`, consumed by `LoginPolicy::resolve_character` (#52, wired into `server` as of #136) |
 | Is a transfer atomic? | Yes — one Postgres transaction, no distributed/saga logic | #53 |
 | Can an open-realm character be transferred? | No — rejected as a validation error | #53 |
 | Where does gating happen relative to the transfer transaction? | Before it opens; a denied gate never touches character data | #54 |

@@ -59,6 +59,7 @@
 mod chat_session;
 mod plugin_startup;
 mod plugin_state;
+mod realm_protocol;
 mod session;
 mod session_protocol;
 mod world_actor;
@@ -222,6 +223,15 @@ async fn main() {
         lease_ttl,
     ));
     let character_lease = Arc::new(character::CharacterSessionLease::new(pool.clone()));
+    // Reuses `lease_ttl` rather than a separate knob — both are "how
+    // stale can a per-connection heartbeat get before something else
+    // could reclaim it," same sizing question `RealmPresence::new`'s own
+    // doc comment asks, so a second env var here would just be one more
+    // thing to keep in sync with no real difference in what it tunes.
+    let realm_presence = Arc::new(realm_directory::RealmPresence::new(
+        redis.clone(),
+        lease_ttl,
+    ));
 
     // `None` end to end (not just an unused `ChatDeps`) when disabled —
     // no `ChannelStore`/`ChatBus` construction, no per-connection chat
@@ -504,10 +514,12 @@ async fn main() {
         auth_provider,
         character_store,
         realm_id,
+        realm_name: realm.name,
         realm_open_or_bound: realm.open_or_bound,
         login_policy,
         character_lease,
         lease_ttl,
+        realm_presence,
         zones,
         default_zone_id,
         entity_characters,
