@@ -47,7 +47,20 @@ impl Guest for Plugin {
         let _ = worldzero::plugin::host::spawn_npc("wolf-pack-01");
     }
 
-    fn on_entity_spawn(_zone_id: String, _entity_id: String, _entity_type: String) {}
+    // This example doesn't customize starting stats (#194) — a real
+    // plugin would call `apply-stat-delta-for-character` here.
+    fn on_character_create(_character_id: String, _zone_id: String) {}
+
+    // Live (#214): fires right after `wolf-pack-01`'s spawn above
+    // actually creates the real NPC entity, carrying the same
+    // `"wolf-pack-01"` spawn-table-id back so a plugin that made several
+    // `spawn-npc` calls could tell which resulting entity came from
+    // which call. This example only ever spawns one NPC, so it has
+    // nothing to correlate — see `test-plugin`'s fixture (used by
+    // `plugin-host`/`server`'s own test suite) for a real multi-spawn
+    // correlation example.
+    fn on_entity_spawn(_zone_id: String, _entity_id: String, _entity_type: String, _spawn_table_id: String) {
+    }
 
     // Live: fires once this connection has fully joined the zone (#155).
     fn on_player_join_zone(_zone_id: String, entity_id: String) {

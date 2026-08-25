@@ -8,7 +8,7 @@
 //! scheduling logic — fixed `dt`, log-and-resync on an overrun rather
 //! than catching up — around `Zone::tick()`'s pure step instead.
 
-use character::{AttributeSchema, CharacterStore};
+use character::{AttributeSchema, CharacterStore, CurrencySchema};
 use common::id::EntityId;
 use common::metrics::Metrics;
 use prometheus::IntGauge;
@@ -325,6 +325,7 @@ pub fn spawn_world_actor(
     entity_characters: EntityCharacters,
     npc_stats: NpcStats,
     attribute_schema: std::sync::Arc<AttributeSchema>,
+    currency_schema: std::sync::Arc<character::CurrencySchema>,
     plugin_state_store: std::sync::Arc<crate::plugin_state::PluginStateStore>,
     zone_id: String,
     metrics: Option<std::sync::Arc<Metrics>>,
@@ -400,7 +401,7 @@ pub fn spawn_world_actor(
                                 }
                             }
                             drain_and_apply_plugin_effects(
-                                runtime, &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &plugin_state_store, &global_sessions,
+                                runtime, &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &currency_schema, &plugin_state_store, &global_sessions,
                             ).await;
                         }
                     }
@@ -453,11 +454,9 @@ pub fn spawn_world_actor(
                             if let Err(e) = runtime.plugin.on_message(&zone_id, message_type, &sender_entity_id, &payload) {
                                 tracing::warn!(plugin = %runtime.name, message_type, error = %e, "plugin on_message hook failed");
                             }
-                            for spawn_table_id in runtime.drain_pending_spawns() {
-                                spawn_npc_from_table(&mut zone, &spawn_table_id);
-                            }
+                            spawn_requested_npcs(runtime, &mut zone, &zone_id);
                             drain_and_apply_plugin_effects(
-                                runtime, &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &plugin_state_store, &global_sessions,
+                                runtime, &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &currency_schema, &plugin_state_store, &global_sessions,
                             ).await;
                         }
                         WorldCommand::ChatCommand { command, args, sender_entity_id } => {
@@ -470,15 +469,25 @@ pub fn spawn_world_actor(
                             if let Err(e) = runtime.plugin.on_chat_command(&zone_id, &command, &args, &sender_entity_id_str) {
                                 tracing::warn!(plugin = %runtime.name, command, error = %e, "plugin on_chat_command hook failed");
                             }
+                            // A `spawn-npc` call made from an `on-chat-command`
+                            // handler previously had its request silently
+                            // dropped here — nothing drained
+                            // `pending_spawns` on this path (unlike
+                            // `PluginMessage` above), so the plugin's own
+                            // `spawn-npc` call would queue a request nothing
+                            // ever resolved into a real entity. Fixed
+                            // alongside #214 since the correlation test
+                            // below exercises exactly this path.
+                            spawn_requested_npcs(runtime, &mut zone, &zone_id);
                             drain_and_apply_plugin_effects(
-                                runtime, &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &plugin_state_store, &global_sessions,
+                                runtime, &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &currency_schema, &plugin_state_store, &global_sessions,
                             ).await;
                         }
                         WorldCommand::PlayerJoin { entity_id } => {
                             let entity_id_str = entity_id.to_string();
                             let mut plugins = plugins.lock().await;
                             fire_hook(
-                                &mut plugins, "on-player-join-zone", &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &plugin_state_store, &global_sessions,
+                                &mut plugins, "on-player-join-zone", &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &currency_schema, &plugin_state_store, &global_sessions,
                                 |plugin| plugin.on_player_join_zone(&zone_id, &entity_id_str),
                             ).await;
                         }
@@ -486,7 +495,7 @@ pub fn spawn_world_actor(
                             let entity_id_str = entity_id.to_string();
                             let mut plugins = plugins.lock().await;
                             fire_hook(
-                                &mut plugins, "on-player-leave-zone", &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &plugin_state_store, &global_sessions,
+                                &mut plugins, "on-player-leave-zone", &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &currency_schema, &plugin_state_store, &global_sessions,
                                 |plugin| plugin.on_player_leave_zone(&zone_id, &entity_id_str),
                             ).await;
                             let _ = reply.send(());
@@ -500,7 +509,7 @@ pub fn spawn_world_actor(
                             let target_str = target.to_string();
                             let mut plugins = plugins.lock().await;
                             fire_hook(
-                                &mut plugins, "on-damage-calc", &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &plugin_state_store, &global_sessions,
+                                &mut plugins, "on-damage-calc", &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &currency_schema, &plugin_state_store, &global_sessions,
                                 |plugin| plugin.on_damage_calc(&zone_id, &attacker_str, &target_str, &stat_key, 0),
                             ).await;
                         }
@@ -508,7 +517,7 @@ pub fn spawn_world_actor(
                             let entity_id_str = entity_id.to_string();
                             let mut plugins = plugins.lock().await;
                             fire_hook(
-                                &mut plugins, "on-item-use", &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &plugin_state_store, &global_sessions,
+                                &mut plugins, "on-item-use", &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &currency_schema, &plugin_state_store, &global_sessions,
                                 |plugin| plugin.on_item_use(&zone_id, &entity_id_str, &item_type),
                             ).await;
                         }
@@ -521,7 +530,7 @@ pub fn spawn_world_actor(
                             let actor_str = actor.to_string();
                             let mut plugins = plugins.lock().await;
                             fire_hook(
-                                &mut plugins, "on-npc-interact", &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &plugin_state_store, &global_sessions,
+                                &mut plugins, "on-npc-interact", &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &currency_schema, &plugin_state_store, &global_sessions,
                                 |plugin| plugin.on_npc_interact(&zone_id, &npc_str, &actor_str),
                             ).await;
                         }
@@ -601,6 +610,7 @@ async fn drain_and_apply_plugin_effects(
     entity_characters: &EntityCharacters,
     npc_stats: &NpcStats,
     attribute_schema: &AttributeSchema,
+    currency_schema: &CurrencySchema,
     plugin_state_store: &crate::plugin_state::PluginStateStore,
     global_sessions: &Sessions,
 ) {
@@ -623,6 +633,7 @@ async fn drain_and_apply_plugin_effects(
         entity_characters,
         npc_stats,
         attribute_schema,
+        currency_schema,
         plugin_state_store,
         global_sessions,
     )
@@ -678,6 +689,7 @@ async fn fire_hook(
     entity_characters: &EntityCharacters,
     npc_stats: &NpcStats,
     attribute_schema: &AttributeSchema,
+    currency_schema: &CurrencySchema,
     plugin_state_store: &crate::plugin_state::PluginStateStore,
     global_sessions: &Sessions,
     mut call: impl FnMut(&mut plugin_host::LoadedPlugin) -> common::Result<()>,
@@ -696,6 +708,7 @@ async fn fire_hook(
             entity_characters,
             npc_stats,
             attribute_schema,
+            currency_schema,
             plugin_state_store,
             global_sessions,
         )
@@ -726,12 +739,13 @@ async fn apply_plugin_pending_effects(
     pending_stat_deltas: Vec<(String, String, i64)>,
     pending_item_grants: Vec<(String, String, i64)>,
     pending_item_removals: Vec<(String, String, i64)>,
-    pending_currency_deltas: Vec<(String, i64)>,
+    pending_currency_deltas: Vec<(String, String, i64)>,
     pending_state_writes: Vec<(plugin_host::PluginStateScope, String, Vec<u8>)>,
     character_store: &CharacterStore,
     entity_characters: &EntityCharacters,
     npc_stats: &NpcStats,
     attribute_schema: &AttributeSchema,
+    currency_schema: &CurrencySchema,
     plugin_state_store: &crate::plugin_state::PluginStateStore,
     // #211: pushes `StatChanged`/`ItemChanged`/`CurrencyChanged` to the
     // one connection that owns whichever entity/character a write below
@@ -887,29 +901,43 @@ async fn apply_plugin_pending_effects(
         }
     }
 
-    for (entity_id, delta) in pending_currency_deltas {
+    for (entity_id, currency_key, delta) in pending_currency_deltas {
         let Some(character_id) = resolve_character(entity_characters, &entity_id) else {
             tracing::warn!(
                 entity_id,
+                currency_key,
                 "plugin requested a currency delta for an invalid entity id, an NPC \
                  (currency is character-owned only), or an unknown entity"
             );
             continue;
         };
-        match character_store.modify_currency(character_id, delta).await {
+        if !currency_schema.is_declared(&currency_key) {
+            tracing::warn!(
+                entity_id,
+                currency_key,
+                "plugin requested a currency delta for an undeclared currency key \
+                 (see currency.schema.yaml)"
+            );
+            continue;
+        }
+        match character_store
+            .modify_currency(character_id, &currency_key, delta)
+            .await
+        {
             Ok(new_balance) => {
                 if let Ok(parsed_entity_id) = entity_id.parse::<EntityId>() {
                     send_to(
                         global_sessions,
                         parsed_entity_id,
                         ServerMessage::CurrencyChanged {
+                            currency_key: currency_key.clone(),
                             balance: new_balance,
                         },
                     );
                 }
             }
             Err(e) => {
-                tracing::warn!(entity_id, error = %e, "plugin's modify-currency failed");
+                tracing::warn!(entity_id, currency_key, error = %e, "plugin's modify-currency failed");
             }
         }
     }
@@ -956,9 +984,14 @@ async fn apply_plugin_pending_effects(
 /// Spawns one NPC from a zone manifest's declared spawn table, at that
 /// table's first point — used both to seed the zone from a plugin's
 /// `on_load` requests before this actor starts (`main`) and from later
-/// `on_message`-triggered `spawn-npc` calls once the plugin is running
-/// live on this task (#95).
-pub fn spawn_npc_from_table(zone: &mut Zone, spawn_table_id: &str) {
+/// `on_message`/`on_chat_command`-triggered `spawn-npc` calls once the
+/// plugin is running live on this task (#95). Returns the real
+/// `(entity_id, entity_type)` on success — `None` on an unknown or empty
+/// spawn table, already logged here, nothing further for the caller to
+/// do. The caller (`spawn_requested_npcs`) uses the returned pair to fire
+/// `on-entity-spawn` back to the requesting plugin (#214) — this
+/// function itself has no plugin handle to call that with.
+pub fn spawn_npc_from_table(zone: &mut Zone, spawn_table_id: &str) -> Option<(EntityId, String)> {
     let Some(table) = zone
         .manifest
         .spawn_tables
@@ -966,13 +999,14 @@ pub fn spawn_npc_from_table(zone: &mut Zone, spawn_table_id: &str) {
         .find(|table| table.id == spawn_table_id)
     else {
         tracing::warn!(spawn_table_id, "plugin requested an unknown spawn table");
-        return;
+        return None;
     };
     let Some(point) = table.points.first().copied() else {
         tracing::warn!(spawn_table_id, "plugin requested an empty spawn table");
-        return;
+        return None;
     };
     let route_id = table.route_id.clone();
+    let entity_type = table.entity_type.clone();
 
     let entity_id = EntityId::new();
     match &route_id {
@@ -980,4 +1014,38 @@ pub fn spawn_npc_from_table(zone: &mut Zone, spawn_table_id: &str) {
         None => zone.spawn(entity_id, EntityKind::Npc, point),
     }
     tracing::info!(%entity_id, spawn_table_id, ?route_id, "spawned NPC from plugin");
+    Some((entity_id, entity_type))
+}
+
+/// Drains `runtime`'s pending `spawn-npc` requests, spawns each real NPC
+/// into `zone` via `spawn_npc_from_table`, and fires `on-entity-spawn`
+/// back to `runtime` for each one that actually spawned, carrying the
+/// `spawn-table-id` that caused it — the correlation a plugin needs to
+/// match a specific `spawn-npc` call it made to the resulting real entity
+/// id, since `spawn-npc` itself can't synchronously return one (#214).
+/// Shared by every call site that drains a plugin's pending spawns (the
+/// `on-zone-loaded` startup seeding in `main`, and every later
+/// `on-message`/`on-chat-command` dispatch below) so this firing behavior
+/// is identical no matter which hook queued the request. Only fires back
+/// to `runtime` itself — never a fan-out to every loaded plugin — since
+/// only the plugin that made the request has any correlation token to
+/// consume.
+pub fn spawn_requested_npcs(runtime: &mut PluginRuntime, zone: &mut Zone, zone_id: &str) {
+    let wants_entity_spawn = runtime.wants("on-entity-spawn");
+    for spawn_table_id in runtime.drain_pending_spawns() {
+        let Some((entity_id, entity_type)) = spawn_npc_from_table(zone, &spawn_table_id) else {
+            continue;
+        };
+        if !wants_entity_spawn {
+            continue;
+        }
+        let entity_id_str = entity_id.to_string();
+        if let Err(e) =
+            runtime
+                .plugin
+                .on_entity_spawn(zone_id, &entity_id_str, &entity_type, &spawn_table_id)
+        {
+            tracing::warn!(plugin = %runtime.name, %entity_id, spawn_table_id, error = %e, "plugin on_entity_spawn hook failed");
+        }
+    }
 }

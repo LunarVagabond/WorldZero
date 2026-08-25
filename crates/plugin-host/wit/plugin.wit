@@ -25,17 +25,26 @@
 // systems built as a plugin rather than a core class/race enum), the one
 // hook that fires before any entity exists for the thing it's about,
 // hence the one narrow exception to "every id crossing this boundary is
-// an entity id." #216 adds `on-craft-complete` — the post-craft
-// notification for #215's generic crafting decision, gated behind the
-// `economy` capability at the firing site (`server::session`) rather
-// than through a host-function call, since it has no corresponding host
-// function to gate. See
+// an entity id." #214 adds a `spawn-table-id` parameter to
+// `on-entity-spawn` and wires it up for real (it previously existed in
+// this file but nothing ever called it) — the correlation token a plugin
+// needs to match a specific `spawn-npc` call to the `on-entity-spawn`
+// event it eventually causes, since `spawn-npc` itself can't
+// synchronously return the real entity id (see both hooks' doc comments
+// below). #216 adds `on-craft-complete` — the post-craft notification
+// for #215's generic crafting decision, gated behind the `economy`
+// capability at the firing site (`server::session`) rather than through
+// a host-function call, since it has no corresponding host function to
+// gate. See
 // docs/specs/Plugin_API.md, "Beyond this v0 slice" for what still isn't
-// here. A WIT "world" is the actual versioning mechanism
-// (docs/PROPOSAL.md, "Interface Technology"): a breaking change bumps
-// the package version below and/or lands as a new world, rather than
-// silently changing what `plugin` means underneath existing compiled
-// plugins.
+// here. #218 adds a `currency-key` parameter to `modify-currency` — a
+// dev-declared multi-currency system (`currency.schema.yaml`,
+// #217's decision) replaces the old implicit single balance, so a
+// currency's identity now has to cross this boundary too. A WIT "world"
+// is the actual versioning mechanism (docs/PROPOSAL.md, "Interface
+// Technology"): a breaking change bumps the package version below
+// and/or lands as a new world, rather than silently changing what
+// `plugin` means underneath existing compiled plugins.
 
 package worldzero:plugin@0.10.0;
 
@@ -44,10 +53,19 @@ package worldzero:plugin@0.10.0;
 /// System": "no direct DB access, no raw network access, no filesystem
 /// access, ever").
 interface host {
-    /// Spawns one NPC from a zone's declared spawn table
-    /// (content::manifest::SpawnTable). Returns the spawned entity's id
-    /// (a UUID, opaque to the plugin) or an error string (e.g. the
-    /// spawn table doesn't exist, or is already at max-population).
+    /// Requests one NPC spawn from a zone's declared spawn table
+    /// (content::manifest::SpawnTable). The `Ok` string is **not** the
+    /// real entity id — the host can't synchronously assign one from
+    /// inside this sandboxed call (the real entity is only created later,
+    /// once the caller drains the request outside the WASM call, the same
+    /// "can't touch `&mut Zone`/the DB from inside a sandboxed sync call"
+    /// constraint every other queued host function in this interface has)
+    /// — it is `spawn-table-id` echoed back, only useful as a same-call
+    /// sanity check, never a real entity id. To actually learn the real
+    /// entity id — and correlate it back to this specific call, if the
+    /// plugin made more than one for the same table — consume
+    /// `on-entity-spawn` below — it fires back to this plugin, carrying
+    /// `spawn-table-id`, once the spawn actually lands (#214).
     spawn-npc: func(spawn-table-id: string) -> result<string, string>;
 
     /// Sends a visible message to one connected client, addressed by
@@ -111,13 +129,17 @@ interface host {
     /// subsequent hook/message if that matters to the plugin's logic.
     remove-item: func(entity-id: string, item-type: string, quantity: s64) -> result<_, string>;
 
-    /// Adjusts `entity-id`'s currency balance by `delta` (positive or
-    /// negative) — queued and applied through
-    /// `character::CharacterStore::modify_currency`. Same player-entity-only
-    /// caveat and same "queued, not confirmed synchronously" caveat as
-    /// `remove-item`. Rejected (nothing applied) if the result would go
-    /// negative.
-    modify-currency: func(entity-id: string, delta: s64) -> result<_, string>;
+    /// Adjusts `entity-id`'s balance of `currency-key` (one of the
+    /// dev-declared currencies in `currency.schema.yaml`, #217/
+    /// #218 — an opaque string the host never interprets beyond looking
+    /// it up) by `delta` (positive or negative) — queued and applied
+    /// through `character::CharacterStore::modify_currency`. Same
+    /// player-entity-only caveat and same "queued, not confirmed
+    /// synchronously" caveat as `remove-item`. Rejected (nothing applied)
+    /// if `currency-key` isn't a declared currency, or if the result
+    /// would go negative — each currency's balance is independent, so
+    /// going negative on one never affects another.
+    modify-currency: func(entity-id: string, currency-key: string, delta: s64) -> result<_, string>;
 
     /// Returns the roles (docs/specs/Auth_Spec.md, "Account roles",
     /// decision #114) held by the account behind `entity-id` — global
@@ -239,11 +261,34 @@ interface hooks {
     /// response mechanism is deferred to a follow-up ticket.
     on-character-create: func(character-id: string, zone-id: string);
 
-    /// Fired after any entity (spawned by this plugin or otherwise)
-    /// enters `zone-id`'s simulation — `entity-type` matches
-    /// content::manifest::SpawnTable's `entity_type` field for NPCs
-    /// (e.g. "npc.wolf"), or is empty for a player entity.
-    on-entity-spawn: func(zone-id: string, entity-id: string, entity-type: string);
+    /// Fired once an NPC requested via `spawn-npc` is actually spawned
+    /// (`server::world_actor::spawn_npc_from_table` calls this itself
+    /// right after creating the real entity, same "confirmation, not a
+    /// request" shape as `on-item-acquire`/`on-death` — see those hooks'
+    /// own doc comments) — `entity-type` matches
+    /// content::manifest::SpawnTable's `entity_type` field (e.g.
+    /// "npc.wolf"). `spawn-table-id` is the id passed to the `spawn-npc`
+    /// call that caused this spawn (#214) — the correlation token a
+    /// plugin needs to match a specific `on-entity-spawn` event back to a
+    /// specific `spawn-npc` call, since `spawn-npc` itself can't
+    /// synchronously return the real entity id (the real entity is only
+    /// created later, once the caller drains the request outside the
+    /// sandboxed call — see `spawn-npc`'s own doc comment below). Because
+    /// requests for the same `spawn-table-id` are drained, spawned, and
+    /// fired back to this same plugin in the exact order they were made,
+    /// a plugin that calls `spawn-npc` more than once for the same table
+    /// can still tell its calls apart: track a per-call label (or just a
+    /// counter) before each `spawn-npc` call and consume it here in
+    /// arrival order, e.g. by round-tripping it through
+    /// `plugin-state-set`/`-get` (`docs/specs/Plugin_API.md`'s "Entity
+    /// correlation via on-entity-spawn" walks through this).
+    /// Only fires back to the plugin whose own `spawn-npc` call caused
+    /// the spawn — it does **not** fan out to every loaded plugin the way
+    /// most other hooks do (`fire_hook`'s doc comment), and it does
+    /// **not** fire for a player entity joining a zone (that's
+    /// `on-player-join-zone` below, a different event with different
+    /// timing — after roster delivery, not "just spawned").
+    on-entity-spawn: func(zone-id: string, entity-id: string, entity-type: string, spawn-table-id: string);
 
     /// Fired once a player's connection has fully joined `zone-id` —
     /// after roster delivery, so a `send-message` call made from inside

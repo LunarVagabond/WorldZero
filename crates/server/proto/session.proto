@@ -55,9 +55,11 @@
 // Each is sent only to the one connection that owns the affected
 // entity/character — never zone-broadcast, unlike `Moved` — since a
 // stat/inventory/currency value is private. `CurrencyChanged` carries a
-// single `balance` with no currency key, matching `character`'s current
-// single `currency_balance` column; a `currency_key` for multi-currency
-// support is a separate, not-yet-built ticket (#218).
+// `currency_key` alongside `balance` (#218) — a dev-declared multi-
+// currency system (`character.currency_schema.CurrencySchema`,
+// `currency.schema.yaml`, #217's decision) replaced `character`'s old
+// single `currency_balance` column, so a currency's identity has to be
+// on the wire too, not just its resulting value.
 //
 // #216 adds `CraftItem` (client) -- implementing #215's crafting
 // decision: resolves recipe_key against the dev-declared
@@ -476,8 +478,11 @@ message ItemChanged {
 
 // Pushed to a connection whenever its own character's currency balance
 // actually changes via `modify-currency` (#211) — balance is the
-// resulting balance, not the delta. No currency_key yet (#218) — matches
-// `character`'s current single `currency_balance` column.
+// resulting balance, not the delta. `currency_key` (#218) names which of
+// the dev-declared currencies (`currency.schema.yaml`) changed — every
+// currency has a fully independent balance, so this always accompanies
+// `balance`.
 message CurrencyChanged {
-  int64 balance = 1;
+  string currency_key = 1;
+  int64 balance = 2;
 }

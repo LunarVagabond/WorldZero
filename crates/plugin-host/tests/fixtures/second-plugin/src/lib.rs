@@ -24,7 +24,8 @@ impl Guest for Plugin {
 
     fn on_character_create(_character_id: String, _zone_id: String) {}
 
-    fn on_entity_spawn(_zone_id: String, _entity_id: String, _entity_type: String) {}
+    fn on_entity_spawn(_zone_id: String, _entity_id: String, _entity_type: String, _spawn_table_id: String) {
+    }
 
     // Distinct wording from test-plugin's own on-player-join-zone
     // greeting — a real end-to-end test can tell the two apart by

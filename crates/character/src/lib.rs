@@ -6,6 +6,7 @@
 pub mod archetype_schema;
 pub mod crafting;
 pub mod crafting_schema;
+pub mod currency_schema;
 pub mod inventory;
 pub mod party;
 pub mod party_schema;
@@ -15,6 +16,7 @@ pub mod store;
 
 pub use archetype_schema::{ArchetypeSchema, CharacterArchetype};
 pub use crafting_schema::{CraftingInput, CraftingOutput, CraftingSchema, Recipe};
+pub use currency_schema::{Currency, CurrencyDenomination, CurrencySchema};
 pub use party::PartyStore;
 pub use party_schema::{PartySchema, PartyType};
 pub use schema::{AttributeSchema, StatDeclaration, StatType};
