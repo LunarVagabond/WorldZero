@@ -63,9 +63,9 @@ pub struct PluginCallbacks {
     /// `(entity_id, item_type, quantity)`, drained and applied through
     /// `character::CharacterStore::remove_item` by the caller.
     pending_item_removals: Arc<Mutex<Vec<(String, String, i64)>>>,
-    /// `(entity_id, delta)`, drained and applied through
+    /// `(entity_id, currency_key, delta)`, drained and applied through
     /// `character::CharacterStore::modify_currency` by the caller.
-    pending_currency_deltas: Arc<Mutex<Vec<(String, i64)>>>,
+    pending_currency_deltas: Arc<Mutex<Vec<(String, String, i64)>>>,
     /// Backs `caller-role` (#124) — a synchronous lookup against
     /// `session::EntityRoles`, populated at join time, never a live
     /// `auth` role-store query from inside this sandboxed sync call (see
@@ -195,11 +195,17 @@ impl HostCallbacks for PluginCallbacks {
         Ok(())
     }
 
-    fn modify_currency(&mut self, entity_id: &str, delta: i64) -> std::result::Result<(), String> {
-        self.pending_currency_deltas
-            .lock()
-            .unwrap()
-            .push((entity_id.to_string(), delta));
+    fn modify_currency(
+        &mut self,
+        entity_id: &str,
+        currency_key: &str,
+        delta: i64,
+    ) -> std::result::Result<(), String> {
+        self.pending_currency_deltas.lock().unwrap().push((
+            entity_id.to_string(),
+            currency_key.to_string(),
+            delta,
+        ));
         Ok(())
     }
 
@@ -295,7 +301,7 @@ pub struct PluginRuntime {
     pending_moves: Arc<Mutex<Vec<(String, f64, f64)>>>,
     pending_item_grants: Arc<Mutex<Vec<(String, String, i64)>>>,
     pending_item_removals: Arc<Mutex<Vec<(String, String, i64)>>>,
-    pending_currency_deltas: Arc<Mutex<Vec<(String, i64)>>>,
+    pending_currency_deltas: Arc<Mutex<Vec<(String, String, i64)>>>,
     pending_state_writes: PendingStateWrites,
     pending_deaths: Arc<Mutex<Vec<String>>>,
     pending_respawns: Arc<Mutex<Vec<String>>>,
@@ -339,9 +345,9 @@ impl PluginRuntime {
         std::mem::take(&mut self.pending_item_removals.lock().unwrap())
     }
 
-    /// `(entity_id, delta)` requested via `modify-currency` since the
-    /// last drain, in call order.
-    pub fn drain_pending_currency_deltas(&self) -> Vec<(String, i64)> {
+    /// `(entity_id, currency_key, delta)` requested via `modify-currency`
+    /// since the last drain, in call order.
+    pub fn drain_pending_currency_deltas(&self) -> Vec<(String, String, i64)> {
         std::mem::take(&mut self.pending_currency_deltas.lock().unwrap())
     }
 

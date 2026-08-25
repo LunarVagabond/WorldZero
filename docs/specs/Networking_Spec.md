@@ -88,7 +88,7 @@ Before #211, a plugin's `apply-stat-delta`/`grant-item`/`remove-item`/`modify-cu
 
 - **`StatChanged { stat_key, value }`** — after `apply-stat-delta` (a player-entity target) or `apply-stat-delta-for-character` actually writes, `value` being the resulting stat, not the delta.
 - **`ItemChanged { item_type, quantity }`** — after `grant-item`/`remove-item` actually writes, `quantity` being the stack's resulting total (`0` if `remove-item` emptied it).
-- **`CurrencyChanged { balance }`** — after `modify-currency` actually writes, `balance` being the resulting balance. No `currency_key` yet — matches `character`'s current single `currency_balance` column; multi-currency support is a separate, not-yet-built ticket (#218).
+- **`CurrencyChanged { currency_key, balance }`** — after `modify-currency` actually writes, `balance` being the resulting balance of `currency_key` (one of `currency.schema.yaml`'s dev-declared currencies, #217/#218) — never a shared/ambiguous balance, since every currency on a character is independently tracked.
 
 **Sent only to the one connection that owns the affected entity/character — never zone-broadcast**, unlike `Moved`: a stat/inventory/currency value is private to its owner, not something every nearby client needs to see. Resolved through the same maps `send-message`/party/guild pushes already use (`server::session::EntityCharacters`/`CharacterEntities`, and the process-wide `Sessions` map, `server::session::Sessions`) — `server::world_actor::apply_plugin_pending_effects` does the send right after each write it applies succeeds.
 
