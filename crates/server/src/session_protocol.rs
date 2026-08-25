@@ -284,6 +284,37 @@ pub enum ServerMessage {
     },
     /// This connection's guild was disbanded (#179).
     GuildDisbanded {},
+    /// Pushed to this connection whenever one of its own character's
+    /// declared stats actually changes via `apply-stat-delta`/
+    /// `apply-stat-delta-for-character` (#211/#210) — automatic, no
+    /// plugin-side `send-message` required. `value` is the resulting
+    /// stat value after the delta, not the delta itself. Never sent for
+    /// an NPC-targeted `apply-stat-delta` (#197) — an NPC has no owning
+    /// connection to push to; and never sent for
+    /// `apply-stat-delta-for-character` if the character has no live
+    /// connection at the moment it's called (it fires from
+    /// `on-character-create`, before any entity/session necessarily
+    /// exists — see `wit/plugin.wit`'s doc comment).
+    StatChanged {
+        stat_key: String,
+        value: i64,
+    },
+    /// Pushed to this connection whenever one of its own character's
+    /// item stacks actually changes via `grant-item`/`remove-item`
+    /// (#211/#210) — `quantity` is the stack's resulting total (`0` if a
+    /// `remove-item` emptied the stack), not the delta granted/removed.
+    ItemChanged {
+        item_type: String,
+        quantity: i64,
+    },
+    /// Pushed to this connection whenever its own character's currency
+    /// balance actually changes via `modify-currency` (#211/#210) —
+    /// `balance` is the resulting balance, not the delta. No
+    /// `currency_key` yet (#218) — matches `character`'s current single
+    /// `currency_balance` column.
+    CurrencyChanged {
+        balance: i64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -641,6 +672,22 @@ impl From<&ServerMessage> for proto::ServerMessage {
                 members: members.iter().map(proto::GuildMember::from).collect(),
             }),
             ServerMessage::GuildDisbanded {} => Kind::GuildDisbanded(proto::GuildDisbanded {}),
+            ServerMessage::StatChanged { stat_key, value } => {
+                Kind::StatChanged(proto::StatChanged {
+                    stat_key: stat_key.clone(),
+                    value: *value,
+                })
+            }
+            ServerMessage::ItemChanged {
+                item_type,
+                quantity,
+            } => Kind::ItemChanged(proto::ItemChanged {
+                item_type: item_type.clone(),
+                quantity: *quantity,
+            }),
+            ServerMessage::CurrencyChanged { balance } => {
+                Kind::CurrencyChanged(proto::CurrencyChanged { balance: *balance })
+            }
         };
         proto::ServerMessage { kind: Some(kind) }
     }
@@ -751,6 +798,19 @@ impl TryFrom<proto::ServerMessage> for ServerMessage {
             }),
             Some(Kind::GuildDisbanded(proto::GuildDisbanded {})) => {
                 Ok(ServerMessage::GuildDisbanded {})
+            }
+            Some(Kind::StatChanged(proto::StatChanged { stat_key, value })) => {
+                Ok(ServerMessage::StatChanged { stat_key, value })
+            }
+            Some(Kind::ItemChanged(proto::ItemChanged {
+                item_type,
+                quantity,
+            })) => Ok(ServerMessage::ItemChanged {
+                item_type,
+                quantity,
+            }),
+            Some(Kind::CurrencyChanged(proto::CurrencyChanged { balance })) => {
+                Ok(ServerMessage::CurrencyChanged { balance })
             }
             None => Err(Error::new(
                 "server",

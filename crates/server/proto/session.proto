@@ -44,6 +44,20 @@
 // an entity. Acting on an offline guild member (e.g. kicking or
 // promoting someone not currently connected) isn't supported by this
 // wire protocol in v0.
+//
+// #211 adds `StatChanged`/`ItemChanged`/`CurrencyChanged` (server only —
+// nothing a client ever requests) — pushed automatically whenever a
+// plugin's `apply-stat-delta`/`apply-stat-delta-for-character`/
+// `grant-item`/`remove-item`/`modify-currency` host-function call
+// actually lands (#210's decision), closing the gap where the write
+// succeeded in Postgres but the connected client never learned the new
+// value without the plugin inventing its own `PluginMessage` convention.
+// Each is sent only to the one connection that owns the affected
+// entity/character — never zone-broadcast, unlike `Moved` — since a
+// stat/inventory/currency value is private. `CurrencyChanged` carries a
+// single `balance` with no currency key, matching `character`'s current
+// single `currency_balance` column; a `currency_key` for multi-currency
+// support is a separate, not-yet-built ticket (#218).
 
 syntax = "proto3";
 
@@ -270,6 +284,9 @@ message ServerMessage {
     GuildInviteDeclined guild_invite_declined = 14;
     GuildUpdate guild_update = 15;
     GuildDisbanded guild_disbanded = 16;
+    StatChanged stat_changed = 17;
+    ItemChanged item_changed = 18;
+    CurrencyChanged currency_changed = 19;
   }
 }
 
@@ -410,4 +427,34 @@ message GuildUpdate {
 
 // This connection's guild was disbanded (#179).
 message GuildDisbanded {
+}
+
+// Pushed to a connection whenever one of its own character's declared
+// stats actually changes via `apply-stat-delta`/
+// `apply-stat-delta-for-character` (#211) — stat_key is the same opaque,
+// game-defined string every other stat_key in this protocol uses; value
+// is the resulting stat value after the delta was applied, not the delta
+// itself. Never sent for an NPC-targeted `apply-stat-delta` — an NPC has
+// no owning connection to push to.
+message StatChanged {
+  string stat_key = 1;
+  int64 value = 2;
+}
+
+// Pushed to a connection whenever one of its own character's item stacks
+// actually changes via `grant-item`/`remove-item` (#211) — quantity is
+// the stack's resulting total (0 if a `remove-item` emptied the stack),
+// not the delta granted/removed, same "resulting value, not delta"
+// convention as StatChanged.
+message ItemChanged {
+  string item_type = 1;
+  int64 quantity = 2;
+}
+
+// Pushed to a connection whenever its own character's currency balance
+// actually changes via `modify-currency` (#211) — balance is the
+// resulting balance, not the delta. No currency_key yet (#218) — matches
+// `character`'s current single `currency_balance` column.
+message CurrencyChanged {
+  int64 balance = 1;
 }
