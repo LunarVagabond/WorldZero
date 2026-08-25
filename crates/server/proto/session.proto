@@ -31,6 +31,19 @@
 // `PartyInviteReceived`/`PartyInviteDeclined`/`PartyUpdate` (server).
 // `JoinGroupLayer` itself now validates real party membership before
 // moving anyone (see its own comment, updated by #178).
+//
+// #179 adds the real guild system: `GuildCreate`/`GuildInvite`/
+// `GuildInviteResponse`/`GuildLeave`/`GuildDisband`/`GuildKick`/
+// `GuildPromote`/`GuildDemote`/`GuildSetMotd`/`GuildSetTag` (client) and
+// `GuildInviteReceived`/`GuildInviteDeclined`/`GuildUpdate`/
+// `GuildDisbanded` (server). Unlike party, guild membership is
+// account-scoped, not tied to a specific character (`guild::GuildStore`'s
+// own doc comment) — but every message here still addresses a *target*
+// player by their live entity id, same discipline as `PartyInvite`, since
+// only a currently-connected player can be resolved to the account behind
+// an entity. Acting on an offline guild member (e.g. kicking or
+// promoting someone not currently connected) isn't supported by this
+// wire protocol in v0.
 
 syntax = "proto3";
 
@@ -47,6 +60,16 @@ message ClientMessage {
     PartyInvite party_invite = 7;
     PartyInviteResponse party_invite_response = 8;
     PartyLeave party_leave = 9;
+    GuildCreate guild_create = 10;
+    GuildInvite guild_invite = 11;
+    GuildInviteResponse guild_invite_response = 12;
+    GuildLeave guild_leave = 13;
+    GuildDisband guild_disband = 14;
+    GuildKick guild_kick = 15;
+    GuildPromote guild_promote = 16;
+    GuildDemote guild_demote = 17;
+    GuildSetMotd guild_set_motd = 18;
+    GuildSetTag guild_set_tag = 19;
   }
 }
 
@@ -146,6 +169,82 @@ message PartyInviteResponse {
 message PartyLeave {
 }
 
+// Creates a new guild owned by this connection's own account, named
+// `name` (#179) — Error if the account is already in a guild. The
+// founder is placed at the guild schema's founder rank
+// (guild::GuildSchema::founder_rank, always the first declared entry in
+// guild.schema.yaml).
+message GuildCreate {
+  string name = 1;
+}
+
+// Invites target_entity_id's account to this connection's own guild
+// (#179) — Error if this connection has no guild, its rank lacks the
+// `invite` permission, or the target is already in a guild. A no-op
+// beyond delivering GuildInviteReceived; nothing is committed until
+// GuildInviteResponse accepts. At most one pending invite per invitee —
+// a later invite before the first is answered simply replaces it.
+message GuildInvite {
+  string target_entity_id = 1;
+}
+
+// Answers this connection's own most recently received guild invite, if
+// any (#179) — Error if there is none pending.
+message GuildInviteResponse {
+  bool accept = 1;
+}
+
+// Leaves this connection's own current guild (#179). A member at the
+// guild's founder rank can't leave while other members remain — they
+// must promote a successor or disband first; a lone founder leaving
+// dissolves the guild entirely. Error if this connection isn't
+// currently in a guild.
+message GuildLeave {
+}
+
+// Disbands this connection's own current guild (#179) — only a
+// founder-rank member may do this. Error otherwise, or if this
+// connection isn't in a guild.
+message GuildDisband {
+}
+
+// Removes target_entity_id's account from this connection's own guild
+// (#179) — requires the `kick` permission; a founder-rank target can
+// never be kicked.
+message GuildKick {
+  string target_entity_id = 1;
+}
+
+// Moves target_entity_id's account to rank_key within this connection's
+// own guild (#179) — requires the `promote` permission. Moving anyone
+// into or out of the founder rank is restricted to an actor who already
+// holds the founder rank themselves, regardless of the `promote`
+// permission (guild::GuildStore's own core invariant).
+message GuildPromote {
+  string target_entity_id = 1;
+  string rank_key = 2;
+}
+
+// Same shape as GuildPromote, gated by the `demote` permission instead
+// (#179) — the store applies the identical rank-move logic either way;
+// which message a client sends is purely a UI-intent distinction.
+message GuildDemote {
+  string target_entity_id = 1;
+  string rank_key = 2;
+}
+
+// Sets this connection's own guild's message-of-the-day (#179) —
+// requires the `edit_motd` permission. Empty string clears it.
+message GuildSetMotd {
+  string motd = 1;
+}
+
+// Sets this connection's own guild's short tag/abbreviation (#179) —
+// requires the `edit_tag` permission. Empty string clears it.
+message GuildSetTag {
+  string tag = 1;
+}
+
 message RosterEntry {
   string entity_id = 1;
   string entity_type = 2;
@@ -167,6 +266,10 @@ message ServerMessage {
     PartyInviteReceived party_invite_received = 10;
     PartyInviteDeclined party_invite_declined = 11;
     PartyUpdate party_update = 12;
+    GuildInviteReceived guild_invite_received = 13;
+    GuildInviteDeclined guild_invite_declined = 14;
+    GuildUpdate guild_update = 15;
+    GuildDisbanded guild_disbanded = 16;
   }
 }
 
@@ -271,4 +374,40 @@ message PartyInviteDeclined {
 // party" (just left, or the party just dissolved).
 message PartyUpdate {
   repeated string members = 1;
+}
+
+// A guild invite arrived for this connection's own entity (#179) —
+// from_entity_id names the inviter. Answer with GuildInviteResponse.
+message GuildInviteReceived {
+  string from_entity_id = 1;
+}
+
+// The guild invite this connection sent was declined (#179).
+message GuildInviteDeclined {
+  string by_entity_id = 1;
+}
+
+// A member entry in GuildUpdate — entity_id is that member's live
+// entity id if currently connected, empty otherwise (#179; unlike party,
+// a guild roster includes offline members, who have no live entity id
+// to report).
+message GuildMember {
+  string entity_id = 1;
+  string rank_key = 2;
+}
+
+// This connection's current guild, sent after any membership or
+// metadata change (create, invite accept, leave, kick, disband, rename,
+// motd/tag edit — #179). guild_id is empty and members is empty to mean
+// "no guild" (just left, kicked, or the guild just dissolved).
+message GuildUpdate {
+  string guild_id = 1;
+  string name = 2;
+  string motd = 3;
+  string tag = 4;
+  repeated GuildMember members = 5;
+}
+
+// This connection's guild was disbanded (#179).
+message GuildDisbanded {
 }

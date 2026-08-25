@@ -1,0 +1,17 @@
+[package]
+name = "guild"
+description = "Persistent, account-scoped guilds — roster, dev-declared rank hierarchy, permissions."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+common = { version = "0.1.0", path = "../common" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_yaml = "0.9.34"
+sqlx = { version = "0.9.0", default-features = false, features = ["json", "postgres", "runtime-tokio", "tls-rustls-aws-lc-rs", "uuid"] }
+uuid = { version = "1.25.0", features = ["v7"] }
+
+[dev-dependencies]
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros"] }

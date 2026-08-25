@@ -115,6 +115,7 @@ Framing in Rust terms (implementation language locked, see [Technology Stack (cu
 | `world` | Per-zone simulation: tick loop, spatial index (see [Spatial Index: A → Z Roadmap](#spatial-index-a--z-roadmap)), authoritative movement/collision |
 | `chat` | Cross-shard messaging, presence, channels |
 | `transfer` | Character transfer execution, ticket/cash gating, audit trail |
+| `guild` | Persistent, account-scoped guilds: roster, dev-declared rank hierarchy and permissions, metadata (see docs/specs/Chat_Spec.md's "Guild system") |
 | `plugin-host` | WASM runtime, sandboxing, host API surface exposed to plugins |
 | `content` | Map/NPC/route manifest loading, versioning, and validation (see [World Content: Maps, NPCs, and Routes](#world-content-maps-npcs-and-routes)) |
 | `common` | Tightly-scoped cross-cutting code shared by every other crate: logging setup, shared error/result types, config loading. Deliberately not a general-purpose dumping ground — see [Observability & Operations](#observability--operations) for the logging piece. |

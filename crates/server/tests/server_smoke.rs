@@ -78,6 +78,8 @@ const GROUP_LAYER_ADDR: &str = "127.0.0.1:7935";
 const GROUP_LAYER_RECONNECT_ADDR: &str = "127.0.0.1:7936";
 const PARTY_DECLINE_ADDR: &str = "127.0.0.1:7937";
 const PARTY_LEAVE_ADDR: &str = "127.0.0.1:7938";
+const GUILD_CHAT_SYNC_ADDR: &str = "127.0.0.1:7939";
+const GUILD_NO_CHAT_ADDR: &str = "127.0.0.1:7940";
 
 struct ServerProcess {
     child: Child,
@@ -124,6 +126,53 @@ async fn read_character_stat(character_id: &str, key: &str) -> Option<i64> {
         .bind(character_id)
         .bind(key)
         .fetch_one(&pool)
+        .await
+        .unwrap()
+}
+
+/// Reads an account's id straight from `accounts.username` (#179's chat
+/// sync tests) — a direct DB read, same shape as `read_character_stat`,
+/// since there's no client-facing "what's my account id" message.
+async fn account_id_for_username(username: &str) -> uuid::Uuid {
+    let pg_config = common::config::PostgresConfig::from_env().expect("WZ_POSTGRES_* env vars set");
+    let pool = common::pool::postgres_pool(&pg_config, common::pool::PoolOptions::default())
+        .await
+        .expect("failed to connect to Postgres to read an account id");
+    sqlx::query_scalar("SELECT id FROM accounts WHERE username = $1")
+        .bind(username)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+}
+
+/// Reads a guild's synced chat channel id straight from `guilds.name`
+/// (#179's chat sync tests) — `None` if chat was disabled at creation
+/// (the column stays `NULL`, see `guild::GuildStore::create`'s own
+/// `chat_channel_id` parameter).
+async fn guild_chat_channel_id(guild_name: &str) -> Option<uuid::Uuid> {
+    let pg_config = common::config::PostgresConfig::from_env().expect("WZ_POSTGRES_* env vars set");
+    let pool = common::pool::postgres_pool(&pg_config, common::pool::PoolOptions::default())
+        .await
+        .expect("failed to connect to Postgres to read a guild's chat channel id");
+    sqlx::query_scalar("SELECT chat_channel_id FROM guilds WHERE name = $1")
+        .bind(guild_name)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+}
+
+/// Every account currently a member of chat channel `channel_id` (#179's
+/// chat sync tests) — a direct DB read against `chat::ChannelStore`'s own
+/// `chat_channel_members` table, proving the sync actually happened
+/// rather than trusting the wire protocol's own account of itself.
+async fn chat_channel_member_ids(channel_id: uuid::Uuid) -> Vec<uuid::Uuid> {
+    let pg_config = common::config::PostgresConfig::from_env().expect("WZ_POSTGRES_* env vars set");
+    let pool = common::pool::postgres_pool(&pg_config, common::pool::PoolOptions::default())
+        .await
+        .expect("failed to connect to Postgres to read chat channel members");
+    sqlx::query_scalar("SELECT account_id FROM chat_channel_members WHERE channel_id = $1")
+        .bind(channel_id)
+        .fetch_all(&pool)
         .await
         .unwrap()
 }
@@ -448,6 +497,11 @@ fn setup_config_dir(test_name: &str) -> PathBuf {
         config_dir.join("party.schema.yaml"),
     )
     .unwrap();
+    std::fs::copy(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../config/guild.schema.example.yaml"),
+        config_dir.join("guild.schema.yaml"),
+    )
+    .unwrap();
     // `<config_dir>/plugins/test-plugin/{plugin.toml,test_plugin.wasm}`
     // (#152's discovery convention) — only written if the compiled wasm
     // fixture actually exists, same "gracefully run with no plugin
@@ -520,6 +574,11 @@ fn setup_multi_plugin_config_dir(test_name: &str) -> PathBuf {
     std::fs::copy(
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../config/party.schema.example.yaml"),
         config_dir.join("party.schema.yaml"),
+    )
+    .unwrap();
+    std::fs::copy(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../config/guild.schema.example.yaml"),
+        config_dir.join("guild.schema.yaml"),
     )
     .unwrap();
 
@@ -605,6 +664,11 @@ fn setup_content_pack_config_dir(test_name: &str) -> PathBuf {
     std::fs::copy(
         repo_config_dir.join("party.schema.example.yaml"),
         config_dir.join("party.schema.yaml"),
+    )
+    .unwrap();
+    std::fs::copy(
+        repo_config_dir.join("guild.schema.example.yaml"),
+        config_dir.join("guild.schema.yaml"),
     )
     .unwrap();
     config_dir
@@ -2902,6 +2966,212 @@ async fn reconnecting_to_a_still_live_party_lands_on_its_current_layer() {
                     .any(|entry| entry.entity_id == first_entity_id),
                 "reconnect should have landed on first's layer, not a fresh one: {roster:?}"
             );
+            break;
+        }
+    }
+}
+
+/// Sends a `GuildInvite` from `inviter` to `invitee_entity_id`, drains
+/// `invitee`'s stream until its `GuildInviteReceived` confirms delivery,
+/// then answers it with `GuildInviteResponse { accept }` — the guild
+/// counterpart to `invite_and_respond` (#179).
+async fn guild_invite_and_respond(
+    inviter: &mut ClientStream,
+    invitee: &mut ClientStream,
+    invitee_entity_id: &str,
+    inviter_entity_id: &str,
+    accept: bool,
+) {
+    send_world(
+        inviter,
+        &ClientMessage::GuildInvite {
+            target_entity_id: invitee_entity_id.to_string(),
+        },
+    )
+    .await;
+
+    loop {
+        if let ServerMessage::GuildInviteReceived { from_entity_id } = recv_world(invitee).await {
+            assert_eq!(from_entity_id, inviter_entity_id);
+            break;
+        }
+    }
+
+    send_world(invitee, &ClientMessage::GuildInviteResponse { accept }).await;
+}
+
+/// #179's acceptance criteria: creating a guild syncs a real chat
+/// channel (not two independently-drifting membership lists), accepting
+/// an invite adds the new member to that channel, and leaving removes
+/// them again — proven against `chat_channel_members` directly, not just
+/// the wire protocol's own account of itself.
+#[tokio::test]
+#[ignore]
+async fn guild_creation_and_invite_sync_the_chat_channel_and_leaving_removes_it() {
+    let config_dir = setup_config_dir("guild-chat-sync");
+    let _server = start_server(&config_dir, GUILD_CHAT_SYNC_ADDR).await;
+    wait_for_port(GUILD_CHAT_SYNC_ADDR).await;
+
+    let mut founder = connect(&config_dir, GUILD_CHAT_SYNC_ADDR).await;
+    let founder_username = format!("guild-chat-founder-{}", uuid::Uuid::now_v7());
+    register_and_authenticate(&mut founder, &founder_username, "hunter2", _server.realm_id).await;
+    let founder_entity_id = loop {
+        if let ServerMessage::Joined { entity_id, .. } = recv_world(&mut founder).await {
+            break entity_id;
+        }
+    };
+
+    let guild_name = format!("Chat Sync Guild {}", uuid::Uuid::now_v7());
+    send_world(
+        &mut founder,
+        &ClientMessage::GuildCreate {
+            name: guild_name.clone(),
+        },
+    )
+    .await;
+    loop {
+        if let ServerMessage::GuildUpdate { members, .. } = recv_world(&mut founder).await {
+            assert_eq!(members.len(), 1);
+            assert_eq!(members[0].rank_key, "leader");
+            break;
+        }
+    }
+
+    let founder_account_id = account_id_for_username(&founder_username).await;
+    let channel_id = guild_chat_channel_id(&guild_name)
+        .await
+        .expect("chat is enabled, so guild creation should have synced a chat channel");
+    assert_eq!(
+        chat_channel_member_ids(channel_id).await,
+        vec![founder_account_id]
+    );
+
+    let mut member = connect(&config_dir, GUILD_CHAT_SYNC_ADDR).await;
+    let member_username = format!("guild-chat-member-{}", uuid::Uuid::now_v7());
+    register_and_authenticate(&mut member, &member_username, "hunter2", _server.realm_id).await;
+    let member_entity_id = loop {
+        if let ServerMessage::Joined { entity_id, .. } = recv_world(&mut member).await {
+            break entity_id;
+        }
+    };
+
+    guild_invite_and_respond(
+        &mut founder,
+        &mut member,
+        &member_entity_id,
+        &founder_entity_id,
+        true,
+    )
+    .await;
+
+    loop {
+        if let ServerMessage::GuildUpdate { members, .. } = recv_world(&mut member).await
+            && members.len() == 2
+        {
+            break;
+        }
+    }
+    loop {
+        if let ServerMessage::GuildUpdate { members, .. } = recv_world(&mut founder).await
+            && members.len() == 2
+        {
+            break;
+        }
+    }
+
+    let member_account_id = account_id_for_username(&member_username).await;
+    let mut synced_members = chat_channel_member_ids(channel_id).await;
+    synced_members.sort();
+    let mut expected = vec![founder_account_id, member_account_id];
+    expected.sort();
+    assert_eq!(synced_members, expected);
+
+    send_world(&mut member, &ClientMessage::GuildLeave {}).await;
+    loop {
+        if let ServerMessage::GuildUpdate { members, .. } = recv_world(&mut founder).await
+            && members.len() == 1
+        {
+            break;
+        }
+    }
+
+    assert_eq!(
+        chat_channel_member_ids(channel_id).await,
+        vec![founder_account_id]
+    );
+}
+
+/// #179's other acceptance requirement: a guild is core, not something
+/// that secretly needs the optional `chat` service — create/invite/
+/// accept/leave must all work correctly with `WZ_SERVICE_CHAT_ENABLED=false`,
+/// and no chat channel id should ever get stored on a guild created while
+/// chat is disabled.
+#[tokio::test]
+#[ignore]
+async fn guild_create_invite_and_leave_all_work_with_chat_disabled() {
+    let config_dir = setup_config_dir("guild-no-chat");
+    let _server = start_server_with(&config_dir, GUILD_NO_CHAT_ADDR, false).await;
+    wait_for_port(GUILD_NO_CHAT_ADDR).await;
+
+    let mut founder = connect(&config_dir, GUILD_NO_CHAT_ADDR).await;
+    let founder_username = format!("guild-no-chat-founder-{}", uuid::Uuid::now_v7());
+    register_and_authenticate(&mut founder, &founder_username, "hunter2", _server.realm_id).await;
+    let founder_entity_id = loop {
+        if let ServerMessage::Joined { entity_id, .. } = recv_world(&mut founder).await {
+            break entity_id;
+        }
+    };
+
+    let guild_name = format!("No Chat Guild {}", uuid::Uuid::now_v7());
+    send_world(
+        &mut founder,
+        &ClientMessage::GuildCreate {
+            name: guild_name.clone(),
+        },
+    )
+    .await;
+    loop {
+        if let ServerMessage::GuildUpdate { members, .. } = recv_world(&mut founder).await {
+            assert_eq!(members.len(), 1);
+            break;
+        }
+    }
+
+    assert!(
+        guild_chat_channel_id(&guild_name).await.is_none(),
+        "chat is disabled, so no chat channel should have been synced"
+    );
+
+    let mut member = connect(&config_dir, GUILD_NO_CHAT_ADDR).await;
+    let member_username = format!("guild-no-chat-member-{}", uuid::Uuid::now_v7());
+    register_and_authenticate(&mut member, &member_username, "hunter2", _server.realm_id).await;
+    let member_entity_id = loop {
+        if let ServerMessage::Joined { entity_id, .. } = recv_world(&mut member).await {
+            break entity_id;
+        }
+    };
+
+    guild_invite_and_respond(
+        &mut founder,
+        &mut member,
+        &member_entity_id,
+        &founder_entity_id,
+        true,
+    )
+    .await;
+    loop {
+        if let ServerMessage::GuildUpdate { members, .. } = recv_world(&mut member).await
+            && members.len() == 2
+        {
+            break;
+        }
+    }
+
+    send_world(&mut member, &ClientMessage::GuildLeave {}).await;
+    loop {
+        if let ServerMessage::GuildUpdate { members, .. } = recv_world(&mut founder).await
+            && members.len() == 1
+        {
             break;
         }
     }

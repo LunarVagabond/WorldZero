@@ -82,6 +82,55 @@ pub enum ClientMessage {
     /// `character::PartyStore` write, not a chat-channel leave. `Error`
     /// if this connection isn't currently in a party.
     PartyLeave {},
+    /// Creates a new guild owned by this connection's own account,
+    /// named `name` (#179) — `Error` if the account is already in a
+    /// guild. The founder is placed at the guild schema's founder rank
+    /// (`guild::GuildSchema::founder_rank`).
+    GuildCreate { name: String },
+    /// Invites `target_entity_id`'s account to this connection's own
+    /// guild (#179) — `Error` if this connection has no guild, its rank
+    /// lacks the `invite` permission, or the target is already in a
+    /// guild.
+    GuildInvite { target_entity_id: String },
+    /// Answers this connection's own most recently received guild
+    /// invite, if any (#179) — an `Error` if there is none pending.
+    GuildInviteResponse { accept: bool },
+    /// Leaves this connection's own current guild (#179). A member at
+    /// the guild's founder rank can't leave while other members remain
+    /// — they must promote a successor or disband first; a lone founder
+    /// leaving dissolves the guild entirely.
+    GuildLeave {},
+    /// Disbands this connection's own current guild (#179) — only a
+    /// founder-rank member may do this.
+    GuildDisband {},
+    /// Removes `target_entity_id`'s account from this connection's own
+    /// guild (#179) — requires the `kick` permission; a founder-rank
+    /// target can never be kicked.
+    GuildKick { target_entity_id: String },
+    /// Moves `target_entity_id`'s account to `rank_key` within this
+    /// connection's own guild (#179) — requires the `promote`
+    /// permission. Moving anyone into or out of the founder rank is
+    /// restricted to an actor who already holds the founder rank
+    /// themselves, regardless of the `promote` permission
+    /// (`guild::GuildStore`'s own core invariant).
+    GuildPromote {
+        target_entity_id: String,
+        rank_key: String,
+    },
+    /// Same shape as `GuildPromote`, gated by the `demote` permission
+    /// instead (#179) — the store applies the identical rank-move logic
+    /// either way; which message a client sends is purely a UI-intent
+    /// distinction.
+    GuildDemote {
+        target_entity_id: String,
+        rank_key: String,
+    },
+    /// Sets this connection's own guild's message-of-the-day (#179) —
+    /// requires the `edit_motd` permission. Empty string clears it.
+    GuildSetMotd { motd: String },
+    /// Sets this connection's own guild's short tag/abbreviation (#179)
+    /// — requires the `edit_tag` permission. Empty string clears it.
+    GuildSetTag { tag: String },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -209,6 +258,38 @@ pub enum ServerMessage {
     PartyUpdate {
         members: Vec<String>,
     },
+    /// A guild invite has been sent to this connection's own entity
+    /// (#179) — `from_entity_id` names the inviter. Answer with
+    /// `GuildInviteResponse`.
+    GuildInviteReceived {
+        from_entity_id: String,
+    },
+    /// The guild invite this connection sent was declined (#179).
+    GuildInviteDeclined {
+        by_entity_id: String,
+    },
+    /// This connection's current guild, sent after any membership or
+    /// metadata change (create, invite accept, leave, kick, disband,
+    /// rename, motd/tag edit — #179). `guild_id` is empty and `members`
+    /// is empty to mean "no guild" (just left, kicked, or the guild just
+    /// dissolved). Each member's `entity_id` is empty if that account
+    /// isn't currently connected — unlike a party roster, a guild
+    /// roster includes offline members.
+    GuildUpdate {
+        guild_id: String,
+        name: String,
+        motd: String,
+        tag: String,
+        members: Vec<GuildMemberEntry>,
+    },
+    /// This connection's guild was disbanded (#179).
+    GuildDisbanded {},
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct GuildMemberEntry {
+    pub entity_id: String,
+    pub rank_key: String,
 }
 
 // Both directions of this protocol define both `into_envelope` and
@@ -265,6 +346,24 @@ impl From<proto::RosterEntry> for RosterEntry {
     }
 }
 
+impl From<&GuildMemberEntry> for proto::GuildMember {
+    fn from(entry: &GuildMemberEntry) -> Self {
+        proto::GuildMember {
+            entity_id: entry.entity_id.clone(),
+            rank_key: entry.rank_key.clone(),
+        }
+    }
+}
+
+impl From<proto::GuildMember> for GuildMemberEntry {
+    fn from(entry: proto::GuildMember) -> Self {
+        GuildMemberEntry {
+            entity_id: entry.entity_id,
+            rank_key: entry.rank_key,
+        }
+    }
+}
+
 impl From<&ClientMessage> for proto::ClientMessage {
     fn from(message: &ClientMessage) -> Self {
         use proto::client_message::Kind;
@@ -306,6 +405,42 @@ impl From<&ClientMessage> for proto::ClientMessage {
                 Kind::PartyInviteResponse(proto::PartyInviteResponse { accept: *accept })
             }
             ClientMessage::PartyLeave {} => Kind::PartyLeave(proto::PartyLeave {}),
+            ClientMessage::GuildCreate { name } => {
+                Kind::GuildCreate(proto::GuildCreate { name: name.clone() })
+            }
+            ClientMessage::GuildInvite { target_entity_id } => {
+                Kind::GuildInvite(proto::GuildInvite {
+                    target_entity_id: target_entity_id.clone(),
+                })
+            }
+            ClientMessage::GuildInviteResponse { accept } => {
+                Kind::GuildInviteResponse(proto::GuildInviteResponse { accept: *accept })
+            }
+            ClientMessage::GuildLeave {} => Kind::GuildLeave(proto::GuildLeave {}),
+            ClientMessage::GuildDisband {} => Kind::GuildDisband(proto::GuildDisband {}),
+            ClientMessage::GuildKick { target_entity_id } => Kind::GuildKick(proto::GuildKick {
+                target_entity_id: target_entity_id.clone(),
+            }),
+            ClientMessage::GuildPromote {
+                target_entity_id,
+                rank_key,
+            } => Kind::GuildPromote(proto::GuildPromote {
+                target_entity_id: target_entity_id.clone(),
+                rank_key: rank_key.clone(),
+            }),
+            ClientMessage::GuildDemote {
+                target_entity_id,
+                rank_key,
+            } => Kind::GuildDemote(proto::GuildDemote {
+                target_entity_id: target_entity_id.clone(),
+                rank_key: rank_key.clone(),
+            }),
+            ClientMessage::GuildSetMotd { motd } => {
+                Kind::GuildSetMotd(proto::GuildSetMotd { motd: motd.clone() })
+            }
+            ClientMessage::GuildSetTag { tag } => {
+                Kind::GuildSetTag(proto::GuildSetTag { tag: tag.clone() })
+            }
         };
         proto::ClientMessage { kind: Some(kind) }
     }
@@ -348,6 +483,40 @@ impl TryFrom<proto::ClientMessage> for ClientMessage {
                 Ok(ClientMessage::PartyInviteResponse { accept })
             }
             Some(Kind::PartyLeave(proto::PartyLeave {})) => Ok(ClientMessage::PartyLeave {}),
+            Some(Kind::GuildCreate(proto::GuildCreate { name })) => {
+                Ok(ClientMessage::GuildCreate { name })
+            }
+            Some(Kind::GuildInvite(proto::GuildInvite { target_entity_id })) => {
+                Ok(ClientMessage::GuildInvite { target_entity_id })
+            }
+            Some(Kind::GuildInviteResponse(proto::GuildInviteResponse { accept })) => {
+                Ok(ClientMessage::GuildInviteResponse { accept })
+            }
+            Some(Kind::GuildLeave(proto::GuildLeave {})) => Ok(ClientMessage::GuildLeave {}),
+            Some(Kind::GuildDisband(proto::GuildDisband {})) => Ok(ClientMessage::GuildDisband {}),
+            Some(Kind::GuildKick(proto::GuildKick { target_entity_id })) => {
+                Ok(ClientMessage::GuildKick { target_entity_id })
+            }
+            Some(Kind::GuildPromote(proto::GuildPromote {
+                target_entity_id,
+                rank_key,
+            })) => Ok(ClientMessage::GuildPromote {
+                target_entity_id,
+                rank_key,
+            }),
+            Some(Kind::GuildDemote(proto::GuildDemote {
+                target_entity_id,
+                rank_key,
+            })) => Ok(ClientMessage::GuildDemote {
+                target_entity_id,
+                rank_key,
+            }),
+            Some(Kind::GuildSetMotd(proto::GuildSetMotd { motd })) => {
+                Ok(ClientMessage::GuildSetMotd { motd })
+            }
+            Some(Kind::GuildSetTag(proto::GuildSetTag { tag })) => {
+                Ok(ClientMessage::GuildSetTag { tag })
+            }
             None => Err(Error::new(
                 "server",
                 "gateway world message has no kind set",
@@ -448,6 +617,30 @@ impl From<&ServerMessage> for proto::ServerMessage {
             ServerMessage::PartyUpdate { members } => Kind::PartyUpdate(proto::PartyUpdate {
                 members: members.clone(),
             }),
+            ServerMessage::GuildInviteReceived { from_entity_id } => {
+                Kind::GuildInviteReceived(proto::GuildInviteReceived {
+                    from_entity_id: from_entity_id.clone(),
+                })
+            }
+            ServerMessage::GuildInviteDeclined { by_entity_id } => {
+                Kind::GuildInviteDeclined(proto::GuildInviteDeclined {
+                    by_entity_id: by_entity_id.clone(),
+                })
+            }
+            ServerMessage::GuildUpdate {
+                guild_id,
+                name,
+                motd,
+                tag,
+                members,
+            } => Kind::GuildUpdate(proto::GuildUpdate {
+                guild_id: guild_id.clone(),
+                name: name.clone(),
+                motd: motd.clone(),
+                tag: tag.clone(),
+                members: members.iter().map(proto::GuildMember::from).collect(),
+            }),
+            ServerMessage::GuildDisbanded {} => Kind::GuildDisbanded(proto::GuildDisbanded {}),
         };
         proto::ServerMessage { kind: Some(kind) }
     }
@@ -536,6 +729,28 @@ impl TryFrom<proto::ServerMessage> for ServerMessage {
             }
             Some(Kind::PartyUpdate(proto::PartyUpdate { members })) => {
                 Ok(ServerMessage::PartyUpdate { members })
+            }
+            Some(Kind::GuildInviteReceived(proto::GuildInviteReceived { from_entity_id })) => {
+                Ok(ServerMessage::GuildInviteReceived { from_entity_id })
+            }
+            Some(Kind::GuildInviteDeclined(proto::GuildInviteDeclined { by_entity_id })) => {
+                Ok(ServerMessage::GuildInviteDeclined { by_entity_id })
+            }
+            Some(Kind::GuildUpdate(proto::GuildUpdate {
+                guild_id,
+                name,
+                motd,
+                tag,
+                members,
+            })) => Ok(ServerMessage::GuildUpdate {
+                guild_id,
+                name,
+                motd,
+                tag,
+                members: members.into_iter().map(GuildMemberEntry::from).collect(),
+            }),
+            Some(Kind::GuildDisbanded(proto::GuildDisbanded {})) => {
+                Ok(ServerMessage::GuildDisbanded {})
             }
             None => Err(Error::new(
                 "server",

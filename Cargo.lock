@@ -1471,6 +1471,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "guild"
+version = "0.1.0"
+dependencies = [
+ "common",
+ "serde",
+ "serde_yaml",
+ "sqlx",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "h2"
 version = "0.4.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3188,6 +3200,7 @@ dependencies = [
  "content",
  "futures-util",
  "gateway",
+ "guild",
  "plugin-host",
  "prometheus",
  "prost",

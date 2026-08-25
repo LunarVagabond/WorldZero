@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use character::CharacterStore;
 use chat::gateway_protocol::CHAT_MESSAGE_TYPE;
-use common::id::{AccountId, CharacterId, EntityId, RealmId};
+use common::id::{AccountId, CharacterId, EntityId, GuildId, RealmId};
 use common::{Error, Result};
 use futures_util::{SinkExt, StreamExt};
 use gateway::Envelope;
@@ -19,7 +19,9 @@ use world::EntityKind;
 use crate::character_protocol;
 use crate::chat_session::{self, ChatDeps};
 use crate::realm_protocol;
-use crate::session_protocol::{ClientMessage, RosterEntry, ServerMessage, WORLD_MESSAGE_TYPE};
+use crate::session_protocol::{
+    ClientMessage, GuildMemberEntry, RosterEntry, ServerMessage, WORLD_MESSAGE_TYPE,
+};
 use crate::zone_registry::{ZoneRegistry, ZoneRuntime};
 use crate::{despawn_from_layer, send_to, spawn_into_layer};
 
@@ -82,6 +84,28 @@ pub type CharacterEntities = Arc<Mutex<HashMap<CharacterId, EntityId>>>;
 /// no queueing — the simplest v0 shape; a `PartyInviteResponse` always
 /// answers whichever invite is currently pending for the responder.
 pub type PendingPartyInvites = Arc<Mutex<HashMap<EntityId, (EntityId, String)>>>;
+
+/// Which account a connected player entity belongs to — the resolution
+/// guild handling needs (#179): `guild::GuildStore` is keyed by
+/// `AccountId`, not `CharacterId` like `character::PartyStore`, so
+/// resolving a message's `target_entity_id` into the account it acts
+/// against needs this rather than `EntityCharacters`. Populated/cleared
+/// at the same two points as `EntityCharacters`/`EntityRoles`. Never has
+/// an NPC entry.
+pub type EntityAccounts = Arc<Mutex<HashMap<EntityId, AccountId>>>;
+
+/// `EntityAccounts`, reversed (#179) — which currently-connected entity
+/// id a given account is playing as right now, if any, so a guild
+/// roster refresh can find which (possibly offline) members are
+/// actually reachable to push a `GuildUpdate` to. Populated/cleared
+/// alongside `EntityAccounts`.
+pub type AccountEntities = Arc<Mutex<HashMap<AccountId, EntityId>>>;
+
+/// A guild invite awaiting a response, keyed by the *invitee's* entity
+/// id (value: the inviter's entity id) — #179's invite/accept/decline
+/// flow, same "entity-id-scoped, process-wide, not durable" shape as
+/// `PendingPartyInvites` (see its own doc comment for why).
+pub type PendingGuildInvites = Arc<Mutex<HashMap<EntityId, EntityId>>>;
 
 /// Which roles (docs/specs/Auth_Spec.md, "Account roles", #114/#124) the
 /// account behind a connected player entity holds — populated once at
@@ -166,6 +190,19 @@ pub struct SessionDeps {
     pub party_store: Arc<character::PartyStore>,
     /// See [`PendingPartyInvites`]'s own doc comment (#178).
     pub pending_party_invites: PendingPartyInvites,
+    /// The real guild system (#179) — roster, dev-declared rank
+    /// hierarchy, permissions. Unlike `party_store`, `GuildStore` knows
+    /// nothing about `chat`; syncing a guild's optional chat channel
+    /// membership happens here in `session`, guarded by `chat` being
+    /// `Some` (see the `GuildCreate`/`GuildInviteResponse`/etc. handlers
+    /// below).
+    pub guild_store: Arc<guild::GuildStore>,
+    /// See [`PendingGuildInvites`]'s own doc comment (#179).
+    pub pending_guild_invites: PendingGuildInvites,
+    /// See [`EntityAccounts`]'s own doc comment (#179).
+    pub entity_accounts: EntityAccounts,
+    /// See [`AccountEntities`]'s own doc comment (#179).
+    pub account_entities: AccountEntities,
     /// Backs `EntityRoles` population at join time (#124) — `auth` (like
     /// `character`) is always wired in this combined process, so this is
     /// never optional the way `chat`/`metrics` are.
@@ -524,6 +561,14 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
         .lock()
         .unwrap()
         .insert(character_id, entity_id);
+    deps.entity_accounts
+        .lock()
+        .unwrap()
+        .insert(entity_id, account_id);
+    deps.account_entities
+        .lock()
+        .unwrap()
+        .insert(account_id, entity_id);
     let roles = deps.role_store.roles_for(account_id).await?;
     deps.entity_roles.lock().unwrap().insert(entity_id, roles);
 
@@ -824,6 +869,172 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
                                 }
                             }
                         }
+                        Ok(ClientMessage::GuildCreate { name }) => {
+                            let chat_channel_id = match &deps.chat {
+                                Some(chat) => chat.store.create_guild(account_id, &name).await.ok(),
+                                None => None,
+                            };
+                            match deps.guild_store.create(account_id, &name, deps.realm_id, chat_channel_id).await {
+                                Ok(guild_id) => refresh_guild_rosters(&deps, Some(guild_id), &[account_id]).await,
+                                Err(e) => {
+                                    send_world(&mut sink, &ServerMessage::Error { message: e.to_string() }).await?;
+                                }
+                            }
+                        }
+                        Ok(ClientMessage::GuildInvite { target_entity_id }) => {
+                            let Ok(target_entity_id) = target_entity_id.parse::<EntityId>() else {
+                                send_world(&mut sink, &ServerMessage::Error {
+                                    message: format!("{target_entity_id:?} is not a valid entity id"),
+                                }).await?;
+                                continue;
+                            };
+                            if target_entity_id == entity_id {
+                                send_world(&mut sink, &ServerMessage::Error {
+                                    message: "you can't invite yourself".to_string(),
+                                }).await?;
+                                continue;
+                            }
+                            let target_is_player = deps
+                                .entity_accounts
+                                .lock()
+                                .unwrap()
+                                .contains_key(&target_entity_id);
+                            if !target_is_player {
+                                send_world(&mut sink, &ServerMessage::Error {
+                                    message: "that entity isn't a player you can invite".to_string(),
+                                }).await?;
+                                continue;
+                            }
+                            deps.pending_guild_invites
+                                .lock()
+                                .unwrap()
+                                .insert(target_entity_id, entity_id);
+                            send_to(&deps.global_sessions, target_entity_id, ServerMessage::GuildInviteReceived {
+                                from_entity_id: entity_id.to_string(),
+                            });
+                        }
+                        Ok(ClientMessage::GuildInviteResponse { accept }) => {
+                            let Some(inviter_entity_id) = deps
+                                .pending_guild_invites
+                                .lock()
+                                .unwrap()
+                                .remove(&entity_id)
+                            else {
+                                send_world(&mut sink, &ServerMessage::Error {
+                                    message: "you have no pending guild invite".to_string(),
+                                }).await?;
+                                continue;
+                            };
+                            if !accept {
+                                send_to(&deps.global_sessions, inviter_entity_id, ServerMessage::GuildInviteDeclined {
+                                    by_entity_id: entity_id.to_string(),
+                                });
+                                continue;
+                            }
+                            let inviter_account_id = deps
+                                .entity_accounts
+                                .lock()
+                                .unwrap()
+                                .get(&inviter_entity_id)
+                                .copied();
+                            let Some(inviter_account_id) = inviter_account_id else {
+                                send_world(&mut sink, &ServerMessage::Error {
+                                    message: "the player who invited you is no longer connected".to_string(),
+                                }).await?;
+                                continue;
+                            };
+                            match deps.guild_store.accept_invite(inviter_account_id, account_id).await {
+                                Ok(guild_id) => {
+                                    if let Some(chat) = &deps.chat
+                                        && let Ok(Some(info)) = deps.guild_store.info(guild_id).await
+                                        && let Some(channel_id) = info.chat_channel_id
+                                        && let Err(e) = chat.store.join(channel_id, account_id).await
+                                    {
+                                        tracing::warn!(error = %e, %account_id, "failed to sync guild chat channel membership");
+                                    }
+                                    let members = deps.guild_store.members_of(guild_id).await.unwrap_or_default();
+                                    let interested: Vec<AccountId> = members.into_iter().map(|(a, _)| a).collect();
+                                    refresh_guild_rosters(&deps, Some(guild_id), &interested).await;
+                                }
+                                Err(e) => {
+                                    send_world(&mut sink, &ServerMessage::Error { message: e.to_string() }).await?;
+                                }
+                            }
+                        }
+                        Ok(ClientMessage::GuildLeave {}) => {
+                            handle_guild_leave_or_disband(&deps, &mut sink, account_id, false).await?;
+                        }
+                        Ok(ClientMessage::GuildDisband {}) => {
+                            handle_guild_leave_or_disband(&deps, &mut sink, account_id, true).await?;
+                        }
+                        Ok(ClientMessage::GuildKick { target_entity_id }) => {
+                            let Some(target_account_id) = resolve_target_account(&deps, &mut sink, &target_entity_id).await? else { continue };
+                            let guild_id_before = deps.guild_store.guild_of(account_id).await.ok().flatten();
+                            match deps.guild_store.kick(account_id, target_account_id).await {
+                                Ok(()) => {
+                                    // The kicked target always gets the
+                                    // "no guild" empty update, never the
+                                    // real (now-stale-for-them) roster;
+                                    // remaining members get the current
+                                    // one separately — a kick never
+                                    // dissolves the guild (the founder
+                                    // can't be kicked), so `guild_id_before`
+                                    // is still valid to query.
+                                    sync_chat_leave(&deps, guild_id_before, target_account_id).await;
+                                    refresh_guild_rosters(&deps, None, &[target_account_id]).await;
+                                    if let Some(guild_id) = guild_id_before {
+                                        let remaining: Vec<AccountId> = deps
+                                            .guild_store
+                                            .members_of(guild_id)
+                                            .await
+                                            .unwrap_or_default()
+                                            .into_iter()
+                                            .map(|(a, _)| a)
+                                            .collect();
+                                        refresh_guild_rosters(&deps, Some(guild_id), &remaining).await;
+                                    }
+                                }
+                                Err(e) => {
+                                    send_world(&mut sink, &ServerMessage::Error { message: e.to_string() }).await?;
+                                }
+                            }
+                        }
+                        Ok(ClientMessage::GuildPromote { target_entity_id, rank_key }) => {
+                            let Some(target_account_id) = resolve_target_account(&deps, &mut sink, &target_entity_id).await? else { continue };
+                            match deps.guild_store.promote(account_id, target_account_id, &rank_key).await {
+                                Ok(()) => refresh_after_guild_change(&deps, account_id).await,
+                                Err(e) => {
+                                    send_world(&mut sink, &ServerMessage::Error { message: e.to_string() }).await?;
+                                }
+                            }
+                        }
+                        Ok(ClientMessage::GuildDemote { target_entity_id, rank_key }) => {
+                            let Some(target_account_id) = resolve_target_account(&deps, &mut sink, &target_entity_id).await? else { continue };
+                            match deps.guild_store.demote(account_id, target_account_id, &rank_key).await {
+                                Ok(()) => refresh_after_guild_change(&deps, account_id).await,
+                                Err(e) => {
+                                    send_world(&mut sink, &ServerMessage::Error { message: e.to_string() }).await?;
+                                }
+                            }
+                        }
+                        Ok(ClientMessage::GuildSetMotd { motd }) => {
+                            let value = if motd.is_empty() { None } else { Some(motd.as_str()) };
+                            match deps.guild_store.set_motd(account_id, value).await {
+                                Ok(()) => refresh_after_guild_change(&deps, account_id).await,
+                                Err(e) => {
+                                    send_world(&mut sink, &ServerMessage::Error { message: e.to_string() }).await?;
+                                }
+                            }
+                        }
+                        Ok(ClientMessage::GuildSetTag { tag }) => {
+                            let value = if tag.is_empty() { None } else { Some(tag.as_str()) };
+                            match deps.guild_store.set_tag(account_id, value).await {
+                                Ok(()) => refresh_after_guild_change(&deps, account_id).await,
+                                Err(e) => {
+                                    send_world(&mut sink, &ServerMessage::Error { message: e.to_string() }).await?;
+                                }
+                            }
+                        }
                         Err(e) => {
                             send_world(&mut sink, &ServerMessage::Error { message: e.to_string() }).await?;
                         }
@@ -941,6 +1152,8 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
         .lock()
         .unwrap()
         .remove(&character_id);
+    deps.entity_accounts.lock().unwrap().remove(&entity_id);
+    deps.account_entities.lock().unwrap().remove(&account_id);
     deps.entity_roles.lock().unwrap().remove(&entity_id);
     // #21's clean-disconnect release — a harmless no-op for a bound-realm
     // character (never took a lease to begin with), so this runs
@@ -1141,6 +1354,247 @@ async fn refresh_party_rosters(deps: &SessionDeps, interested: &[CharacterId]) {
                 members: member_entity_ids,
             },
         );
+    }
+}
+
+/// Parses `target_entity_id` and resolves it to a currently-connected
+/// account (#179) — the shared precondition every guild message that
+/// names another player needs. Sends a clear `Error` to `sink` and
+/// returns `Ok(None)` for an unparseable id or a target that isn't
+/// (currently) a connected player; the caller's match arm should
+/// `continue` in that case rather than proceeding.
+async fn resolve_target_account(
+    deps: &SessionDeps,
+    sink: &mut ServerSink,
+    target_entity_id: &str,
+) -> Result<Option<AccountId>> {
+    let Ok(target_entity_id) = target_entity_id.parse::<EntityId>() else {
+        send_world(
+            sink,
+            &ServerMessage::Error {
+                message: format!("{target_entity_id:?} is not a valid entity id"),
+            },
+        )
+        .await?;
+        return Ok(None);
+    };
+    let target_account_id = deps
+        .entity_accounts
+        .lock()
+        .unwrap()
+        .get(&target_entity_id)
+        .copied();
+    if target_account_id.is_none() {
+        send_world(
+            sink,
+            &ServerMessage::Error {
+                message: "that entity isn't a currently-connected player".to_string(),
+            },
+        )
+        .await?;
+    }
+    Ok(target_account_id)
+}
+
+/// Shared by the `GuildLeave`/`GuildDisband` handlers — both need the
+/// same "capture the guild and its members before mutating, so the
+/// departing/disbanding account(s) still get a final empty `GuildUpdate`"
+/// shape (#179).
+async fn handle_guild_leave_or_disband(
+    deps: &SessionDeps,
+    sink: &mut ServerSink,
+    account_id: AccountId,
+    disband: bool,
+) -> Result<()> {
+    let guild_id_before = deps.guild_store.guild_of(account_id).await.ok().flatten();
+    let members_before: Vec<AccountId> = match guild_id_before {
+        Some(guild_id) => deps
+            .guild_store
+            .members_of(guild_id)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(a, _)| a)
+            .collect(),
+        None => Vec::new(),
+    };
+
+    let result = if disband {
+        deps.guild_store.disband(account_id).await
+    } else {
+        deps.guild_store.leave(account_id).await
+    };
+
+    match result {
+        Ok(()) if disband => {
+            // The whole guild is gone — every former member (including
+            // the disbander) gets the "no guild" empty update and a
+            // chat-leave sync, plus an explicit `GuildDisbanded`. Unlike
+            // a plain leave, there's no "remaining roster" to send
+            // anyone here.
+            for &member in &members_before {
+                sync_chat_leave(deps, guild_id_before, member).await;
+            }
+            refresh_guild_rosters(deps, None, &members_before).await;
+            for &member in &members_before {
+                if let Some(member_entity_id) =
+                    deps.account_entities.lock().unwrap().get(&member).copied()
+                {
+                    send_to(
+                        &deps.global_sessions,
+                        member_entity_id,
+                        ServerMessage::GuildDisbanded {},
+                    );
+                }
+            }
+            Ok(())
+        }
+        Ok(()) => {
+            // A plain leave: `account_id` always gets the "no guild"
+            // empty update. The guild may still exist with other
+            // members (ordinary leave) or may have just dissolved (a
+            // lone founder leaving) — `info` after the mutation tells
+            // us which; only in the former case does anyone else need a
+            // refreshed roster.
+            sync_chat_leave(deps, guild_id_before, account_id).await;
+            refresh_guild_rosters(deps, None, &[account_id]).await;
+            if let Some(guild_id) = guild_id_before
+                && deps
+                    .guild_store
+                    .info(guild_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some()
+            {
+                let remaining: Vec<AccountId> = deps
+                    .guild_store
+                    .members_of(guild_id)
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(a, _)| a)
+                    .collect();
+                refresh_guild_rosters(deps, Some(guild_id), &remaining).await;
+            }
+            Ok(())
+        }
+        Err(e) => {
+            send_world(
+                sink,
+                &ServerMessage::Error {
+                    message: e.to_string(),
+                },
+            )
+            .await
+        }
+    }
+}
+
+/// Removes `account_id` from the chat channel synced to `guild_id`, if
+/// chat is enabled and that guild actually had a channel — a no-op
+/// otherwise (#179). Failures are logged, not propagated: a guild
+/// mutation that already committed should never be reported as failed
+/// to the client just because the optional chat sync afterward had a
+/// problem.
+async fn sync_chat_leave(deps: &SessionDeps, guild_id: Option<GuildId>, account_id: AccountId) {
+    let (Some(chat), Some(guild_id)) = (&deps.chat, guild_id) else {
+        return;
+    };
+    let Ok(Some(info)) = deps.guild_store.info(guild_id).await else {
+        return;
+    };
+    let Some(channel_id) = info.chat_channel_id else {
+        return;
+    };
+    if let Err(e) = chat.store.leave(channel_id, account_id).await {
+        tracing::warn!(error = %e, %account_id, "failed to sync guild chat channel membership");
+    }
+}
+
+/// Looks up `account_id`'s current guild (if any) and pushes a fresh
+/// `GuildUpdate` to every member of it — the common "something about my
+/// guild changed, tell everyone in it" step after promote/demote/
+/// metadata edits (#179), which never change who's a member so there's
+/// no chat sync to do.
+async fn refresh_after_guild_change(deps: &SessionDeps, account_id: AccountId) {
+    let Ok(Some(guild_id)) = deps.guild_store.guild_of(account_id).await else {
+        return;
+    };
+    let interested: Vec<AccountId> = deps
+        .guild_store
+        .members_of(guild_id)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(a, _)| a)
+        .collect();
+    refresh_guild_rosters(deps, Some(guild_id), &interested).await;
+}
+
+/// Pushes a `GuildUpdate` to every currently-connected account in
+/// `interested` (#179) — `guild_id` names the roster to report; `None`
+/// (or a guild that no longer resolves, e.g. just dissolved) sends the
+/// "no guild" empty update instead. An account not currently connected
+/// is silently skipped — it picks up current state at its next login,
+/// same "no push to the offline" convention `refresh_party_rosters`
+/// already follows implicitly (a party member with no live entity id is
+/// filtered out of the roster, never separately notified).
+async fn refresh_guild_rosters(
+    deps: &SessionDeps,
+    guild_id: Option<GuildId>,
+    interested: &[AccountId],
+) {
+    let snapshot = match guild_id {
+        Some(id) => match deps.guild_store.info(id).await {
+            Ok(Some(info)) => {
+                let members = deps.guild_store.members_of(id).await.unwrap_or_default();
+                Some((info, members))
+            }
+            _ => None,
+        },
+        None => None,
+    };
+
+    for &account_id in interested {
+        let Some(entity_id) = deps
+            .account_entities
+            .lock()
+            .unwrap()
+            .get(&account_id)
+            .copied()
+        else {
+            continue;
+        };
+        let message = match &snapshot {
+            Some((info, members)) => ServerMessage::GuildUpdate {
+                guild_id: info.id.to_string(),
+                name: info.name.clone(),
+                motd: info.motd.clone().unwrap_or_default(),
+                tag: info.tag.clone().unwrap_or_default(),
+                members: members
+                    .iter()
+                    .map(|(member_account_id, rank_key)| GuildMemberEntry {
+                        entity_id: deps
+                            .account_entities
+                            .lock()
+                            .unwrap()
+                            .get(member_account_id)
+                            .map(|id| id.to_string())
+                            .unwrap_or_default(),
+                        rank_key: rank_key.clone(),
+                    })
+                    .collect(),
+            },
+            None => ServerMessage::GuildUpdate {
+                guild_id: String::new(),
+                name: String::new(),
+                motd: String::new(),
+                tag: String::new(),
+                members: Vec::new(),
+            },
+        };
+        send_to(&deps.global_sessions, entity_id, message);
     }
 }
 

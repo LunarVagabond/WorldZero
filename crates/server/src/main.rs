@@ -30,6 +30,9 @@
 //! - `<config_dir>/party.schema.yaml` (see
 //!   `config/party.schema.example.yaml`) — the declared party-type/size
 //!   schema (#178)
+//! - `<config_dir>/guild.schema.yaml` (see
+//!   `config/guild.schema.example.yaml`) — the declared guild rank
+//!   schema (#179)
 //!
 //! Optional: `WZ_SERVER_ADDR` (default `127.0.0.1:7900`),
 //! `WZ_PLUGINS_DIR` (default `<config_dir>/plugins`) — a directory of
@@ -84,8 +87,8 @@ use content::content_pack::ContentPack;
 use content::manifest::ZoneManifest;
 use futures_util::StreamExt;
 use session::{
-    CharacterEntities, EntityCharacters, EntityRoles, NpcStats, PendingPartyInvites, SessionDeps,
-    Sessions,
+    AccountEntities, CharacterEntities, EntityAccounts, EntityCharacters, EntityRoles, NpcStats,
+    PendingGuildInvites, PendingPartyInvites, SessionDeps, Sessions,
 };
 use session_protocol::{RosterEntry, ServerMessage};
 use tokio::sync::mpsc;
@@ -213,6 +216,13 @@ async fn main() {
             party_schema_path.display()
         )
     });
+    let guild_schema_path = config_dir.join("guild.schema.yaml");
+    let guild_schema = guild::GuildSchema::from_file(&guild_schema_path).unwrap_or_else(|e| {
+        panic!(
+            "failed to load the declared guild rank schema at {} (see config/guild.schema.example.yaml): {e}",
+            guild_schema_path.display()
+        )
+    });
     let inventory_config =
         InventoryConfig::from_env().expect("invalid WZ_INVENTORY_MAX_ITEM_TYPES");
     // #193's character-creation cap — a `server`-side policy value (like
@@ -243,6 +253,7 @@ async fn main() {
     let npc_attribute_schema = Arc::new(schema.clone());
     let character_store = Arc::new(CharacterStore::new(pool.clone(), schema, inventory_config));
     let party_store = Arc::new(character::PartyStore::new(pool.clone(), party_schema));
+    let guild_store = Arc::new(guild::GuildStore::new(pool.clone(), guild_schema));
 
     let realm_store = realm_directory::RealmStore::new(pool.clone());
     let realm = resolve_realm(&realm_store).await;
@@ -294,6 +305,9 @@ async fn main() {
     let entity_roles: EntityRoles = Arc::new(Mutex::new(HashMap::new()));
     let npc_stats: NpcStats = Arc::new(Mutex::new(HashMap::new()));
     let pending_party_invites: PendingPartyInvites = Arc::new(Mutex::new(HashMap::new()));
+    let pending_guild_invites: PendingGuildInvites = Arc::new(Mutex::new(HashMap::new()));
+    let entity_accounts: EntityAccounts = Arc::new(Mutex::new(HashMap::new()));
+    let account_entities: AccountEntities = Arc::new(Mutex::new(HashMap::new()));
 
     // Every connected entity's outgoing channel, process-wide, regardless
     // of which zone it's currently in (#152) — backs the plugin
@@ -577,6 +591,10 @@ async fn main() {
         character_entities,
         party_store,
         pending_party_invites,
+        guild_store,
+        pending_guild_invites,
+        entity_accounts,
+        account_entities,
         role_store,
         entity_roles,
         plugin_message_types,
