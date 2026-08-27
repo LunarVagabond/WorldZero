@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use character::AttributeSchema;
+use character::{AttributeSchema, BoundRealmLiveness};
 use common::id::{AccountId, CharacterId, RealmId};
 use common::{Error, Result};
 use realm_directory::{OpenOrBound, RealmStore};
@@ -98,18 +98,16 @@ impl TransferExecutor {
     ///   open — transferring *into* an open pool isn't a defined
     ///   operation anywhere else in this codebase, so it's rejected here
     ///   rather than left ambiguous
-    /// - the character currently holds an unexpired `character_sessions`
-    ///   lease. **Known gap:** bound-realm characters never write to that
-    ///   table at all (docs/specs/Realm_Character_Policy_Spec.md's
-    ///   "Bound realms do not use `character_sessions`"), and transfer
-    ///   only ever applies to bound characters — so today this check can
-    ///   never actually fire for the case it's meant to guard.
-    ///   Closing that gap needs real liveness tracking for a
-    ///   bound-realm connection that's queryable from outside the
-    ///   connected process, which doesn't exist yet (a `server`-wiring
-    ///   concern, #136-adjacent); kept here, not deleted, since it's
-    ///   correct for whatever future case *does* populate a lease row
-    ///   for a character reaching this check.
+    /// - the character currently has an unexpired
+    ///   [`character::BoundRealmLiveness`] row (#169) — a bound-realm
+    ///   connection registers itself live on join and clears itself on
+    ///   disconnect (`server::session::handle_session`), a parallel
+    ///   mechanism to `character_sessions` rather than that table itself,
+    ///   since `character_sessions` is explicitly open-realm-only
+    ///   (docs/specs/Realm_Character_Policy_Spec.md's "Bound realms do
+    ///   not use `character_sessions`") and transfer only ever applies to
+    ///   bound characters. Closes the gap this check used to describe as
+    ///   unreachable.
     /// - the source→destination realm pair's configured [`TransferGate`]
     ///   (#54) rejects it: a ticket-item gate with an insufficient stack,
     ///   or a purchase gate whose [`PurchaseVerifier`] doesn't confirm
@@ -217,14 +215,7 @@ impl TransferExecutor {
             ));
         }
 
-        let has_active_lease = sqlx::query(
-            "SELECT 1 FROM character_sessions WHERE character_id = $1 AND expires_at > now()",
-        )
-        .bind(request.character_id.as_uuid())
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|e| Error::wrap("transfer", "failed to check for an active session", e))?;
-        if has_active_lease.is_some() {
+        if BoundRealmLiveness::is_live(&mut *tx, request.character_id).await? {
             return Err(Error::new(
                 "transfer",
                 format!(

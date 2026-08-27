@@ -4,6 +4,7 @@
 //! Schemas") and docs/specs/Data_Model_Spec.md.
 
 pub mod archetype_schema;
+pub mod bound_liveness;
 pub mod crafting;
 pub mod crafting_schema;
 pub mod currency_schema;
@@ -15,6 +16,7 @@ pub mod session_lease;
 pub mod store;
 
 pub use archetype_schema::{ArchetypeSchema, CharacterArchetype};
+pub use bound_liveness::BoundRealmLiveness;
 pub use crafting_schema::{CraftingInput, CraftingOutput, CraftingSchema, Recipe};
 pub use currency_schema::{Currency, CurrencyDenomination, CurrencySchema};
 pub use party::PartyStore;
