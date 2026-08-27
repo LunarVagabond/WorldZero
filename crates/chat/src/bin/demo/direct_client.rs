@@ -27,7 +27,15 @@ pub async fn run(username: &str) -> Result<()> {
     let redis = redis_pool(&redis_config, PoolOptions::default())?;
 
     let store = ChannelStore::new(pool.clone());
-    let bus = ChatBus::new(redis, redis_config);
+    // Same independent WZ_CHAT_PERSISTENCE_ENABLED toggle `server`/
+    // `bin/gateway_server` read (#174, docs/specs/Chat_Spec.md, "Durable
+    // message log") — off by default, this demo tool doesn't force it on.
+    let message_log = if chat::persistence_enabled_from_env()? {
+        Some(std::sync::Arc::new(chat::MessageLog::new(pool.clone())))
+    } else {
+        None
+    };
+    let bus = ChatBus::new(redis, redis_config, message_log);
     let account_id = find_or_create_demo_account(&pool, username).await?;
 
     println!("Connected directly (no gateway) as {username}.");

@@ -62,7 +62,15 @@ async fn main() {
     let auth_provider = Arc::new(auth::UsernamePasswordProvider::new(account_store, sessions));
 
     let store = Arc::new(ChannelStore::new(pool.clone()));
-    let bus = Arc::new(ChatBus::new(redis, redis_config));
+    // WZ_CHAT_PERSISTENCE_ENABLED — same independent toggle `server`
+    // reads (#174, docs/specs/Chat_Spec.md, "Durable message log").
+    let message_log =
+        if chat::persistence_enabled_from_env().expect("invalid WZ_CHAT_PERSISTENCE_ENABLED") {
+            Some(Arc::new(chat::MessageLog::new(pool.clone())))
+        } else {
+            None
+        };
+    let bus = Arc::new(ChatBus::new(redis, redis_config, message_log));
     let usernames: Usernames = Arc::new(RwLock::new(HashMap::new()));
 
     let config_dir = common::config::config_dir();

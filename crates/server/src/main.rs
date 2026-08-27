@@ -328,10 +328,26 @@ async fn main() {
     // dispatch, nothing (#104, per the #91/#92 runtime-toggle decision).
     let chat_deps = if services.chat_enabled {
         tracing::info!("chat service enabled");
+        // WZ_CHAT_PERSISTENCE_ENABLED is independent of chat_enabled
+        // above (#174, docs/specs/Chat_Spec.md, "Durable message log") —
+        // `None` end to end when off, no `MessageLog` constructed at all.
+        let chat_persistence_enabled =
+            chat::persistence_enabled_from_env().expect("invalid WZ_CHAT_PERSISTENCE_ENABLED");
+        let message_log = if chat_persistence_enabled {
+            tracing::info!("chat message persistence enabled");
+            Some(Arc::new(chat::MessageLog::new(pool.clone())))
+        } else {
+            tracing::info!("chat message persistence disabled (WZ_CHAT_PERSISTENCE_ENABLED=false)");
+            None
+        };
         Some(chat_session::ChatDeps {
             pool: pool.clone(),
             store: Arc::new(chat::ChannelStore::new(pool.clone())),
-            bus: Arc::new(chat::ChatBus::new(redis.clone(), redis_config.clone())),
+            bus: Arc::new(chat::ChatBus::new(
+                redis.clone(),
+                redis_config.clone(),
+                message_log,
+            )),
             usernames: Arc::new(RwLock::new(HashMap::new())),
         })
     } else {
