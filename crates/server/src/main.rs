@@ -330,6 +330,10 @@ async fn main() {
         lease_ttl,
     ));
     let character_lease = Arc::new(character::CharacterSessionLease::new(pool.clone()));
+    // #169 — the bound-realm counterpart to `character_lease` above; see
+    // `SessionDeps::bound_liveness`'s own doc comment for why the two
+    // are never both active for the same connection.
+    let bound_liveness = Arc::new(character::BoundRealmLiveness::new(pool.clone()));
     // Reuses `lease_ttl` rather than a separate knob — both are "how
     // stale can a per-connection heartbeat get before something else
     // could reclaim it," same sizing question `RealmPresence::new`'s own
@@ -713,6 +717,7 @@ async fn main() {
         login_policy,
         character_lease,
         lease_ttl,
+        bound_liveness,
         realm_presence,
         max_characters_per_account,
         archetype_schema,
