@@ -2,7 +2,7 @@
 
 ![WorldZero](docs/social_assets/WZ-InitialConcept.png)
 
-**Status:** early implementation. `auth`, `character`, `world`, `gateway`, `content`, `chat`, `plugin-host`, and `realm-directory` all have real, tested logic, and `server` is a runnable combined process; `transfer` is still an empty stub. See [`docs/PROPOSAL.md`](docs/PROPOSAL.md) for the full design and [`docs/product/Getting_Started_Developers.md`](docs/product/Getting_Started_Developers.md) to run it yourself.
+**Status:** early implementation. `auth`, `character`, `world`, `gateway`, `content`, `chat`, `plugin-host`, and `realm-directory` all have real, tested logic, and `server` is a runnable combined process; `transfer` is still an empty stub. `server` also exposes real `/healthz`/`/readyz` HTTP endpoints (`WZ_HEALTH_ADDR`, default `127.0.0.1:9091`) for wiring up Kubernetes/Agones liveness/readiness probes — see [`docs/specs/Observability_Spec.md`](docs/specs/Observability_Spec.md#health--readiness-endpoints-181). See [`docs/PROPOSAL.md`](docs/PROPOSAL.md) for the full design and [`docs/product/Getting_Started_Developers.md`](docs/product/Getting_Started_Developers.md) to run it yourself.
 
 Building an MMO used to require a small studio's worth of backend engineering before a single player ever saw the game: authentication, character persistence, world simulation, netcode, sharding, chat, matchmaking — all before "is this game fun" could even be tested. WorldZero is an open-source, self-hostable MMO server framework that owns that infrastructure — realms, sharding/layering, world state, netcode, persistence, cross-server character policy — behind a sandboxed plugin system, so a game developer brings their own game logic instead of building a backend from scratch.
 

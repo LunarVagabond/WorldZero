@@ -87,6 +87,10 @@ const CRAFT_UNKNOWN_RECIPE_ADDR: &str = "127.0.0.1:7944";
 const SPAWN_CORRELATION_ADDR: &str = "127.0.0.1:7945";
 const TRANSFER_ADDR: &str = "127.0.0.1:7946";
 const TRANSFER_REJECTED_ADDR: &str = "127.0.0.1:7947";
+const HEALTH_ADDR: &str = "127.0.0.1:7948";
+const HEALTH_LISTENER_ADDR: &str = "127.0.0.1:7949";
+const HEALTH_METRICS_DISABLED_ADDR: &str = "127.0.0.1:7950";
+const HEALTH_METRICS_DISABLED_LISTENER_ADDR: &str = "127.0.0.1:7951";
 
 struct ServerProcess {
     child: Child,
@@ -1815,6 +1819,127 @@ async fn metrics_disabled_means_no_listener_at_all() {
         tokio::net::TcpStream::connect(metrics_addr).await.is_err(),
         "metrics listener should not be bound when WZ_SERVICE_METRICS_ENABLED=false"
     );
+}
+
+/// A plain GET against `health_addr`'s given `path` (`/healthz` or
+/// `/readyz`), returning the parsed status line's code and the decoded
+/// JSON body — #181's acceptance criteria wants a real client hitting
+/// these endpoints and asserting on body content, not just the status
+/// code, so this parses both.
+async fn get_health(health_addr: &str, path: &str) -> (u16, serde_json::Value) {
+    let mut stream =
+        tokio::time::timeout(STEP_TIMEOUT, tokio::net::TcpStream::connect(health_addr))
+            .await
+            .expect("timed out connecting to the health listener")
+            .unwrap();
+    stream
+        .write_all(format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes())
+        .await
+        .unwrap();
+
+    let mut response = Vec::new();
+    tokio::time::timeout(STEP_TIMEOUT, stream.read_to_end(&mut response))
+        .await
+        .expect("timed out reading the health response")
+        .unwrap();
+    let response = String::from_utf8(response).unwrap();
+
+    let status_line = response.lines().next().expect("a status line");
+    let code: u16 = status_line
+        .split_whitespace()
+        .nth(1)
+        .expect("a status code")
+        .parse()
+        .expect("status code is numeric");
+
+    let body = response
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body)
+        .expect("a blank line separating headers from the body");
+    (code, serde_json::from_str(body).expect("a JSON body"))
+}
+
+/// #181: `/healthz` and `/readyz` are real, separate-from-`/metrics` HTTP
+/// endpoints returning structured JSON, not a bare status code — checked
+/// against the real compiled `server` binary with metrics left enabled
+/// (the default), so `checks.metrics` should read `"ok"`, not
+/// `"disabled"`. `/readyz` additionally reports the readiness-only
+/// `zone_manifests`/`migrations` checks `/healthz` has no reason to
+/// include.
+#[tokio::test]
+#[ignore]
+async fn health_and_readiness_endpoints_report_real_dependency_state() {
+    let config_dir = setup_config_dir("health");
+    let _server = start_server_with_env(
+        &config_dir,
+        HEALTH_LISTENER_ADDR,
+        true,
+        &[("WZ_HEALTH_ADDR", HEALTH_ADDR)],
+    )
+    .await;
+    wait_for_port(HEALTH_LISTENER_ADDR).await;
+    wait_for_port(HEALTH_ADDR).await;
+
+    let (code, body) = get_health(HEALTH_ADDR, "/healthz").await;
+    assert_eq!(code, 200, "{body}");
+    assert_eq!(body["status"], "ok", "{body}");
+    assert!(body["version"].is_string(), "{body}");
+    assert!(body["uptime_seconds"].as_u64().is_some(), "{body}");
+    assert_eq!(body["checks"]["postgres"]["status"], "ok", "{body}");
+    assert_eq!(body["checks"]["redis"]["status"], "ok", "{body}");
+    assert_eq!(body["checks"]["chat"]["status"], "ok", "{body}");
+    assert_eq!(body["checks"]["metrics"]["status"], "ok", "{body}");
+    assert_eq!(body["checks"]["plugin_host"]["status"], "ok", "{body}");
+    // #181's "readiness-only concerns liveness has no reason to check" —
+    // `/healthz` should not carry these at all.
+    assert!(body["checks"].get("zone_manifests").is_none(), "{body}");
+    assert!(body["checks"].get("migrations").is_none(), "{body}");
+
+    let (code, body) = get_health(HEALTH_ADDR, "/readyz").await;
+    assert_eq!(code, 200, "{body}");
+    assert_eq!(body["status"], "ok", "{body}");
+    assert_eq!(body["checks"]["postgres"]["status"], "ok", "{body}");
+    assert_eq!(body["checks"]["redis"]["status"], "ok", "{body}");
+    assert_eq!(body["checks"]["zone_manifests"]["status"], "ok", "{body}");
+    assert!(
+        body["checks"]["zone_manifests"]["zone_count"]
+            .as_u64()
+            .unwrap()
+            >= 1,
+        "{body}"
+    );
+    assert_eq!(body["checks"]["migrations"]["status"], "ok", "{body}");
+
+    let (code, _body) = get_health(HEALTH_ADDR, "/does-not-exist").await;
+    assert_eq!(code, 404);
+}
+
+/// #181's per-`ServicesConfig`-toggle requirement: an intentionally
+/// disabled optional service reports `"disabled"` in its check entry,
+/// never `"ok"` and never silently omitted — verified here with metrics
+/// off, against the real compiled binary.
+#[tokio::test]
+#[ignore]
+async fn a_disabled_optional_service_reports_disabled_not_ok_or_omitted() {
+    let config_dir = setup_config_dir("health-metrics-disabled");
+    let _server = start_server_with_env(
+        &config_dir,
+        HEALTH_METRICS_DISABLED_LISTENER_ADDR,
+        true,
+        &[
+            ("WZ_HEALTH_ADDR", HEALTH_METRICS_DISABLED_ADDR),
+            ("WZ_SERVICE_METRICS_ENABLED", "false"),
+        ],
+    )
+    .await;
+    wait_for_port(HEALTH_METRICS_DISABLED_LISTENER_ADDR).await;
+    wait_for_port(HEALTH_METRICS_DISABLED_ADDR).await;
+
+    let (code, body) = get_health(HEALTH_METRICS_DISABLED_ADDR, "/healthz").await;
+    // A disabled optional service never worsens the overall status.
+    assert_eq!(code, 200, "{body}");
+    assert_eq!(body["status"], "ok", "{body}");
+    assert_eq!(body["checks"]["metrics"]["status"], "disabled", "{body}");
 }
 
 /// #51/#136, end to end (not just `realm-directory`'s own crate-level
