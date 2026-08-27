@@ -86,6 +86,33 @@ pub async fn migrate_up(pool: &PgPool, migrations_dir: &Path) -> Result<()> {
         .map_err(|e| Error::wrap("common", "failed to apply migrations", e))
 }
 
+/// Whether every migration under `migrations_dir` has actually been
+/// applied to `pool` — #181's `/readyz` "migrations current" check. Only
+/// looks at the `Up` half of each pair (`Down` entries share a version
+/// with their `Up` counterpart, so counting both would double-count);
+/// `false` covers both "some migrations are pending" and "the
+/// `_sqlx_migrations` table itself doesn't exist yet" (the query below
+/// surfaces the latter as an error, which the caller maps to a failed
+/// check rather than a crash — an unmigrated database is exactly the
+/// case this check exists to catch, not a bug in the check itself).
+pub async fn migrations_current(pool: &PgPool, migrations_dir: &Path) -> Result<bool> {
+    let migrations = load_migrations(migrations_dir)?;
+    let expected: std::collections::BTreeSet<i64> = migrations
+        .iter()
+        .filter(|m| m.migration_type == MigrationType::ReversibleUp)
+        .map(|m| m.version)
+        .collect();
+
+    let applied: Vec<i64> =
+        sqlx::query_scalar("SELECT version FROM _sqlx_migrations WHERE success ORDER BY version")
+            .fetch_all(pool)
+            .await
+            .map_err(|e| Error::wrap("common", "failed to read applied migrations", e))?;
+    let applied: std::collections::BTreeSet<i64> = applied.into_iter().collect();
+
+    Ok(expected == applied)
+}
+
 /// Reverts exactly the most recently applied migration (its `down.sql`).
 /// A no-op if nothing has been applied yet.
 pub async fn migrate_down_one(pool: &PgPool, migrations_dir: &Path) -> Result<()> {
@@ -169,5 +196,21 @@ mod tests {
 
         migrate_up(&pool, &dir).await.unwrap();
         migrate_up(&pool, &dir).await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn migrations_current_is_true_once_up_has_run() {
+        let config = {
+            let _guard = crate::test_env_lock::acquire();
+            PostgresConfig::from_env().expect("WZ_POSTGRES_* env vars set")
+        };
+        let pool = postgres_pool(&config, PoolOptions::default())
+            .await
+            .unwrap();
+        let dir = migrations_dir();
+
+        migrate_up(&pool, &dir).await.unwrap();
+        assert!(migrations_current(&pool, &dir).await.unwrap());
     }
 }

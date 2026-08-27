@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use character::{AttributeSchema, CharacterStore};
+use character::{AttributeSchema, BoundRealmLiveness, CharacterStore};
 use common::config::PostgresConfig;
 use common::id::{AccountId, CharacterId};
 use common::pool::{PoolOptions, postgres_pool};
@@ -206,6 +206,70 @@ async fn a_failed_transfer_leaves_the_character_unchanged_on_the_source_realm() 
 
     let hp = store.get_stat(character_id, "hp").await.unwrap();
     assert_eq!(hp, 42);
+}
+
+/// #169: closing the "known gap" — a bound-realm connection that's
+/// registered itself live (`character::BoundRealmLiveness::join`, what
+/// `server::session::handle_session` calls on join) blocks a transfer,
+/// and releasing it (`leave`, what disconnect calls) unblocks one.
+#[tokio::test]
+#[ignore]
+async fn a_transfer_is_rejected_while_the_character_has_an_active_bound_realm_connection() {
+    let pool = pool().await;
+    let (_realms, source_realm_id, destination_realm_id) = source_and_destination(&pool).await;
+    let store = CharacterStore::new(pool.clone(), source_schema(), Default::default());
+    let (character_id, account_id) = create_character(&pool, &store, source_realm_id).await;
+
+    let liveness = BoundRealmLiveness::new(pool.clone());
+    liveness
+        .join(
+            character_id,
+            source_realm_id,
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+
+    let destination_schema = destination_schema();
+    let err = executor(pool.clone())
+        .await
+        .transfer(TransferRequest {
+            character_id,
+            destination_realm_id,
+            destination_schema: &destination_schema,
+            initiated_by: account_id,
+        })
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("currently logged in"), "{err}");
+
+    // Untouched: still on the source realm.
+    let realm_id: uuid::Uuid = sqlx::query_scalar("SELECT realm_id FROM characters WHERE id = $1")
+        .bind(character_id.as_uuid())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(realm_id, source_realm_id.as_uuid());
+
+    // Once the connection ends (`leave`), the same transfer succeeds.
+    liveness.leave(character_id).await.unwrap();
+    executor(pool.clone())
+        .await
+        .transfer(TransferRequest {
+            character_id,
+            destination_realm_id,
+            destination_schema: &destination_schema,
+            initiated_by: account_id,
+        })
+        .await
+        .unwrap();
+
+    let realm_id: uuid::Uuid = sqlx::query_scalar("SELECT realm_id FROM characters WHERE id = $1")
+        .bind(character_id.as_uuid())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(realm_id, destination_realm_id.as_uuid());
 }
 
 #[tokio::test]

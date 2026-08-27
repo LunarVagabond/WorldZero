@@ -162,6 +162,13 @@ pub struct SessionDeps {
     /// never acquires a lease for one in the first place.
     pub character_lease: Arc<character::CharacterSessionLease>,
     pub lease_ttl: std::time::Duration,
+    /// #169's bound-realm counterpart to `character_lease` above —
+    /// registered at join and cleared at disconnect only when
+    /// `realm_open_or_bound` is `Bound` (an open realm already has
+    /// `character_lease` for this; the two are never both active for the
+    /// same connection). What `transfer::execute`'s "no active lease"
+    /// check now actually queries.
+    pub bound_liveness: Arc<character::BoundRealmLiveness>,
     /// #137's live-connection counter, backing #192's `RealmList`
     /// (`live_connection_count`) — registered at join, refreshed
     /// alongside the lease renewal loop below, removed at disconnect.
@@ -651,6 +658,17 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
         .connect(deps.realm_id, entity_id.as_uuid())
         .await?;
 
+    // #169 — the bound-realm equivalent of #21's lease acquisition just
+    // below (`renew_open_lease`/heartbeat loop): a bound realm never
+    // takes a `character_lease`, but still needs *some* queryable "is
+    // this character connected" fact for `transfer::execute` to check.
+    let is_bound_realm = deps.realm_open_or_bound == realm_directory::OpenOrBound::Bound;
+    if is_bound_realm {
+        deps.bound_liveness
+            .join(character_id, deps.realm_id, deps.lease_ttl)
+            .await?;
+    }
+
     // A character's persisted `zone_id` might name a zone this content
     // pack no longer declares (the pack changed since they last logged
     // in) — fall back to the default rather than failing the connection
@@ -850,6 +868,12 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
                     .await
                 {
                     tracing::warn!(error = %e, %character_id, "failed to renew character session lease");
+                }
+                if is_bound_realm && let Err(e) = deps.bound_liveness
+                    .join(character_id, deps.realm_id, deps.lease_ttl)
+                    .await
+                {
+                    tracing::warn!(error = %e, %character_id, "failed to renew bound-realm liveness");
                 }
                 if let Err(e) = deps.realm_presence.connect(deps.realm_id, entity_id.as_uuid()).await {
                     tracing::warn!(error = %e, %character_id, "failed to renew realm presence heartbeat");
@@ -1397,6 +1421,12 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
     // unconditionally rather than branching on `realm_open_or_bound`.
     if let Err(e) = deps.character_lease.release(character_id).await {
         tracing::warn!(error = %e, %character_id, "failed to release character session lease on disconnect");
+    }
+    // #169's clean-disconnect release — a harmless no-op for an
+    // open-realm character (never joined to begin with), so this also
+    // runs unconditionally, same as the lease release above.
+    if let Err(e) = deps.bound_liveness.leave(character_id).await {
+        tracing::warn!(error = %e, %character_id, "failed to clear bound-realm liveness on disconnect");
     }
     // #137's clean-disconnect deregistration — runs unconditionally, same
     // as the lease release above (applies to every realm, not just open

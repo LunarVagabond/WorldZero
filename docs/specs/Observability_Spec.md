@@ -56,6 +56,42 @@ The point of reserving `ERROR` is operational, not stylistic: once alerting exis
 
 **Runtime toggle:** `WZ_SERVICE_METRICS_ENABLED`, default `true` — same optional-service pattern `chat` established (`common::config::ServicesConfig`, decision #91). Disabled means `Option<Arc<Metrics>>` is `None` end to end: no `/metrics` listener binds, and every instrumentation call site (`world_actor`'s tick loop, `session`'s connection tracking) skips its `Some(...)` branch entirely — not a listener left running with nothing behind it.
 
+## Health & readiness endpoints (#181)
+
+**`/healthz` (liveness)** and **`/readyz` (readiness)** — hand-rolled minimal HTTP, same non-framework precedent as `/metrics` above, so an external orchestrator (Kubernetes, or Agones for game-server lifecycle specifically — docs/PROPOSAL.md's Prior Art table) can act on real signal instead of a bare TCP-accept check. Both share one listener (`WZ_HEALTH_ADDR`, default `127.0.0.1:9091`), dispatched by path — a separate listener from `/metrics`'s (never sharing a port with it), so liveness/readiness stay reachable even when `WZ_SERVICE_METRICS_ENABLED=false`. `common::health::serve` owns the listener/dispatch; `server::health::{healthz, readyz}` decide what a combined `server` process's own checks actually are.
+
+**Response shape:** both return the same JSON shape, a real body (not a bare status code) with the *why* behind a probe result — an operator (or their own tooling) reading a failing probe needs to see which dependency is down:
+
+```json
+{
+  "status": "ok",
+  "version": "0.1.0",
+  "uptime_seconds": 4213,
+  "checks": {
+    "postgres": { "status": "ok" },
+    "redis": { "status": "ok" },
+    "chat": { "status": "ok" },
+    "metrics": { "status": "disabled" },
+    "plugin_host": { "status": "ok", "plugin_loaded": true, "plugin_count": 1 },
+    "zone_manifests": { "status": "ok", "zone_count": 1 },
+    "migrations": { "status": "ok" }
+  }
+}
+```
+
+- `status` is one of `ok` / `degraded` / `unavailable`, computed by rolling up every entry in `checks` — never a value set independently of them. `degraded` means a check reported a problem that doesn't stop this instance serving traffic; `unavailable` means at least one check failed outright. This same value drives the HTTP status code an orchestrator's `httpGet` probe actually acts on (`ok`/`degraded` → `200`, `unavailable` → `503`) — the JSON body is for humans/tooling layered on top, not a replacement for that contract.
+- Each `checks.<name>` entry is `ok` / `degraded` / `unavailable` / `disabled`, plus whatever extra detail is worth surfacing (`plugin_loaded`, `zone_count`, a `reason` string on a failed check). `disabled` is distinct from `unavailable` and is reported for every `ServicesConfig`-gated optional service that's intentionally off (`chat`, `metrics` today) — never omitted, never `ok` — so an operator can tell "off on purpose" from "should be on and isn't" at a glance. A `disabled` check never worsens the overall `status`.
+- `checks` keys are stable across requests but the exact set isn't identical between the two endpoints — see below.
+
+**`/healthz` vs. `/readyz` — what each check *means*, not a different response shape:**
+
+- `/healthz` (liveness) re-verifies *already-established* pooled connections are still alive — a cheap `SELECT 1`/`PING` against the same Postgres/Redis pool real request traffic already uses (`common::health::ping_postgres`/`ping_redis`), not a fresh reconnect-from-scratch. This is what catches a wedged/zombie process (a pool whose connections silently died, a task that's deadlocked) — the case a readiness failure alone can't catch, since pulling an instance out of load-balancer rotation doesn't restart anything. Also reports every optional service's on/off state (`chat`, `metrics`) and `plugin_host`'s loaded-plugin count — all cheap, static-since-startup reads.
+- `/readyz` (readiness) reports the same checks as `/healthz`, plus readiness-only concerns liveness has no reason to run: `zone_manifests` (this process's zone manifest(s) loaded) and `migrations` (`common::migrate::migrations_current` — every migration under `db/migrations/` has actually been applied to this database, not just the code expecting it deployed).
+
+**Runtime toggle:** none — unlike `/metrics`, liveness/readiness aren't optional; there's no `WZ_SERVICE_HEALTH_ENABLED`. An orchestrator needs these reachable unconditionally, including when every other optional service is off.
+
+**Kubernetes/Agones wiring:** point `livenessProbe`/`readinessProbe` (or Agones' equivalent health config) at `GET /healthz` / `GET /readyz` on `WZ_HEALTH_ADDR`'s port — any 2xx/3xx passes, `503` fails, exactly like any other `httpGet` probe. See [`docs/product/Server_Customization_Guide.md`](../product/Server_Customization_Guide.md#step-6--optional-services-chat-metrics-health) for the env var and a worked probe snippet.
+
 ## Log export/aggregation (decision: #120)
 
 Core ships the fixed stdout format above and nothing more — no pluggable log-sink abstraction, no bundled/blessed Loki+Grafana or DataDog integration. The format is already portable enough that any mainstream shipper (Promtail, Filebeat, DataDog Agent, Vector) can tail it without WorldZero doing anything else. What ships beyond this is docs-only — example shipper configs, "reference, not maintained product," same framing already used for the Grafana dashboard (#59/#68) — see [Log Export/Aggregation Cookbook](Log_Export_Cookbook.md) (#122) for worked examples, including how to filter/tag log output by crate.

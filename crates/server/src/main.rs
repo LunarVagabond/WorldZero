@@ -64,6 +64,9 @@
 //! `true`), `WZ_SERVICE_METRICS_ENABLED` (default `true`) +
 //! `WZ_METRICS_ADDR` (default `127.0.0.1:9090` — a separate `/metrics`
 //! HTTP listener for Prometheus scraping, #48; see
+//! docs/specs/Observability_Spec.md), `WZ_HEALTH_ADDR` (default
+//! `127.0.0.1:9091` — `/healthz`/`/readyz` liveness/readiness endpoints,
+//! #181, always on regardless of `WZ_SERVICE_METRICS_ENABLED`; see
 //! docs/specs/Observability_Spec.md), `WZ_LAYER_ENABLED` (default
 //! `true` — #50's dynamic layering; `false` pins every zone to exactly
 //! one layer forever) + `WZ_LAYER_POPULATION_THRESHOLD` (default `200`
@@ -85,6 +88,7 @@
 
 mod character_protocol;
 mod chat_session;
+mod health;
 mod plugin_startup;
 mod plugin_state;
 mod realm_protocol;
@@ -115,6 +119,10 @@ use zone_registry::{ZoneRegistry, ZoneRuntime};
 
 const DEFAULT_ADDR: &str = "127.0.0.1:7900";
 const DEFAULT_METRICS_ADDR: &str = "127.0.0.1:9090";
+/// #181's `/healthz`/`/readyz` listener — a distinct port from
+/// `WZ_METRICS_ADDR`'s default (#48) rather than the next one along, so
+/// the two never collide when both defaults are left as-is.
+const DEFAULT_HEALTH_ADDR: &str = "127.0.0.1:9091";
 /// #50's layer-spin-up trigger, in connected sessions per layer — see
 /// `zone_registry`'s doc comment for what actually happens at this
 /// point. Generous on purpose: real per-deployment tuning is expected
@@ -214,6 +222,10 @@ async fn main() {
 
     let zone_manifests = load_zone_manifests(&config_dir);
     let default_zone_id = zone_manifests[0].id.clone();
+    // Captured now, before `zone_manifests` is consumed by the
+    // per-zone-actor loop below — #181's `/readyz` "zone manifests
+    // loaded" check just wants the count, not the manifests themselves.
+    let zone_count = zone_manifests.len();
     tracing::info!(
         zone_count = zone_manifests.len(),
         default_zone_id,
@@ -327,6 +339,10 @@ async fn main() {
         lease_ttl,
     ));
     let character_lease = Arc::new(character::CharacterSessionLease::new(pool.clone()));
+    // #169 — the bound-realm counterpart to `character_lease` above; see
+    // `SessionDeps::bound_liveness`'s own doc comment for why the two
+    // are never both active for the same connection.
+    let bound_liveness = Arc::new(character::BoundRealmLiveness::new(pool.clone()));
     // Reuses `lease_ttl` rather than a separate knob — both are "how
     // stale can a per-connection heartbeat get before something else
     // could reclaim it," same sizing question `RealmPresence::new`'s own
@@ -492,7 +508,51 @@ async fn main() {
         }
         loaded_plugins.push(runtime);
     }
+    let plugin_count = loaded_plugins.len();
     let plugins = Arc::new(tokio::sync::Mutex::new(loaded_plugins));
+
+    // #181 — always on, independent of `WZ_SERVICE_METRICS_ENABLED`:
+    // liveness/readiness need to stay reachable regardless of whether the
+    // optional metrics service is toggled on, so this gets its own
+    // listener/addr rather than sharing `metrics`'s (see
+    // `common::health::serve`'s own doc comment for the full reasoning).
+    let health_addr: std::net::SocketAddr = std::env::var("WZ_HEALTH_ADDR")
+        .unwrap_or_else(|_| DEFAULT_HEALTH_ADDR.to_string())
+        .parse()
+        .expect("WZ_HEALTH_ADDR must be a valid socket address");
+    let health_deps = Arc::new(health::HealthDeps {
+        pool: pool.clone(),
+        redis: redis.clone(),
+        chat_enabled: services.chat_enabled,
+        metrics_enabled: services.metrics_enabled,
+        plugin_count,
+        zone_count,
+        migrations_dir: std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../db/migrations"),
+        started_at: std::time::Instant::now(),
+    });
+    tokio::spawn({
+        let health_deps = health_deps.clone();
+        async move {
+            let healthz_deps = health_deps.clone();
+            let readyz_deps = health_deps;
+            if let Err(e) = common::health::serve(
+                health_addr,
+                move || {
+                    let deps = healthz_deps.clone();
+                    Box::pin(async move { health::healthz(&deps).await })
+                },
+                move || {
+                    let deps = readyz_deps.clone();
+                    Box::pin(async move { health::readyz(&deps).await })
+                },
+            )
+            .await
+            {
+                tracing::error!(error = %e, "health listener stopped");
+            }
+        }
+    });
 
     // Every zone-service actor's `on_tick` closure is wired up below
     // before the full `ZoneRegistry` can possibly exist (it needs every
@@ -689,6 +749,7 @@ async fn main() {
         login_policy,
         character_lease,
         lease_ttl,
+        bound_liveness,
         realm_presence,
         max_characters_per_account,
         archetype_schema,
