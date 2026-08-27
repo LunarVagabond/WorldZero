@@ -1,8 +1,8 @@
 //! Combined-process runnable binary — the Phase 1 target (docs/PROPOSAL.md,
 //! "Phased Roadmap"): wires `auth`, `character`, `world`, `gateway`,
-//! `content`, `chat`, and (as of #136) `realm-directory` into one process
-//! a self-hoster can run end to end. `transfer` comes online in a later
-//! phase — `plugin-host` gets a minimal, optional slice here already
+//! `content`, `chat`, (as of #136) `realm-directory`, and (as of #225)
+//! `transfer` into one process a self-hoster can run end to end.
+//! `plugin-host` gets a minimal, optional slice here already
 //! (spawning one NPC per zone-service via a configured plugin's
 //! `on-zone-loaded` hook, plus live `on-message` routing, #95), matching
 //! Phase 1's "minimal plugin hook." `chat` is the first optional-service
@@ -286,6 +286,11 @@ async fn main() {
     // NPC-targetable stats (#197) read the same declared schema real
     // character stats do, so this is a clone of the exact instance
     // `character_store` gets — not a second file load that could drift.
+    // Also handed to `SessionDeps::attribute_schema` below (#225) as
+    // `transfer::TransferExecutor::transfer`'s `destination_schema` — see
+    // that field's own doc comment for why reusing this process's one
+    // declared schema is the right call for a combined single-schema
+    // deployment.
     let npc_attribute_schema = Arc::new(schema.clone());
     let character_store = Arc::new(CharacterStore::new(pool.clone(), schema, inventory_config));
     let party_store = Arc::new(character::PartyStore::new(pool.clone(), party_schema));
@@ -321,6 +326,17 @@ async fn main() {
     let realm_presence = Arc::new(realm_directory::RealmPresence::new(
         redis.clone(),
         lease_ttl,
+    ));
+    // Real execution/gating/audit (#53/#54/#55), wired in for real as of
+    // #225 — same construction shape as `login_policy` just above: a
+    // fresh `realm_directory::RealmStore` handle over the shared pool.
+    // `DenyAllPurchaseVerifier` stays the default (`TransferExecutor::new`)
+    // — a real `PurchaseVerifier` is its own ticket, not this one's scope.
+    let transfer_executor = Arc::new(transfer::TransferExecutor::new(
+        pool.clone(),
+        realm_directory::RealmStore::new(pool.clone()),
+        transfer::TransferGateStore::new(pool.clone()),
+        transfer::TransferAuditLog::new(pool.clone()),
     ));
 
     // `None` end to end (not just an unused `ChatDeps`) when disabled —
@@ -629,6 +645,8 @@ async fn main() {
         max_characters_per_account,
         archetype_schema,
         crafting_schema,
+        attribute_schema: npc_attribute_schema.clone(),
+        transfer_executor,
         plugins: plugins.clone(),
         zones,
         default_zone_id,
