@@ -1,0 +1,9 @@
+schema_version: 1
+system_channels:
+  - category: trade
+    scope: global
+  - category: lfg
+    scope: global
+  - category: local
+    scope: zone
+    auto_join: true

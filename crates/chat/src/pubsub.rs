@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use crate::message_log::MessageLog;
-use crate::store::ChannelStore;
+use crate::store::{ChannelStore, ChannelType};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
@@ -70,7 +70,18 @@ impl ChatBus {
         sender_account_id: AccountId,
         body: &str,
     ) -> Result<()> {
-        if !store.is_member(channel_id, sender_account_id).await? {
+        // The doc comment above already promises this exemption, but
+        // until #186 nothing actually published to a `zone` channel, so
+        // this codepath was untested and had drifted: `is_member` was
+        // being called unconditionally, which would reject every zone
+        // channel send (a `zone` channel never has `chat_channel_members`
+        // rows to begin with — `ChannelStore::channel_type`'s doc
+        // comment). Restoring the documented behavior here.
+        let is_zone_channel = matches!(
+            store.channel_type(channel_id).await?,
+            Some(ChannelType::Zone)
+        );
+        if !is_zone_channel && !store.is_member(channel_id, sender_account_id).await? {
             return Err(Error::new("chat", "sender is not a member of this channel"));
         }
 
@@ -214,6 +225,41 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("not a member"), "{err}");
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn publish_to_a_zone_channel_never_requires_membership() {
+        let pg_config = PostgresConfig::from_env().expect("WZ_POSTGRES_* env vars set");
+        let pool = postgres_pool(&pg_config, PoolOptions::default())
+            .await
+            .unwrap();
+        let redis_config = RedisConfig::from_env().expect("WZ_REDIS_* env vars set");
+        let redis = redis_pool(&redis_config, PoolOptions::default()).unwrap();
+
+        let sender = AccountId::new();
+        sqlx::query("INSERT INTO accounts (id, username, password_hash) VALUES ($1, $2, 'unused')")
+            .bind(sender.as_uuid())
+            .bind(format!("chat-zone-publish-test-{sender}"))
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let store = ChannelStore::new(pool);
+        let category = format!("local-{}", ChannelId::new());
+        let channel = store
+            .ensure_zone_channel(Some("greenwood-forest"), &category, "Local")
+            .await
+            .unwrap();
+        // Never joined via `ChannelStore::join` — a zone channel has no
+        // `chat_channel_members` rows by design (#186's own doc updates
+        // to this method).
+        assert!(!store.is_member(channel, sender).await.unwrap());
+
+        let bus = ChatBus::new(redis, redis_config, None);
+        bus.publish(&store, channel, sender, "anyone can talk in a zone channel")
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

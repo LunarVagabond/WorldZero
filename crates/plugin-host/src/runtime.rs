@@ -150,6 +150,16 @@ pub trait HostCallbacks: Send + 'static {
     /// Reports a respawn (`wit/plugin.wit`'s `report-respawn`) — same
     /// shape as `report_death`.
     fn report_respawn(&mut self, entity_id: &str) -> std::result::Result<(), String>;
+
+    /// Blocks `entity_id` from auto-joining the zone-scoped chat channel
+    /// declared under `category` (`wit/plugin.wit`'s
+    /// `block-zone-channel`, #186) — see that WIT doc comment for the
+    /// full contract (in-memory, per-connection, not retroactive).
+    fn block_zone_channel(
+        &mut self,
+        entity_id: &str,
+        category: &str,
+    ) -> std::result::Result<(), String>;
 }
 
 /// Which capability (`manifest::KNOWN_CAPABILITIES`) a host function
@@ -176,6 +186,12 @@ fn required_capability(function: &str) -> Option<&'static str> {
         | "report-death"
         | "report-respawn" => Some(CAPABILITY_COMBAT),
         "grant-item" | "remove-item" | "modify-currency" => Some(CAPABILITY_ECONOMY),
+        // Grouped with `send-message` rather than a new capability
+        // (#186): chat is a messaging concern, and this is the same
+        // "reaches across an entity boundary" test every other gated
+        // function here fails — it acts on the block target's own
+        // connection state, not just the calling plugin's own.
+        "block-zone-channel" => Some(CAPABILITY_MESSAGING),
         _ => None,
     }
 }
@@ -314,6 +330,15 @@ impl HostCallbacks for CapabilityGatedCallbacks {
         self.check("report-respawn")?;
         self.inner.report_respawn(entity_id)
     }
+
+    fn block_zone_channel(
+        &mut self,
+        entity_id: &str,
+        category: &str,
+    ) -> std::result::Result<(), String> {
+        self.check("block-zone-channel")?;
+        self.inner.block_zone_channel(entity_id, category)
+    }
 }
 
 struct PluginState {
@@ -428,6 +453,14 @@ impl HostInterface for PluginState {
 
     fn report_respawn(&mut self, entity_id: String) -> std::result::Result<(), String> {
         self.callbacks.report_respawn(&entity_id)
+    }
+
+    fn block_zone_channel(
+        &mut self,
+        entity_id: String,
+        category: String,
+    ) -> std::result::Result<(), String> {
+        self.callbacks.block_zone_channel(&entity_id, &category)
     }
 }
 
@@ -911,6 +944,9 @@ mod tests {
         fn report_respawn(&mut self, _: &str) -> std::result::Result<(), String> {
             Ok(())
         }
+        fn block_zone_channel(&mut self, _: &str, _: &str) -> std::result::Result<(), String> {
+            Ok(())
+        }
     }
 
     fn gated(capabilities: &[&str]) -> CapabilityGatedCallbacks {
@@ -952,6 +988,7 @@ mod tests {
         assert!(none.grant_item("e1", "torch", 1).is_err());
         assert!(none.remove_item("e1", "torch", 1).is_err());
         assert!(none.modify_currency("e1", "gold", 1).is_err());
+        assert!(none.block_zone_channel("e1", "trade").is_err());
 
         let mut spawning = gated(&["spawning"]);
         assert!(spawning.spawn_npc("table").is_ok());
@@ -959,6 +996,7 @@ mod tests {
 
         let mut messaging = gated(&["messaging"]);
         assert!(messaging.send_message("e1", "hi").is_ok());
+        assert!(messaging.block_zone_channel("e1", "trade").is_ok());
         assert!(messaging.spawn_npc("table").is_err());
 
         let mut movement = gated(&["movement"]);

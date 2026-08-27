@@ -15,6 +15,16 @@ pub enum ChannelScope {
 pub struct SystemChannelDeclaration {
     pub category: String,
     pub scope: ChannelScope,
+    /// Whether a connection auto-joins this category's channel on
+    /// entering a zone (initial join or a `ZoneChanged` transition) and
+    /// auto-leaves it on exiting, rather than needing an explicit client
+    /// `Join`/`Leave` (#186). Only meaningful for `scope: zone` — a
+    /// `global` category is never zone-triggered, so `true` here on a
+    /// `global` declaration is rejected at load time rather than silently
+    /// ignored (`SystemChannelConfig::from_yaml` below). Defaults to
+    /// `false`, matching every pre-#186 declaration's actual behavior.
+    #[serde(default)]
+    pub auto_join: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -25,7 +35,42 @@ pub struct SystemChannelConfig {
 
 impl SystemChannelConfig {
     pub fn from_yaml(input: &str) -> Result<Self> {
-        serde_yaml::from_str(input).map_err(|e| Error::wrap("chat", "failed to parse chat.yaml", e))
+        let config: Self = serde_yaml::from_str(input)
+            .map_err(|e| Error::wrap("chat", "failed to parse chat.yaml", e))?;
+        config.check_auto_join_only_on_zone_scope()?;
+        Ok(config)
+    }
+
+    /// `auto_join: true` only makes sense paired with `scope: zone` — a
+    /// `global` channel is never zone-triggered (#186's own acceptance
+    /// criteria: "global channels must be completely unaffected"), so a
+    /// declaration combining the two is refused at load time rather than
+    /// silently never auto-joining anyone.
+    fn check_auto_join_only_on_zone_scope(&self) -> Result<()> {
+        for declared in &self.system_channels {
+            if declared.auto_join && declared.scope == ChannelScope::Global {
+                return Err(Error::new(
+                    "chat",
+                    format!(
+                        "chat.yaml declares category {:?} with auto_join: true but scope: global — \
+                         auto_join only applies to scope: zone",
+                        declared.category
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Every declared category with `scope: zone` and `auto_join: true`
+    /// (#186) — what `server::chat_session::auto_join_zone_channels`
+    /// iterates on entering a zone.
+    pub fn auto_join_zone_categories(&self) -> Vec<&str> {
+        self.system_channels
+            .iter()
+            .filter(|declared| declared.scope == ChannelScope::Zone && declared.auto_join)
+            .map(|declared| declared.category.as_str())
+            .collect()
     }
 
     pub fn from_file(path: &std::path::Path) -> Result<Self> {
@@ -38,6 +83,26 @@ impl SystemChannelConfig {
     /// (`common::config::config_dir` — `WZ_CONFIG_DIR` or `./config`).
     pub fn from_config_dir() -> Result<Self> {
         Self::from_file(&common::config::config_dir().join("chat.yaml"))
+    }
+
+    /// Same as `from_config_dir`, but a missing `chat.yaml` is treated as
+    /// "no system channels declared" (an empty config) rather than an
+    /// error — unlike `stats.schema.yaml`/`party.schema.yaml`/etc., chat
+    /// itself is an optional service (`WZ_SERVICE_CHAT_ENABLED`), so a
+    /// deployment that enables chat but declares no system channels (and
+    /// in particular no zone-scoped `auto_join` category, #186) is a
+    /// legitimate, common configuration, not a startup-time mistake. A
+    /// malformed (present but unparsable) file still fails loudly, same
+    /// as `from_file`.
+    pub fn from_config_dir_or_default() -> Result<Self> {
+        let path = common::config::config_dir().join("chat.yaml");
+        if !path.exists() {
+            return Ok(Self {
+                schema_version: 1,
+                system_channels: Vec::new(),
+            });
+        }
+        Self::from_file(&path)
     }
 
     /// Ensures every declared system channel exists — one channel for a
@@ -109,6 +174,85 @@ system_channels:
             err.to_string().contains("failed to parse chat.yaml"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn defaults_auto_join_to_false_when_omitted() {
+        let config = SystemChannelConfig::from_yaml(
+            r#"
+schema_version: 1
+system_channels:
+  - category: local
+    scope: zone
+"#,
+        )
+        .unwrap();
+
+        assert!(!config.system_channels[0].auto_join);
+        assert!(config.auto_join_zone_categories().is_empty());
+    }
+
+    #[test]
+    fn auto_join_zone_categories_returns_only_zone_scoped_auto_join_declarations() {
+        let config = SystemChannelConfig::from_yaml(
+            r#"
+schema_version: 1
+system_channels:
+  - category: trade
+    scope: global
+  - category: local
+    scope: zone
+    auto_join: true
+  - category: dungeon-chat
+    scope: zone
+    auto_join: false
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.auto_join_zone_categories(), vec!["local"]);
+    }
+
+    #[test]
+    fn rejects_auto_join_paired_with_global_scope() {
+        let err = SystemChannelConfig::from_yaml(
+            r#"
+schema_version: 1
+system_channels:
+  - category: trade
+    scope: global
+    auto_join: true
+"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("trade"), "{err}");
+        assert!(err.to_string().contains("auto_join"), "{err}");
+    }
+
+    #[test]
+    fn from_config_dir_or_default_returns_an_empty_config_when_the_file_is_missing() {
+        // No WZ_CONFIG_DIR pointed at a real chat.yaml here — this is the
+        // common "chat enabled, no system channels declared" deployment
+        // shape (#186), not an infra-dependent test, so it isn't `#[ignore]`d.
+        let dir = std::env::temp_dir().join(format!(
+            "wz-chat-schema-test-{}",
+            common::id::ChannelId::new()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // SAFETY: this test doesn't run concurrently with anything else
+        // that reads WZ_CONFIG_DIR within this process — see other
+        // `from_env`-adjacent tests in this crate for the same pattern.
+        unsafe {
+            std::env::set_var("WZ_CONFIG_DIR", &dir);
+        }
+        let config = SystemChannelConfig::from_config_dir_or_default().unwrap();
+        unsafe {
+            std::env::remove_var("WZ_CONFIG_DIR");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert_eq!(config.schema_version, 1);
+        assert!(config.system_channels.is_empty());
     }
 
     #[test]

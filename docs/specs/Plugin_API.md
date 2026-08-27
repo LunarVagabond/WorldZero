@@ -2,7 +2,7 @@
 
 Corresponds to [Plugin System](../PROPOSAL.md#plugin-system) in the proposal.
 
-**Status:** the v0 slice below is real and implemented (`plugin-host`, #37/#38, extended by #95, #116, #57, #124, #149, #155, #154, #153, #152, #194, #197, #211, #214, #216, #218, and #168) — one WIT world with nineteen hooks and thirteen host functions: #38's original NPC-spawn-plus-interaction slice, #116's combat/NPC-patrol/chat-command hooks, #57's inventory/economy hooks and host functions (#112 supplied the core storage these write through), #124's `caller-role` (the account-roles decision, #114), #149's `plugin-state-get`/`plugin-state-set` (the Plugin-Scoped Data Store), #155's `on-player-join-zone`/`on-player-leave-zone`, #154's real client-protocol call sites for `on-damage-calc`/`on-item-use`/`on-npc-interact` plus `report-death`/`report-respawn` (the plugin-owned trigger for `on-death`/`on-respawn`), #153's real capability gating, #152's real multi-plugin support (process-wide loading, per-hook opt-in, `on-zone-loaded`), #194's `on-character-create`/`apply-stat-delta-for-character` (the character-creation extension point — starting stats, archetype/preset systems built as a plugin rather than a core class/race enum), #197's NPC-targetable stats (`apply-stat-delta` now resolves for an NPC entity too, through in-memory storage instead of a character row — see "NPC-targetable stats" below), #211's automatic `StatChanged`/`ItemChanged`/`CurrencyChanged` client pushes (see "Automatic client pushes" below) closing the gap where a successful write never told the connected client anything without the plugin inventing its own convention, #214's real `on-entity-spawn` wiring plus its `spawn-table-id` correlation parameter (see "Entity correlation via on-entity-spawn" below) — `on-entity-spawn` existed in this interface well before #214 but nothing ever actually called it; #214 is what made it live — #216's `on-craft-complete` (implementing #215's generic crafting decision — see "Crafting" below), #218's `currency-key` parameter on `modify-currency` (a dev-declared, possibly multi-currency system replaced the old implicit single balance), and #168's `on-tick` (the zone-wide tick hook, wired to a real call site for the first time — see its row below). See "Beyond this v0 slice" below for what's still not here.
+**Status:** the v0 slice below is real and implemented (`plugin-host`, #37/#38, extended by #95, #116, #57, #124, #149, #155, #154, #153, #152, #194, #197, #211, #214, #216, #218, #168, and #186) — one WIT world with nineteen hooks and fourteen host functions: #38's original NPC-spawn-plus-interaction slice, #116's combat/NPC-patrol/chat-command hooks, #57's inventory/economy hooks and host functions (#112 supplied the core storage these write through), #124's `caller-role` (the account-roles decision, #114), #149's `plugin-state-get`/`plugin-state-set` (the Plugin-Scoped Data Store), #155's `on-player-join-zone`/`on-player-leave-zone`, #154's real client-protocol call sites for `on-damage-calc`/`on-item-use`/`on-npc-interact` plus `report-death`/`report-respawn` (the plugin-owned trigger for `on-death`/`on-respawn`), #153's real capability gating, #152's real multi-plugin support (process-wide loading, per-hook opt-in, `on-zone-loaded`), #194's `on-character-create`/`apply-stat-delta-for-character` (the character-creation extension point — starting stats, archetype/preset systems built as a plugin rather than a core class/race enum), #197's NPC-targetable stats (`apply-stat-delta` now resolves for an NPC entity too, through in-memory storage instead of a character row — see "NPC-targetable stats" below), #211's automatic `StatChanged`/`ItemChanged`/`CurrencyChanged` client pushes (see "Automatic client pushes" below) closing the gap where a successful write never told the connected client anything without the plugin inventing its own convention, #214's real `on-entity-spawn` wiring plus its `spawn-table-id` correlation parameter (see "Entity correlation via on-entity-spawn" below) — `on-entity-spawn` existed in this interface well before #214 but nothing ever actually called it; #214 is what made it live — #216's `on-craft-complete` (implementing #215's generic crafting decision — see "Crafting" below), #218's `currency-key` parameter on `modify-currency` (a dev-declared, possibly multi-currency system replaced the old implicit single balance), #168's `on-tick` (the zone-wide tick hook, wired to a real call site for the first time — see its row below), and #186's `block-zone-channel` (the block/restriction primitive for `server`'s zone-entry chat auto-join, see "Zone-scoped chat auto-join" below). See "Beyond this v0 slice" below for what's still not here.
 
 ## Interface technology
 
@@ -15,7 +15,7 @@ WASM Component Model + WIT (docs/PROPOSAL.md, "Interface Technology") — the ac
 ## The `plugin` world (v0)
 
 ```wit
-package worldzero:plugin@0.11.0;
+package worldzero:plugin@0.12.0;
 
 interface host {
     spawn-npc: func(spawn-table-id: string) -> result<string, string>;
@@ -38,6 +38,8 @@ interface host {
 
     report-death: func(entity-id: string) -> result<_, string>;
     report-respawn: func(entity-id: string) -> result<_, string>;
+
+    block-zone-channel: func(entity-id: string, category: string) -> result<_, string>;
 }
 
 interface hooks {
@@ -69,7 +71,7 @@ world plugin {
 }
 ```
 
-`worldzero:plugin@0.11.0` is the actual versioning mechanism (docs/PROPOSAL.md, "Interface Technology": WIT "worlds" give real interface versioning). A breaking change to this interface bumps the package version and/or introduces a new world; a plugin manifest declares which `host_api_version` it targets (`plugin.toml` below), and `plugin-host` refuses to instantiate a plugin declaring a version it doesn't implement (`crates/plugin-host/src/manifest.rs::PluginManifest::check_compatible`) — it never silently links a plugin against an interface shape it wasn't built for. `0.2.0` added `on-message` (#95); `0.3.0` added the combat/NPC-patrol/chat-command hooks and `apply-stat-delta`/`move-entity` (#116); `0.4.0` added the inventory/economy hooks and host functions below (#57); `0.5.0` added `caller-role` (#124); `0.6.0` added `on-player-join-zone`/`on-player-leave-zone` (#155); `0.7.0` added `report-death`/`report-respawn` and real client-protocol call sites for the three hooks below that previously had none (#154); `0.8.0` added `on-zone-loaded` and a `zone-id` parameter to every other zone-specific hook (#152 — see "Multi-plugin support" below for why); `0.9.0` added `on-character-create` and `apply-stat-delta-for-character` (#194 — see "Character creation" below); `0.10.0` bundles three independent breaking changes that landed together — a `spawn-table-id` parameter on `on-entity-spawn`, wiring the hook up for real (it previously existed in this interface with nothing calling it, #214 — see "Entity correlation via on-entity-spawn" below), `on-craft-complete` (#216 — see "Crafting" below), and a `currency-key` parameter on `modify-currency` (#217/#218 — a dev-declared, possibly multi-currency system replaced the old implicit single balance); `0.11.0` added `on-tick` (#168 — see its row below), wiring a hook that previously existed only on paper in this doc's "Beyond this v0 slice" section. A plugin declaring an older version is refused, not silently linked against the new shape.
+`worldzero:plugin@0.12.0` is the actual versioning mechanism (docs/PROPOSAL.md, "Interface Technology": WIT "worlds" give real interface versioning). A breaking change to this interface bumps the package version and/or introduces a new world; a plugin manifest declares which `host_api_version` it targets (`plugin.toml` below), and `plugin-host` refuses to instantiate a plugin declaring a version it doesn't implement (`crates/plugin-host/src/manifest.rs::PluginManifest::check_compatible`) — it never silently links a plugin against an interface shape it wasn't built for. `0.2.0` added `on-message` (#95); `0.3.0` added the combat/NPC-patrol/chat-command hooks and `apply-stat-delta`/`move-entity` (#116); `0.4.0` added the inventory/economy hooks and host functions below (#57); `0.5.0` added `caller-role` (#124); `0.6.0` added `on-player-join-zone`/`on-player-leave-zone` (#155); `0.7.0` added `report-death`/`report-respawn` and real client-protocol call sites for the three hooks below that previously had none (#154); `0.8.0` added `on-zone-loaded` and a `zone-id` parameter to every other zone-specific hook (#152 — see "Multi-plugin support" below for why); `0.9.0` added `on-character-create` and `apply-stat-delta-for-character` (#194 — see "Character creation" below); `0.10.0` bundles three independent breaking changes that landed together — a `spawn-table-id` parameter on `on-entity-spawn`, wiring the hook up for real (it previously existed in this interface with nothing calling it, #214 — see "Entity correlation via on-entity-spawn" below), `on-craft-complete` (#216 — see "Crafting" below), and a `currency-key` parameter on `modify-currency` (#217/#218 — a dev-declared, possibly multi-currency system replaced the old implicit single balance); `0.11.0` added `on-tick` (#168 — see its row below), wiring a hook that previously existed only on paper in this doc's "Beyond this v0 slice" section; `0.12.0` added `block-zone-channel` (#186 — see its row below), the block/restriction primitive a dev calls to keep an entity from auto-joining a zone-scoped chat channel category. A plugin declaring an older version is refused, not silently linked against the new shape.
 
 ### Why `include wasi:cli/imports`
 
@@ -118,8 +120,9 @@ Every plugin *exports* all nineteen — a WIT world's exports aren't individuall
 | `plugin-state-set` | `func(scope: plugin-state-scope, key: string, value: list<u8>) -> result<_, string>` | Stores a blob for `scope`/`key`, overwriting whatever was there. Visible to a `plugin-state-get` in the same session immediately; for `character`/`zone` scope, also queued for durable persistence (same "queued, not synchronously confirmed" shape as `apply-stat-delta`). |
 | `report-death` | `func(entity-id: string) -> result<_, string>` | Reports that `entity-id` has died (#154) — the plugin decides what "died" means for its own game (docs/PROPOSAL.md: "core has no notion of HP or a death condition") and calls this itself. Queued, applied on the zone's next tick drain, fires `on-death` back to the caller once applied — same "queued, not synchronously confirmed" shape as `apply-stat-delta`. |
 | `report-respawn` | `func(entity-id: string) -> result<_, string>` | Same shape as `report-death`, for the respawn case — fires `on-respawn` once applied. |
+| `block-zone-channel` | `func(entity-id: string, category: string) -> result<_, string>` | Prevents `entity-id` from auto-joining the zone-scoped chat channel declared under `category` (`chat.yaml`, #186) — see "Zone-scoped chat auto-join" below. Applied immediately to an in-memory, per-entity set; only affects auto-joins from this point forward, never retroactively leaves a channel already auto-joined. |
 
-Ten of the thirteen are gated by `plugin.toml`'s `capabilities` — see "Capability gating" below. `grant-item`/`remove-item`/`modify-currency` only resolve for player entities — an NPC entity id is rejected, since NPCs have no character-backed storage (no NPC item/currency ownership exists, only players own items/currency).
+Eleven of the fourteen are gated by `plugin.toml`'s `capabilities` — see "Capability gating" below. `grant-item`/`remove-item`/`modify-currency` only resolve for player entities — an NPC entity id is rejected, since NPCs have no character-backed storage (no NPC item/currency ownership exists, only players own items/currency).
 
 ### Automatic client pushes (#211, implementing #210's decision)
 
@@ -137,7 +140,7 @@ Five named groups, each covering a fixed subset of host functions:
 | `movement` | `move-entity` |
 | `combat` | `apply-stat-delta`, `apply-stat-delta-for-character`, `report-death`, `report-respawn` |
 | `economy` | `grant-item`, `remove-item`, `modify-currency` |
-| `messaging` | `send-message` |
+| `messaging` | `send-message`, `block-zone-channel` |
 
 Only `caller-role`, `plugin-state-get`, and `plugin-state-set` are **ungated** regardless of declared capabilities — `caller-role` is a read-only answer from a cache already scoped to the calling connection, and `plugin-state-get`/`-set` only ever touch the plugin's own storage. Every gated function reaches *across* an entity boundary — moving/damaging/granting-to/messaging another entity, spawning a new one — that's the actual dividing line, not an arbitrary split. `send-message` is gated (not folded into "ungated") specifically because it can target *any* connected entity by id, not just the one a hook call was actually about — matching docs/PROPOSAL.md's own "v0 Host Functions" list, which already treats messaging as its own capability group, separate from entity control.
 
@@ -177,6 +180,12 @@ Core owns the mechanical act of crafting — resolving a `CraftItem{recipe_key}`
 - **Fires once, after the exchange already committed.** By the time this hook runs, the inputs are gone and the output is granted — there is no veto. #215's decision explicitly defaults to post-craft-only for v0; a pre-craft veto hook (e.g. for skill-gating before core's exchange runs) was considered and deliberately deferred, not built here.
 - **No entity id, same reasoning as `on-character-create`.** A craft is character-scoped, not entity-scoped — the request came from an already-connected player, but the hook still only carries `character-id`, not an entity id, for symmetry with `on-character-create`'s "narrow exception" (see "Ids are opaque strings" below). A plugin wanting to react against the crafting character's stats calls `apply-stat-delta-for-character`, the one host function reachable without an entity id; `grant-item`/`remove-item`/`modify-currency` are all entity-id-scoped and unreachable from inside this hook.
 - **Gated behind the `economy` capability, not just `hooks`.** See "Capability gating" above for why this is the one hook enforced that way.
+
+### Zone-scoped chat auto-join (#186)
+
+`server::chat_session::auto_join_zone_channels` auto-joins a connection to every `chat.yaml` category declared `scope: zone` and `auto_join: true` (docs/specs/Chat_Spec.md's "chat.yaml") whenever it enters that zone — initial zone join or a later `ZoneChanged` transition — and auto-leaves the previous zone's auto-joined channels on the way out. Global (`scope: global`) categories are never affected — they're not zone-triggered at all, and `auto_join: true` on one is refused when `chat.yaml` loads.
+
+`block-zone-channel` is the plugin-facing escape hatch: call it (e.g. from `on-player-leave-zone`, ahead of the transition that would trigger the join, or from `on-character-create`) to keep a specific `entity-id` from auto-joining a specific `category` — a city channel gated behind a quest flag, an event channel gated behind an account role (`caller-role` answers the latter). The block is in-memory and connection-scoped: it doesn't survive a reconnect, and it doesn't retroactively remove a channel already auto-joined before the call.
 
 ### NPC-targetable stats (#197)
 
@@ -228,7 +237,7 @@ Same convention as the content manifest and dev-config files elsewhere in the pr
 ```toml
 [plugin]
 name = "example-plugin"
-host_api_version = "0.11.0"
+host_api_version = "0.12.0"
 capabilities = []
 message_types = []
 chat_commands = []
@@ -238,7 +247,7 @@ hooks = []
 | Field | Type | Notes |
 |---|---|---|
 | `plugin.name` | string | Free-form, used in error/log messages. |
-| `plugin.host_api_version` | string | Must equal `plugin_host::HOST_API_VERSION` (currently `"0.11.0"`, matching the WIT package version above) or the plugin is refused before instantiation. |
+| `plugin.host_api_version` | string | Must equal `plugin_host::HOST_API_VERSION` (currently `"0.12.0"`, matching the WIT package version above) or the plugin is refused before instantiation. |
 | `plugin.capabilities` | list of strings, optional | Gates which host functions this plugin may call (#153) — see "Capability gating" above. Strict default: `[]` grants none of the five gated groups. An unknown capability name, or the same one declared twice, is refused at load time. |
 | `plugin.message_types` | list of `u16`, optional | Gateway `message_type` values (docs/specs/Networking_Spec.md) routed to this plugin's `on-message` hook (#95). Each must be `>= 1000` (0-999 is core-reserved) and appear at most once, checked by `PluginManifest::check_compatible` before the plugin is instantiated, and collectively across every loaded plugin by `check_no_collisions` (#152). |
 | `plugin.chat_commands` | list of strings, optional | Chat command names, without the leading `/` (#57). Each must be non-empty, have no leading `/`, and appear at most once, checked the same way as `message_types` (including the cross-plugin collision check, #152). A matched command is routed to `on-chat-command` instead of published as ordinary chat. |

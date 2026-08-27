@@ -11,7 +11,9 @@
 //! `crate::plugin_state`'s module doc) — see `PluginCallbacks`'s own
 //! doc comment for the cache/queue split those two need — and
 //! `report-death`/`report-respawn` (#154), the plugin-owned trigger for
-//! `on-death`/`on-respawn`. Still no `on_tick` (see
+//! `on-death`/`on-respawn` — and `block-zone-channel` (#186), the
+//! zone-chat-auto-join block/restriction primitive (`server::chat_session`'s
+//! own doc comments have the auto-join side). Still no `on_tick` (see
 //! docs/specs/Plugin_API.md, "Beyond this v0 slice").
 
 use std::path::Path;
@@ -22,7 +24,7 @@ use common::id::EntityId;
 use plugin_host::{HostCallbacks, LoadedPlugin, PluginHost, PluginManifest, PluginStateScope};
 
 use crate::plugin_state::{PluginStateCache, cache_key};
-use crate::session::{EntityRoles, Sessions};
+use crate::session::{BlockedZoneChannels, EntityRoles, Sessions};
 use crate::session_protocol::ServerMessage;
 
 /// `(scope, key, value)` requested via `plugin-state-set` for
@@ -93,6 +95,12 @@ pub struct PluginCallbacks {
     pending_deaths: Arc<Mutex<Vec<String>>>,
     /// Same shape as `pending_deaths`, for `report-respawn`/`on-respawn`.
     pending_respawns: Arc<Mutex<Vec<String>>>,
+    /// Backs `block-zone-channel` (#186) — a direct, synchronous write
+    /// into the shared cache `server::session` also reads from when
+    /// deciding whether to auto-join a zone channel, same "no queue,
+    /// applied immediately" shape `plugin_state_cache`'s `entity` scope
+    /// already uses (there's nothing to durably persist here either).
+    blocked_zone_channels: BlockedZoneChannels,
 }
 
 impl HostCallbacks for PluginCallbacks {
@@ -269,6 +277,23 @@ impl HostCallbacks for PluginCallbacks {
             .push(entity_id.to_string());
         Ok(())
     }
+
+    fn block_zone_channel(
+        &mut self,
+        entity_id: &str,
+        category: &str,
+    ) -> std::result::Result<(), String> {
+        let entity_id: EntityId = entity_id
+            .parse()
+            .map_err(|_| format!("{entity_id:?} is not a valid entity id"))?;
+        self.blocked_zone_channels
+            .lock()
+            .unwrap()
+            .entry(entity_id)
+            .or_default()
+            .insert(category.to_string());
+        Ok(())
+    }
 }
 
 /// A plugin kept alive past startup: the live instance, which
@@ -427,6 +452,7 @@ pub fn load_plugin(
     sessions: Sessions,
     entity_roles: EntityRoles,
     plugin_state_cache: PluginStateCache,
+    blocked_zone_channels: BlockedZoneChannels,
 ) -> Result<(PluginRuntime, Vec<String>)> {
     let name = manifest.plugin.name.clone();
     let message_types = manifest.plugin.message_types.clone();
@@ -457,6 +483,7 @@ pub fn load_plugin(
         pending_state_writes: pending_state_writes.clone(),
         pending_deaths: pending_deaths.clone(),
         pending_respawns: pending_respawns.clone(),
+        blocked_zone_channels,
     };
 
     let mut plugin = host.load(manifest, wasm_path, Box::new(callbacks))?;

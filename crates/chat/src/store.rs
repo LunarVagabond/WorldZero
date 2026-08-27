@@ -257,6 +257,31 @@ impl ChannelStore {
             .collect())
     }
 
+    /// Looks up `channel_id`'s `channel_type` — `None` if the channel
+    /// doesn't exist. Backs [`crate::pubsub::ChatBus::publish`]'s
+    /// zone-channel exemption from the ordinary membership check (#186):
+    /// a `zone` channel never gets `chat_channel_members` rows (see
+    /// `ensure_zone_channel`'s own doc comment, and
+    /// docs/specs/Chat_Spec.md's channel-types table), so `is_member`
+    /// would otherwise always be `false` for one and every send would be
+    /// rejected.
+    pub async fn channel_type(&self, channel_id: ChannelId) -> Result<Option<ChannelType>> {
+        let channel_type: Option<String> =
+            sqlx::query_scalar("SELECT channel_type FROM chat_channels WHERE id = $1")
+                .bind(channel_id.as_uuid())
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|e| Error::wrap("chat", "failed to look up channel type", e))?;
+
+        Ok(channel_type.and_then(|t| match t.as_str() {
+            "direct" => Some(ChannelType::Direct),
+            "group" => Some(ChannelType::Group),
+            "guild" => Some(ChannelType::Guild),
+            "zone" => Some(ChannelType::Zone),
+            _ => None,
+        }))
+    }
+
     pub async fn is_member(&self, channel_id: ChannelId, account_id: AccountId) -> Result<bool> {
         let exists: bool = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM chat_channel_members WHERE channel_id = $1 AND account_id = $2)",
@@ -389,5 +414,37 @@ mod tests {
     async fn empty_channel_name_is_rejected() {
         let (store, accounts) = store_with_accounts(1).await;
         assert!(store.create_group(accounts[0], "  ").await.is_err());
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn channel_type_resolves_every_variant_and_none_for_a_missing_channel() {
+        let (store, accounts) = store_with_accounts(2).await;
+        let (a, b) = (accounts[0], accounts[1]);
+
+        let direct = store.create_direct(a, b).await.unwrap();
+        let group = store.create_group(a, "Adventuring Party 2").await.unwrap();
+        let zone = store
+            .ensure_zone_channel(
+                Some("greenwood-forest"),
+                &format!("local-{}", ChannelId::new()),
+                "Local",
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store.channel_type(direct).await.unwrap(),
+            Some(ChannelType::Direct)
+        );
+        assert_eq!(
+            store.channel_type(group).await.unwrap(),
+            Some(ChannelType::Group)
+        );
+        assert_eq!(
+            store.channel_type(zone).await.unwrap(),
+            Some(ChannelType::Zone)
+        );
+        assert_eq!(store.channel_type(ChannelId::new()).await.unwrap(), None);
     }
 }

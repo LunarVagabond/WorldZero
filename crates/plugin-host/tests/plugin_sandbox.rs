@@ -35,7 +35,7 @@ fn manifest() -> PluginManifest {
         r#"
 [plugin]
 name = "test-plugin"
-host_api_version = "0.11.0"
+host_api_version = "0.12.0"
 capabilities = ["spawning", "movement", "combat", "economy", "messaging"]
 message_types = [1000]
 "#,
@@ -53,7 +53,7 @@ fn restricted_manifest() -> PluginManifest {
         r#"
 [plugin]
 name = "test-plugin"
-host_api_version = "0.11.0"
+host_api_version = "0.12.0"
 capabilities = ["messaging"]
 message_types = [1000]
 "#,
@@ -75,6 +75,11 @@ struct RecordingCallbacks {
     state: Arc<Mutex<HashMap<String, Vec<u8>>>>,
     deaths: Arc<Mutex<Vec<String>>>,
     respawns: Arc<Mutex<Vec<String>>>,
+    /// `(entity_id, category)` recorded via `block-zone-channel` (#186) —
+    /// no fixture exercises this yet (see `runtime.rs`'s own unit tests
+    /// for the capability-gating coverage instead), but this fake needs
+    /// a real implementation to satisfy `HostCallbacks` regardless.
+    blocked_zone_channels: Arc<Mutex<Vec<(String, String)>>>,
 }
 
 /// A plain string discriminating [`PluginStateScope`] variants for this
@@ -226,6 +231,14 @@ impl HostCallbacks for RecordingCallbacks {
 
     fn report_respawn(&mut self, entity_id: &str) -> Result<(), String> {
         self.respawns.lock().unwrap().push(entity_id.to_string());
+        Ok(())
+    }
+
+    fn block_zone_channel(&mut self, entity_id: &str, category: &str) -> Result<(), String> {
+        self.blocked_zone_channels
+            .lock()
+            .unwrap()
+            .push((entity_id.to_string(), category.to_string()));
         Ok(())
     }
 }

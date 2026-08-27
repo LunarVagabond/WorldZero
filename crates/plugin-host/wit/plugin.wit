@@ -45,13 +45,17 @@
 // of NPC count, distinct from `on-npc-tick` below (which fires once per
 // route-NPC): for time-of-day, periodic world events, or aggregate
 // bookkeeping a plugin wants to run on a fixed cadence rather than
-// per-entity. A WIT "world"
+// per-entity. #186 adds `block-zone-channel` — the block/restriction
+// primitive a dev calls to prevent an entity from auto-joining (or
+// joining at all) a zone-scoped chat channel category, the counterpart to
+// `server`'s new zone-entry auto-join behavior for `chat.yaml` categories
+// declared `auto_join: true`. A WIT "world"
 // is the actual versioning mechanism (docs/PROPOSAL.md, "Interface
 // Technology"): a breaking change bumps the package version below
 // and/or lands as a new world, rather than silently changing what
 // `plugin` means underneath existing compiled plugins.
 
-package worldzero:plugin@0.11.0;
+package worldzero:plugin@0.12.0;
 
 /// What the host exposes for a plugin to call out to — nothing crosses
 /// this boundary that isn't listed here (docs/PROPOSAL.md, "Plugin
@@ -208,6 +212,27 @@ interface host {
     /// Same shape as `report-death`, for the respawn case — fires
     /// `on-respawn` once applied (#154).
     report-respawn: func(entity-id: string) -> result<_, string>;
+
+    /// Prevents `entity-id` from auto-joining the zone-scoped chat
+    /// channel declared under `category` (`chat.yaml`'s
+    /// `system_channels[].category`, docs/specs/Chat_Spec.md) — the
+    /// block/restriction primitive #186 asks for, e.g. gating a city
+    /// channel behind a quest flag or account role
+    /// (`caller-role` above answers the latter). Applied immediately to
+    /// an in-memory, per-entity, per-connection set — same durability
+    /// class as `caller-role`'s own cache (cleared on disconnect, never
+    /// persisted), not a durable ban list; a game wanting a block that
+    /// survives reconnects re-declares it each time (e.g. from
+    /// `on-player-join-zone`). Only affects auto-join going forward: it
+    /// does not retroactively leave a channel this entity already
+    /// auto-joined before the call — a plugin blocking a category ahead
+    /// of a zone entry (e.g. from the *previous* zone's
+    /// `on-player-leave-zone`) is what actually prevents the join.
+    /// Rejected if `entity-id` isn't a validly-formed entity id — unlike
+    /// `caller-role`, this doesn't require the entity to currently be
+    /// connected (a plugin may reasonably call this from a hook that
+    /// fires mid-disconnect, e.g. `on-player-leave-zone`).
+    block-zone-channel: func(entity-id: string, category: string) -> result<_, string>;
 }
 
 /// What the host calls into the plugin for — a plugin only receives the

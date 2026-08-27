@@ -136,14 +136,14 @@ A plugin is a `wasmtime`-sandboxed WASM component plus a manifest, [`config/plug
 ```toml
 [plugin]
 name = "example-plugin"
-host_api_version = "0.11.0"
+host_api_version = "0.12.0"
 capabilities = []
 message_types = []
 chat_commands = []
 hooks = []
 ```
 
-- `capabilities`: gates which host functions your plugin may call (`docs/specs/Plugin_API.md`'s "Capability gating") — `spawning` (`spawn-npc`), `movement` (`move-entity`), `combat` (`apply-stat-delta`/`report-death`/`report-respawn`), `economy` (`grant-item`/`remove-item`/`modify-currency`), `messaging` (`send-message`). **The default is strict**: an empty list grants none of these — `caller-role`/`plugin-state-get`/`plugin-state-set` are the only host functions always available regardless of what's declared. List only what your plugin actually needs; this is the real mechanism for running a less-trusted, third-party-authored plugin alongside your own trusted one.
+- `capabilities`: gates which host functions your plugin may call (`docs/specs/Plugin_API.md`'s "Capability gating") — `spawning` (`spawn-npc`), `movement` (`move-entity`), `combat` (`apply-stat-delta`/`report-death`/`report-respawn`), `economy` (`grant-item`/`remove-item`/`modify-currency`), `messaging` (`send-message`/`block-zone-channel`). **The default is strict**: an empty list grants none of these — `caller-role`/`plugin-state-get`/`plugin-state-set` are the only host functions always available regardless of what's declared. List only what your plugin actually needs; this is the real mechanism for running a less-trusted, third-party-authored plugin alongside your own trusted one.
 - `message_types`: which gateway-routed message type IDs get delivered to your plugin's `on-message` hook. **Must each be ≥ 1000** — 0–999 is core-reserved (see [`docs/specs/Networking_Spec.md`](../specs/Networking_Spec.md)'s message catalog). Checked for collisions across every loaded plugin, not just within your own manifest (#152).
 - `chat_commands`: command names (no leading `/`) routed to `on-chat-command` instead of published as ordinary chat. Same cross-plugin collision check as `message_types`.
 - `hooks`: which of the other hooks (everything except `on-message`/`on-chat-command`, which route on the two fields above instead) you actually want the host to call — `[]` by default, meaning none (#152). See [`docs/specs/Plugin_API.md`](../specs/Plugin_API.md#pluginhooks-func-hooks) for the full list.
@@ -180,6 +180,20 @@ Optional services are a **runtime config toggle**, not a compile-time feature �
 | `WZ_METRICS_ADDR` | `127.0.0.1:9090` | Only consulted when metrics are enabled. |
 
 See [`docs/specs/Observability_Spec.md`](../specs/Observability_Spec.md) for what's actually exposed on `/metrics`.
+
+**`<config_dir>/chat.yaml`** (optional — a missing file just means no system channels are declared) is where you declare system channel categories like `trade` or `local`, and whether a zone-scoped one auto-joins a player entering that zone ([#186](https://github.com/LunarVagabond/WorldZero/issues/186)):
+
+```yaml
+schema_version: 1
+system_channels:
+  - category: trade
+    scope: global
+  - category: local
+    scope: zone
+    auto_join: true
+```
+
+`auto_join: true` is only valid on a `scope: zone` category — a plugin can still block a specific player from auto-joining one via the `block-zone-channel` host function (`docs/specs/Plugin_API.md`'s "Zone-scoped chat auto-join"). See [`config/chat.example.yaml`](../../config/chat.example.yaml) and [`docs/specs/Chat_Spec.md`](../specs/Chat_Spec.md#chatyaml-dev-configured-system-channels) for the full field reference.
 
 ---
 
@@ -234,7 +248,7 @@ See [`docs/specs/Realm_Character_Policy_Spec.md`](../specs/Realm_Character_Polic
 | `auth` | (shared Postgres/Redis only) | — | `UsernamePasswordProvider`, `AccountStore`/`AccountRoleStore` |
 | `gateway` | `WZ_TLS_CERT_PATH`, `WZ_TLS_KEY_PATH` | — | `CertMaterial` |
 | `plugin-host` | — | `plugin.toml` | `PluginManifest` |
-| `chat` | `WZ_CHAT_PERSISTENCE_ENABLED` (`WZ_SERVICE_CHAT_ENABLED` toggle lives in `common`) | — | `ChannelStore`, `ChatBus`, `MessageLog` |
+| `chat` | `WZ_CHAT_PERSISTENCE_ENABLED` (`WZ_SERVICE_CHAT_ENABLED` toggle lives in `common`) | `chat.yaml` (optional) | `ChannelStore`, `ChatBus`, `MessageLog`, `SystemChannelConfig` |
 | `server` | `WZ_SERVER_ADDR`, `WZ_METRICS_ADDR`, `WZ_LAYER_ENABLED`, `WZ_LAYER_POPULATION_THRESHOLD`, `WZ_PLUGINS_DIR`, `WZ_REALM_ID`, `WZ_REALM_LEASE_TTL_SECS` | — | — |
 | `realm-directory` | (consumed via `server`'s `WZ_REALM_ID`/`WZ_REALM_LEASE_TTL_SECS` above) | — | `RealmStore`, `LoginPolicy`, `RealmPresence` |
 | `transfer` | none (not wired into `server` yet) | — | `TransferExecutor`, `TransferGateStore`, `TransferAuditLog` |
