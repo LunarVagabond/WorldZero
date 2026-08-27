@@ -40,13 +40,18 @@
 // here. #218 adds a `currency-key` parameter to `modify-currency` — a
 // dev-declared multi-currency system (`currency.schema.yaml`,
 // #217's decision) replaces the old implicit single balance, so a
-// currency's identity now has to cross this boundary too. A WIT "world"
+// currency's identity now has to cross this boundary too. #168 adds
+// `on-tick` — a zone-wide hook fired once per zone per tick regardless
+// of NPC count, distinct from `on-npc-tick` below (which fires once per
+// route-NPC): for time-of-day, periodic world events, or aggregate
+// bookkeeping a plugin wants to run on a fixed cadence rather than
+// per-entity. A WIT "world"
 // is the actual versioning mechanism (docs/PROPOSAL.md, "Interface
 // Technology"): a breaking change bumps the package version below
 // and/or lands as a new world, rather than silently changing what
 // `plugin` means underneath existing compiled plugins.
 
-package worldzero:plugin@0.10.0;
+package worldzero:plugin@0.11.0;
 
 /// What the host exposes for a plugin to call out to — nothing crosses
 /// this boundary that isn't listed here (docs/PROPOSAL.md, "Plugin
@@ -336,6 +341,17 @@ interface hooks {
 
     /// Fired the same way `on-death` is, for `report-respawn` (#154).
     on-respawn: func(zone-id: string, entity-id: string);
+
+    /// Called once per simulation tick, per zone, regardless of NPC
+    /// count — the zone-wide counterpart to `on-npc-tick` below (#168),
+    /// for time-of-day, periodic world events, or aggregate bookkeeping
+    /// a plugin wants to run on a fixed cadence rather than per-entity.
+    /// Fires after this tick's queued moves are already applied and
+    /// `on-npc-tick` has run for this tick's route-NPCs (`server::
+    /// world_actor`'s own dispatch order) — a plugin reacting here sees
+    /// positions/state already updated for the tick that just happened,
+    /// not the state about to be superseded by it.
+    on-tick: func(zone-id: string, dt: f64);
 
     /// Called once per simulation tick, per zone, for an NPC entity whose
     /// spawn table declared a `route_id` (content::manifest::Route) —

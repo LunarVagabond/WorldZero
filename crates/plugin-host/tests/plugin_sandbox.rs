@@ -35,7 +35,7 @@ fn manifest() -> PluginManifest {
         r#"
 [plugin]
 name = "test-plugin"
-host_api_version = "0.10.0"
+host_api_version = "0.11.0"
 capabilities = ["spawning", "movement", "combat", "economy", "messaging"]
 message_types = [1000]
 "#,
@@ -53,7 +53,7 @@ fn restricted_manifest() -> PluginManifest {
         r#"
 [plugin]
 name = "test-plugin"
-host_api_version = "0.10.0"
+host_api_version = "0.11.0"
 capabilities = ["messaging"]
 message_types = [1000]
 "#,
@@ -340,6 +340,39 @@ fn a_plugin_computes_damage_ticks_a_route_and_handles_a_chat_command() {
     assert_eq!(messages[1].0, "actor-1");
     assert!(messages[1].1.contains("roll"));
     assert!(messages[1].1.contains("2d6"));
+}
+
+// #168: on-tick fires once per zone per tick, regardless of NPC count —
+// distinct from on-npc-tick's per-entity firing. Proven here by calling
+// it three times directly (mirroring how `server::world_actor` would
+// call it once per real tick) and reading the fixture's own
+// zone-scoped counter back through a chat command, the same
+// "state written in one hook, read back through another" pattern this
+// file already uses for on-player-leave-zone/on-death.
+#[test]
+#[ignore]
+fn a_plugins_on_tick_hook_observably_fires_across_multiple_ticks() {
+    let wasm_path = fixture_dir().join("target/wasm32-wasip2/release/test_plugin.wasm");
+    let callbacks = RecordingCallbacks::default();
+
+    let host = PluginHost::new();
+    let mut plugin = host
+        .load(&manifest(), &wasm_path, Box::new(callbacks.clone()))
+        .expect("failed to load the well-behaved test plugin");
+
+    for _ in 0..3 {
+        plugin
+            .on_tick("test-zone", 0.05)
+            .expect("on_tick should succeed");
+    }
+
+    plugin
+        .on_chat_command("test-zone", "tick-count", "", "actor-1")
+        .expect("on_chat_command should succeed");
+    let messages = callbacks.messages.lock().unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].0, "actor-1");
+    assert_eq!(messages[0].1, "tick-count: 3");
 }
 
 #[test]

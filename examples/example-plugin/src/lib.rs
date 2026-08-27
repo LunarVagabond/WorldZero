@@ -127,6 +127,11 @@ impl Guest for Plugin {
         );
     }
 
+    // Not declared in this plugin's own `hooks` list (plugin.toml) — the
+    // example has no zone-wide bookkeeping to do, so it leaves this a
+    // no-op rather than manufacturing a use for it (#168).
+    fn on_tick(_zone_id: String, _dt: f64) {}
+
     // This one *is* live: `wolf-pack-01`'s spawn table declares
     // `route_id: wolf-patrol-01` (config/zone.manifest.example.yaml), so
     // the wolf spawned in `on_zone_loaded` above ticks along its patrol
