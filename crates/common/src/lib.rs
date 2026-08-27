@@ -7,7 +7,8 @@
 //! - The shared `tracing` init/formatter setup implementing the
 //!   `<TIMESTAMP> <LEVEL> <SOURCE> <MESSAGE>` log format and severity
 //!   convention, plus Prometheus-compatible metrics and the `/metrics`
-//!   HTTP endpoint (see docs/specs/Observability_Spec.md).
+//!   HTTP endpoint, plus the `/healthz`/`/readyz` liveness/readiness
+//!   endpoints (see docs/specs/Observability_Spec.md).
 //! - Shared error/result types used across crate boundaries.
 //! - Config loading (env-var-based connection config for Postgres/Redis, etc.).
 //! - Strongly-typed ID types shared across crate/domain boundaries.
@@ -20,6 +21,7 @@
 
 pub mod config;
 pub mod error;
+pub mod health;
 pub mod id;
 pub mod logging;
 pub mod metrics;

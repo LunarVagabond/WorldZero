@@ -10,7 +10,7 @@ This is the guide for turning `make quickstart`'s default game into *your* game 
 
 A full reference table of everything in this guide is at the bottom if you just want to skim.
 
-**Checking your setup as you go.** `server` logs a real `INFO`-level line for the config that actually took effect, not just what you set: `worldzero server listening` (with the bound address, confirming [Step 4](#step-4--networking-gateway)'s `WZ_SERVER_ADDR`), plus `chat service enabled`/`disabled`, `chat message persistence enabled`/`disabled`, and `metrics enabled`/`disabled` for [Step 6](#step-6--optional-services-chat-metrics)'s toggles. If metrics are on, `curl localhost:9090/metrics` (or wherever `WZ_METRICS_ADDR` points) is a quick liveness check. There's no equivalent startup log for a loaded stats schema today, but `server` does log `discovered plugin(s)` with a count at startup for plugins — beyond that, the first real signal is a client interaction actually working (a character loading with your declared stats, a plugin's `on-zone-loaded` NPC appearing).
+**Checking your setup as you go.** `server` logs a real `INFO`-level line for the config that actually took effect, not just what you set: `worldzero server listening` (with the bound address, confirming [Step 4](#step-4--networking-gateway)'s `WZ_SERVER_ADDR`), plus `chat service enabled`/`disabled`, `chat message persistence enabled`/`disabled`, and `metrics enabled`/`disabled` for [Step 6](#step-6--optional-services-chat-metrics-health)'s toggles. If metrics are on, `curl localhost:9090/metrics` (or wherever `WZ_METRICS_ADDR` points) is a quick check. `curl localhost:9091/healthz` (or `/readyz`, or wherever `WZ_HEALTH_ADDR` points) is the real liveness/readiness check — always available regardless of the metrics toggle, see [Step 6](#step-6--optional-services-chat-metrics-health). There's no equivalent startup log for a loaded stats schema today, but `server` does log `discovered plugin(s)` with a count at startup for plugins — beyond that, the first real signal is a client interaction actually working (a character loading with your declared stats, a plugin's `on-zone-loaded` NPC appearing).
 
 ---
 
@@ -30,9 +30,9 @@ Every other step assumes this one is done. `common` is the one crate every other
 | Var | Default | Purpose |
 |---|---|---|
 | `WZ_CONFIG_DIR` | `./config` | Where every config file in this guide (`stats.schema.yaml`, `zone.manifest.yaml`, `plugin.toml`, …) actually lives. Point this somewhere else if you want your game's config tracked in its own directory/repo. |
-| `WZ_SERVICE_CHAT_ENABLED` | `true` | See [Step 6](#step-6--optional-services-chat-metrics). |
-| `WZ_CHAT_PERSISTENCE_ENABLED` | `false` | See [Step 6](#step-6--optional-services-chat-metrics). |
-| `WZ_SERVICE_METRICS_ENABLED` | `true` | See [Step 6](#step-6--optional-services-chat-metrics). |
+| `WZ_SERVICE_CHAT_ENABLED` | `true` | See [Step 6](#step-6--optional-services-chat-metrics-health). |
+| `WZ_CHAT_PERSISTENCE_ENABLED` | `false` | See [Step 6](#step-6--optional-services-chat-metrics-health). |
+| `WZ_SERVICE_METRICS_ENABLED` | `true` | See [Step 6](#step-6--optional-services-chat-metrics-health). |
 | `WZ_OTEL_ENDPOINT` | unset (disabled) | An OTLP gRPC collector address (e.g. `http://localhost:4317`). Unset means distributed tracing export is off entirely — its *presence* is the enable signal, there's no separate on/off flag. |
 | `WZ_OTEL_SERVICE_NAME` | `"worldzero"` | The `service.name` every exported trace span carries. One value today since `server` is a single combined process (see [Step 7](#step-7--zone-layering-server) and [Step 8](#step-8--realms--transfers-real-but-not-yet-live) for what's still single-process). |
 
@@ -168,7 +168,7 @@ Reads never hit the database live from inside the call (same cache-hydrated-in-a
 
 ---
 
-## Step 6 — Optional services (`chat`, metrics)
+## Step 6 — Optional services (`chat`, metrics, health)
 
 Optional services are a **runtime config toggle**, not a compile-time feature — `server` always links every crate it supports; config decides at startup which ones actually stand up their routes/tasks/DB pool (see [Decision #91](https://github.com/LunarVagabond/WorldZero/issues/91)).
 
@@ -178,8 +178,24 @@ Optional services are a **runtime config toggle**, not a compile-time feature �
 | `WZ_CHAT_PERSISTENCE_ENABLED` | `false` | Independent of `WZ_SERVICE_CHAT_ENABLED` above — durably logs every published chat message to Postgres (`chat_messages`) for operator-side analytics/moderation/disputes, never replayed to a client. Off by default: persisting message content is an operator's call to opt into, not something this project assumes. See [`docs/specs/Chat_Spec.md`](../specs/Chat_Spec.md#durable-message-log-174). |
 | `WZ_SERVICE_METRICS_ENABLED` | `true` | Prometheus-compatible `/metrics` endpoint. |
 | `WZ_METRICS_ADDR` | `127.0.0.1:9090` | Only consulted when metrics are enabled. |
+| `WZ_HEALTH_ADDR` | `127.0.0.1:9091` | `/healthz` (liveness) and `/readyz` (readiness) — always on, unlike `chat`/`metrics` above there's no toggle to disable this; an orchestrator needs it reachable unconditionally. |
 
-See [`docs/specs/Observability_Spec.md`](../specs/Observability_Spec.md) for what's actually exposed on `/metrics`.
+See [`docs/specs/Observability_Spec.md`](../specs/Observability_Spec.md) for what's actually exposed on `/metrics` and the full `/healthz`/`/readyz` JSON schema.
+
+**Wiring `/healthz`/`/readyz` into Kubernetes or Agones:** point a standard `httpGet` probe at each path on `WZ_HEALTH_ADDR`'s port — any 2xx passes, `503` fails, same as any other HTTP probe (Agones' `Health` field on a `GameServer`/`Fleet` spec accepts the same shape via its own health-check config). For example:
+
+```yaml
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: 9091
+  periodSeconds: 10
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: 9091
+  periodSeconds: 10
+```
 
 ---
 
@@ -235,7 +251,7 @@ See [`docs/specs/Realm_Character_Policy_Spec.md`](../specs/Realm_Character_Polic
 | `gateway` | `WZ_TLS_CERT_PATH`, `WZ_TLS_KEY_PATH` | — | `CertMaterial` |
 | `plugin-host` | — | `plugin.toml` | `PluginManifest` |
 | `chat` | `WZ_CHAT_PERSISTENCE_ENABLED` (`WZ_SERVICE_CHAT_ENABLED` toggle lives in `common`) | — | `ChannelStore`, `ChatBus`, `MessageLog` |
-| `server` | `WZ_SERVER_ADDR`, `WZ_METRICS_ADDR`, `WZ_LAYER_ENABLED`, `WZ_LAYER_POPULATION_THRESHOLD`, `WZ_PLUGINS_DIR`, `WZ_REALM_ID`, `WZ_REALM_LEASE_TTL_SECS` | — | — |
+| `server` | `WZ_SERVER_ADDR`, `WZ_METRICS_ADDR`, `WZ_HEALTH_ADDR`, `WZ_LAYER_ENABLED`, `WZ_LAYER_POPULATION_THRESHOLD`, `WZ_PLUGINS_DIR`, `WZ_REALM_ID`, `WZ_REALM_LEASE_TTL_SECS` | — | — |
 | `realm-directory` | (consumed via `server`'s `WZ_REALM_ID`/`WZ_REALM_LEASE_TTL_SECS` above) | — | `RealmStore`, `LoginPolicy`, `RealmPresence` |
 | `transfer` | none (not wired into `server` yet) | — | `TransferExecutor`, `TransferGateStore`, `TransferAuditLog` |
 
