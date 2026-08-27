@@ -47,6 +47,18 @@ pub enum ClientMessage {
     /// (`character.archetypes.yaml`, #213/#212) — reachable anywhere in
     /// this pre-join phase, same as `ListCharacters`.
     ListCharacterOptions,
+    /// Requests moving `character_id` (must be one of this account's own
+    /// characters) to `destination_realm_id` — a bound-realm-to-bound-realm
+    /// move (`transfer::TransferExecutor::transfer`), rejected if the
+    /// character is currently logged in, either realm is open, or the
+    /// configured gate for this realm pair denies it (#225). Reachable
+    /// anywhere in this pre-join phase, same as `ListCharacters` — a
+    /// transfer only ever makes sense for a character that isn't the one
+    /// this connection has already joined the world with.
+    RequestTransfer {
+        character_id: String,
+        destination_realm_id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -66,11 +78,30 @@ pub struct ArchetypeOption {
 
 #[derive(Debug, Clone)]
 pub enum ServerMessage {
-    CharacterList { characters: Vec<CharacterSummary> },
-    CharacterCreated { character_id: String },
-    CharacterSelected { character_id: String },
-    Error { message: String },
-    CharacterOptions { archetypes: Vec<ArchetypeOption> },
+    CharacterList {
+        characters: Vec<CharacterSummary>,
+    },
+    CharacterCreated {
+        character_id: String,
+    },
+    CharacterSelected {
+        character_id: String,
+    },
+    Error {
+        message: String,
+    },
+    CharacterOptions {
+        archetypes: Vec<ArchetypeOption>,
+    },
+    /// Confirms a successful `RequestTransfer` (#225) — `realm_id` is the
+    /// character's new realm. Effective immediately: a subsequent
+    /// `ListCharacters` on this same connection no longer includes
+    /// `character_id` if this process serves the source realm, no
+    /// reconnect required.
+    TransferComplete {
+        character_id: String,
+        realm_id: String,
+    },
 }
 
 impl ClientMessage {
@@ -156,6 +187,13 @@ impl From<&ClientMessage> for proto::ClientMessage {
             ClientMessage::ListCharacterOptions => {
                 Kind::ListCharacterOptions(proto::ListCharacterOptions {})
             }
+            ClientMessage::RequestTransfer {
+                character_id,
+                destination_realm_id,
+            } => Kind::RequestTransfer(proto::RequestTransfer {
+                character_id: character_id.clone(),
+                destination_realm_id: destination_realm_id.clone(),
+            }),
         };
         proto::ClientMessage { kind: Some(kind) }
     }
@@ -183,6 +221,13 @@ impl TryFrom<proto::ClientMessage> for ClientMessage {
             Some(Kind::ListCharacterOptions(proto::ListCharacterOptions {})) => {
                 Ok(ClientMessage::ListCharacterOptions)
             }
+            Some(Kind::RequestTransfer(proto::RequestTransfer {
+                character_id,
+                destination_realm_id,
+            })) => Ok(ClientMessage::RequestTransfer {
+                character_id,
+                destination_realm_id,
+            }),
             None => Err(Error::new(
                 "server",
                 "gateway character message has no kind set",
@@ -224,6 +269,13 @@ impl From<&ServerMessage> for proto::ServerMessage {
                         .collect(),
                 })
             }
+            ServerMessage::TransferComplete {
+                character_id,
+                realm_id,
+            } => Kind::TransferComplete(proto::TransferComplete {
+                character_id: character_id.clone(),
+                realm_id: realm_id.clone(),
+            }),
         };
         proto::ServerMessage { kind: Some(kind) }
     }
@@ -252,6 +304,13 @@ impl TryFrom<proto::ServerMessage> for ServerMessage {
                     archetypes: archetypes.into_iter().map(ArchetypeOption::from).collect(),
                 })
             }
+            Some(Kind::TransferComplete(proto::TransferComplete {
+                character_id,
+                realm_id,
+            })) => Ok(ServerMessage::TransferComplete {
+                character_id,
+                realm_id,
+            }),
             None => Err(Error::new(
                 "server",
                 "gateway character message has no kind set",
@@ -366,6 +425,36 @@ mod tests {
         assert!(matches!(
             decoded,
             ServerMessage::CharacterList { characters } if characters.len() == 1 && characters[0].name == "Aria"
+        ));
+    }
+
+    #[test]
+    fn request_transfer_round_trips_through_an_envelope() {
+        let message = ClientMessage::RequestTransfer {
+            character_id: "c1".to_string(),
+            destination_realm_id: "r2".to_string(),
+        };
+        let envelope = message.into_envelope().unwrap();
+        let decoded = ClientMessage::from_envelope(&envelope).unwrap();
+        assert!(matches!(
+            decoded,
+            ClientMessage::RequestTransfer { character_id, destination_realm_id }
+                if character_id == "c1" && destination_realm_id == "r2"
+        ));
+    }
+
+    #[test]
+    fn transfer_complete_round_trips_through_an_envelope() {
+        let message = ServerMessage::TransferComplete {
+            character_id: "c1".to_string(),
+            realm_id: "r2".to_string(),
+        };
+        let envelope = message.into_envelope().unwrap();
+        let decoded = ServerMessage::from_envelope(&envelope).unwrap();
+        assert!(matches!(
+            decoded,
+            ServerMessage::TransferComplete { character_id, realm_id }
+                if character_id == "c1" && realm_id == "r2"
         ));
     }
 

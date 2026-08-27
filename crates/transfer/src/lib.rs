@@ -2,6 +2,11 @@
 //! (#54, [`gate`]), and the audit trail (#55, [`audit`]) between bound
 //! realms.
 //!
+//! Wired into `server`'s combined process as of #225 —
+//! `server::character_protocol`'s `RequestTransfer` message routes to
+//! [`execute::TransferExecutor::transfer`], the same "plumbing, not new
+//! logic" shape #136 wired `realm-directory` in with.
+//!
 //! Design: docs/PROPOSAL.md ("Realm & Character Policy Model") and
 //! docs/specs/Realm_Character_Policy_Spec.md ("Transfers (bound realms
 //! only)").

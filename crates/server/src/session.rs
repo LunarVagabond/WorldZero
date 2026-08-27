@@ -175,6 +175,23 @@ pub struct SessionDeps {
     /// — resolves `CraftItem`'s `recipe_key` before
     /// `character::CharacterStore::craft_item` ever touches storage.
     pub crafting_schema: Arc<character::CraftingSchema>,
+    /// This process's own declared attribute schema (`stats.schema.yaml`)
+    /// — a clone of the same instance `character_store` was built from
+    /// (same "clone rather than a second file load that could drift"
+    /// reasoning as `npc_attribute_schema` in `main`). Handed to
+    /// `transfer::TransferExecutor::transfer` as `destination_schema`
+    /// (#225): `transfer` deliberately has no opinion on how a deployment
+    /// maps a realm to its schema file (see
+    /// docs/specs/Realm_Character_Policy_Spec.md's "Transfers" section),
+    /// and this combined process only ever declares one schema — a real
+    /// multi-schema, multi-deployment transfer target needs a schema
+    /// registry keyed by realm that doesn't exist yet.
+    pub attribute_schema: Arc<character::AttributeSchema>,
+    /// Real transfer execution/gating/audit (#53/#54/#55), wired in for
+    /// real as of #225 — see `RequestTransfer`'s handling below.
+    /// `DenyAllPurchaseVerifier` stays the default (no real
+    /// `PurchaseVerifier` exists yet; wiring one is its own ticket).
+    pub transfer_executor: Arc<transfer::TransferExecutor>,
     /// Every loaded plugin (#152: one instance, process-wide), shared
     /// with every zone actor — the character-creation loop below also
     /// dispatches into this directly (#194's `on-character-create`),
@@ -502,6 +519,63 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
                     &character_protocol::ServerMessage::CharacterOptions { archetypes },
                 )
                 .await?;
+            }
+            character_protocol::ClientMessage::RequestTransfer {
+                character_id,
+                destination_realm_id,
+            } => {
+                let Ok(parsed_character_id) = character_id.parse::<CharacterId>() else {
+                    send_character_error(
+                        &mut sink,
+                        format!("{character_id:?} is not a valid character id"),
+                    )
+                    .await?;
+                    continue;
+                };
+                let Ok(parsed_realm_id) = destination_realm_id.parse::<RealmId>() else {
+                    send_character_error(
+                        &mut sink,
+                        format!("{destination_realm_id:?} is not a valid realm id"),
+                    )
+                    .await?;
+                    continue;
+                };
+                // Same ownership check `SelectCharacter` makes below —
+                // never a caller-supplied character outside this account,
+                // and never an admin-on-behalf-of-a-player path (#225's
+                // explicit out-of-scope).
+                if deps
+                    .character_store
+                    .get_for_account(parsed_character_id, account_id)
+                    .await?
+                    .is_none()
+                {
+                    send_character_error(
+                        &mut sink,
+                        format!("{character_id:?} is not one of your characters"),
+                    )
+                    .await?;
+                    continue;
+                }
+                let request = transfer::TransferRequest {
+                    character_id: parsed_character_id,
+                    destination_realm_id: parsed_realm_id,
+                    destination_schema: &deps.attribute_schema,
+                    initiated_by: account_id,
+                };
+                match deps.transfer_executor.transfer(request).await {
+                    Ok(()) => {
+                        send_character(
+                            &mut sink,
+                            &character_protocol::ServerMessage::TransferComplete {
+                                character_id,
+                                realm_id: destination_realm_id,
+                            },
+                        )
+                        .await?;
+                    }
+                    Err(e) => send_character_error(&mut sink, e.to_string()).await?,
+                }
             }
             character_protocol::ClientMessage::SelectCharacter { character_id } => {
                 let Ok(parsed_id) = character_id.parse::<CharacterId>() else {

@@ -17,6 +17,13 @@ message ClientMessage {
     // #213/#212: queries the dev-declared character-archetype list —
     // reachable anywhere in this pre-join phase, same as ListCharacters.
     ListCharacterOptions list_character_options = 4;
+    // #225: requests moving one of this account's own characters to a
+    // different bound realm — reachable anywhere in this pre-join phase,
+    // same as ListCharacters/CreateCharacter/SelectCharacter, since a
+    // transfer only ever makes sense for a character that isn't currently
+    // logged in (`transfer::TransferExecutor::transfer`'s active-lease
+    // check).
+    RequestTransfer request_transfer = 5;
   }
 }
 
@@ -39,6 +46,16 @@ message SelectCharacter {
   string character_id = 1;
 }
 
+// #225: character_id must name one of the caller's own characters —
+// checked the same way SelectCharacter's ownership check is — and
+// destination_realm_id must name a real, bound realm; both are rejected
+// with an Error rather than a panic. No admin-initiated transfer path
+// exists here — this is the player-initiated flow only.
+message RequestTransfer {
+  string character_id = 1;
+  string destination_realm_id = 2;
+}
+
 message ServerMessage {
   oneof kind {
     CharacterList character_list = 1;
@@ -47,6 +64,8 @@ message ServerMessage {
     Error error = 4;
     // #213/#212: response to ListCharacterOptions.
     CharacterOptions character_options = 5;
+    // #225: response to a successful RequestTransfer.
+    TransferComplete transfer_complete = 6;
   }
 }
 
@@ -85,4 +104,13 @@ message CharacterSelected {
 
 message Error {
   string message = 1;
+}
+
+// Confirms a successful RequestTransfer — the character now belongs to
+// realm_id, effective immediately (a subsequent ListCharacters on this
+// same connection, still scoped to whichever realm this process serves,
+// no longer includes it if that's the source realm).
+message TransferComplete {
+  string character_id = 1;
+  string realm_id = 2;
 }

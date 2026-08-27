@@ -85,6 +85,8 @@ const CRAFT_ADDR: &str = "127.0.0.1:7942";
 const CRAFT_INSUFFICIENT_ADDR: &str = "127.0.0.1:7943";
 const CRAFT_UNKNOWN_RECIPE_ADDR: &str = "127.0.0.1:7944";
 const SPAWN_CORRELATION_ADDR: &str = "127.0.0.1:7945";
+const TRANSFER_ADDR: &str = "127.0.0.1:7946";
+const TRANSFER_REJECTED_ADDR: &str = "127.0.0.1:7947";
 
 struct ServerProcess {
     child: Child,
@@ -3888,4 +3890,181 @@ async fn spawn_npc_correlates_to_the_real_entity_via_on_entity_spawn() {
         .unwrap_or_else(|_| {
             panic!("expected a real entity id for spawn-track b, got {entity_b:?}")
         });
+}
+
+/// #225, end to end: a player-initiated `RequestTransfer` between two
+/// real bound realms goes through the real `transfer::TransferExecutor`
+/// — not a stub — and is reflected on this same connection immediately,
+/// with no reconnect: a `ListCharacters` sent right after the
+/// `TransferComplete` no longer includes the transferred character, since
+/// `login_policy::list_characters`'s bound-realm branch scopes strictly
+/// by `characters.realm_id`, which the transfer just changed.
+#[tokio::test]
+#[ignore]
+async fn a_player_can_transfer_their_own_character_to_a_bound_destination_realm() {
+    let config_dir = setup_config_dir("transfer");
+    let source_realm_id = create_realm(realm_directory::OpenOrBound::Bound).await;
+    let _server = start_server_with_env(
+        &config_dir,
+        TRANSFER_ADDR,
+        true,
+        &[("WZ_REALM_ID", source_realm_id.to_string().as_str())],
+    )
+    .await;
+    wait_for_port(TRANSFER_ADDR).await;
+    let destination_realm_id = create_realm(realm_directory::OpenOrBound::Bound).await;
+
+    let username = format!("transfer-{}", uuid::Uuid::now_v7());
+    let password = "hunter2";
+
+    let mut stream = connect(&config_dir, TRANSFER_ADDR).await;
+    send_auth(
+        &mut stream,
+        &AuthClientMessage::Register {
+            username: username.clone(),
+            password: password.to_string(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv_auth(&mut stream).await,
+        AuthServerMessage::Authenticated { .. }
+    ));
+    select_realm(&mut stream, _server.realm_id).await;
+
+    // Created but never selected/joined — `RequestTransfer` is only
+    // handled in this pre-join character phase (a transfer only makes
+    // sense for a character that isn't the one this connection has
+    // already joined the world with).
+    send_character(
+        &mut stream,
+        &CharacterClientMessage::CreateCharacter {
+            name: username.clone(),
+            archetype_key: String::new(),
+        },
+    )
+    .await;
+    let character_id = match recv_character(&mut stream).await {
+        CharacterServerMessage::CharacterCreated { character_id } => character_id,
+        other => panic!("expected a CharacterCreated, got {other:?}"),
+    };
+
+    send_character(
+        &mut stream,
+        &CharacterClientMessage::RequestTransfer {
+            character_id: character_id.clone(),
+            destination_realm_id: destination_realm_id.to_string(),
+        },
+    )
+    .await;
+    match recv_character(&mut stream).await {
+        CharacterServerMessage::TransferComplete {
+            character_id: confirmed_id,
+            realm_id,
+        } => {
+            assert_eq!(confirmed_id, character_id);
+            assert_eq!(realm_id, destination_realm_id.to_string());
+        }
+        other => panic!("expected a TransferComplete, got {other:?}"),
+    }
+
+    // Immediate, same-connection reflection: this process still serves
+    // `source_realm_id`, and the character no longer belongs to it.
+    send_character(&mut stream, &CharacterClientMessage::ListCharacters).await;
+    match recv_character(&mut stream).await {
+        CharacterServerMessage::CharacterList { characters } => {
+            assert!(
+                characters.iter().all(|c| c.character_id != character_id),
+                "transferred character {character_id} still listed on the source realm: {characters:?}"
+            );
+        }
+        other => panic!("expected a CharacterList, got {other:?}"),
+    }
+}
+
+/// #225: a rejected transfer (here, a destination that's an open realm —
+/// `transfer::TransferExecutor::transfer` never defines "transfer into an
+/// open pool") returns a clear `Error` naming the real reason, not a
+/// generic failure, and the character stays exactly where it was — a
+/// second `RequestTransfer` naming the same character is still reachable
+/// on the same connection afterward (never a closed connection over a
+/// rejected transfer, unlike a rejected realm selection).
+#[tokio::test]
+#[ignore]
+async fn a_transfer_into_an_open_realm_is_rejected_with_a_clear_reason() {
+    let config_dir = setup_config_dir("transfer-rejected");
+    let source_realm_id = create_realm(realm_directory::OpenOrBound::Bound).await;
+    let _server = start_server_with_env(
+        &config_dir,
+        TRANSFER_REJECTED_ADDR,
+        true,
+        &[("WZ_REALM_ID", source_realm_id.to_string().as_str())],
+    )
+    .await;
+    wait_for_port(TRANSFER_REJECTED_ADDR).await;
+    let open_destination_realm_id = create_realm(realm_directory::OpenOrBound::Open).await;
+
+    let username = format!("transfer-rejected-{}", uuid::Uuid::now_v7());
+    let password = "hunter2";
+
+    let mut stream = connect(&config_dir, TRANSFER_REJECTED_ADDR).await;
+    send_auth(
+        &mut stream,
+        &AuthClientMessage::Register {
+            username: username.clone(),
+            password: password.to_string(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv_auth(&mut stream).await,
+        AuthServerMessage::Authenticated { .. }
+    ));
+    select_realm(&mut stream, _server.realm_id).await;
+
+    send_character(
+        &mut stream,
+        &CharacterClientMessage::CreateCharacter {
+            name: username.clone(),
+            archetype_key: String::new(),
+        },
+    )
+    .await;
+    let character_id = match recv_character(&mut stream).await {
+        CharacterServerMessage::CharacterCreated { character_id } => character_id,
+        other => panic!("expected a CharacterCreated, got {other:?}"),
+    };
+
+    send_character(
+        &mut stream,
+        &CharacterClientMessage::RequestTransfer {
+            character_id: character_id.clone(),
+            destination_realm_id: open_destination_realm_id.to_string(),
+        },
+    )
+    .await;
+    match recv_character(&mut stream).await {
+        CharacterServerMessage::Error { message } => {
+            assert!(message.contains("open"), "{message}");
+        }
+        other => panic!("expected a transfer Error, got {other:?}"),
+    }
+
+    // The connection stays usable — the character can still be selected
+    // and joined normally, proving the rejection didn't half-apply.
+    send_character(
+        &mut stream,
+        &CharacterClientMessage::SelectCharacter {
+            character_id: character_id.clone(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv_character(&mut stream).await,
+        CharacterServerMessage::CharacterSelected { .. }
+    ));
+    assert!(matches!(
+        recv_world(&mut stream).await,
+        ServerMessage::Joined { .. }
+    ));
 }
