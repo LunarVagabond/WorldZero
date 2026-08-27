@@ -721,6 +721,18 @@ impl LoadedPlugin {
             .map_err(|e| Error::new("plugin-host", format!("on_respawn hook failed: {e:#}")))
     }
 
+    /// Called once per tick, per zone, regardless of NPC count (#168) —
+    /// `server::world_actor` drives this call site, once for each plugin
+    /// that declared `on-tick` in its `hooks` list, after that tick's
+    /// queued moves are applied and any `on-npc-tick` dispatch for this
+    /// tick has already run.
+    pub fn on_tick(&mut self, zone_id: &str, dt: f64) -> Result<()> {
+        self.bindings
+            .worldzero_plugin_hooks()
+            .call_on_tick(&mut self.store, zone_id, dt)
+            .map_err(|e| Error::new("plugin-host", format!("on_tick hook failed: {e:#}")))
+    }
+
     /// Called once per tick, per zone, for an NPC entity whose spawn
     /// table declared a route (`world::world_actor` drives this call
     /// site — the plugin is expected to respond with `move-entity`

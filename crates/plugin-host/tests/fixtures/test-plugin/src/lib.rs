@@ -71,7 +71,12 @@ impl Guest for Plugin {
     // original ticket's motivating use case directly: keying entity-scoped
     // state (`PluginStateScope::Entity`) by the real id the moment it's
     // known, rather than a zone-scoped workaround.
-    fn on_entity_spawn(zone_id: String, entity_id: String, entity_type: String, spawn_table_id: String) {
+    fn on_entity_spawn(
+        zone_id: String,
+        entity_id: String,
+        entity_type: String,
+        spawn_table_id: String,
+    ) {
         let _ = worldzero::plugin::host::plugin_state_set(
             &worldzero::plugin::host::PluginStateScope::Entity(entity_id.clone()),
             "spawned-from-table",
@@ -226,14 +231,16 @@ impl Guest for Plugin {
         // storage the same way it already does for a player target: the
         // core doesn't care which kind of entity `target_entity_id` is.
         let scope = worldzero::plugin::host::PluginStateScope::Entity(target_entity_id.clone());
-        let remaining_before_this_hit = worldzero::plugin::host::plugin_state_get(
-            &scope,
-            "combat-hits-remaining",
-        )
-        .ok()
-        .flatten()
-        .and_then(|bytes| std::str::from_utf8(&bytes).ok().and_then(|s| s.parse::<i64>().ok()))
-        .unwrap_or(3);
+        let remaining_before_this_hit =
+            worldzero::plugin::host::plugin_state_get(&scope, "combat-hits-remaining")
+                .ok()
+                .flatten()
+                .and_then(|bytes| {
+                    std::str::from_utf8(&bytes)
+                        .ok()
+                        .and_then(|s| s.parse::<i64>().ok())
+                })
+                .unwrap_or(3);
         let remaining_after_this_hit = remaining_before_this_hit - 1;
         if remaining_after_this_hit <= 0 {
             let _ = worldzero::plugin::host::report_death(&target_entity_id);
@@ -263,6 +270,31 @@ impl Guest for Plugin {
 
     fn on_respawn(_zone_id: String, entity_id: String) {
         let _ = worldzero::plugin::host::send_message(&entity_id, "you respawned");
+    }
+
+    // Exercises on-tick end to end (#168): a zone-scoped counter,
+    // incremented once per call, independent of NPC count — proves the
+    // hook fires once per tick for the zone as a whole, not per entity
+    // the way on-npc-tick does. Read back via the "tick-count" chat
+    // command below, same "state written here, read back through a
+    // command" pattern `on_player_leave_zone`/`on_death` already use for
+    // events with no connection of their own to reply on.
+    fn on_tick(zone_id: String, _dt: f64) {
+        let scope = worldzero::plugin::host::PluginStateScope::Zone(zone_id);
+        let count = worldzero::plugin::host::plugin_state_get(&scope, "tick-count")
+            .ok()
+            .flatten()
+            .and_then(|bytes| {
+                std::str::from_utf8(&bytes)
+                    .ok()
+                    .and_then(|s| s.parse::<u64>().ok())
+            })
+            .unwrap_or(0);
+        let _ = worldzero::plugin::host::plugin_state_set(
+            &scope,
+            "tick-count",
+            (count + 1).to_string().as_bytes(),
+        );
     }
 
     fn on_npc_tick(
@@ -357,6 +389,24 @@ impl Guest for Plugin {
             let _ = worldzero::plugin::host::send_message(
                 &sender_entity_id,
                 &format!("which-wolf {args}: {value}"),
+            );
+            return;
+        }
+        // Reads back what `on_tick` (#168) has counted so far — a
+        // black-box test can call `on_tick` directly (or wait out real
+        // ticks end to end) and confirm this rises across calls.
+        if command == "tick-count" {
+            let value = worldzero::plugin::host::plugin_state_get(
+                &worldzero::plugin::host::PluginStateScope::Zone(zone_id),
+                "tick-count",
+            )
+            .ok()
+            .flatten()
+            .map(|bytes| String::from_utf8_lossy(&bytes).to_string())
+            .unwrap_or_else(|| "0".to_string());
+            let _ = worldzero::plugin::host::send_message(
+                &sender_entity_id,
+                &format!("tick-count: {value}"),
             );
             return;
         }

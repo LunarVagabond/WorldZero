@@ -71,6 +71,8 @@ impl Guest for Plugin {
 
     fn on_respawn(_zone_id: String, _entity_id: String) {}
 
+    fn on_tick(_zone_id: String, _dt: f64) {}
+
     fn on_npc_tick(
         _zone_id: String,
         _entity_id: String,

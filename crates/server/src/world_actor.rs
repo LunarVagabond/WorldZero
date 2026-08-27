@@ -302,7 +302,11 @@ impl WorldHandle {
 /// Spawns the actor task and returns a handle to it. `on_tick` runs once
 /// per tick with that tick's movement outcomes — broadcasting
 /// `Moved`/`Rejected` to connected sessions is the caller's job
-/// (`crate::session`); this only drives the simulation.
+/// (`crate::session`); this only drives the simulation. Not to be
+/// confused with the plugin `on-tick` hook (#168, `wit/plugin.wit`) —
+/// this `on_tick` parameter is `server`'s own internal callback, fired
+/// unconditionally for every zone; the plugin hook of the same name is
+/// dispatched further down, per opted-in plugin, alongside `on-npc-tick`.
 ///
 /// `plugins` is shared across every zone-service `server` runs (#152) —
 /// one plugin instance, process-wide, not one per zone. Every zone actor
@@ -382,23 +386,38 @@ pub fn spawn_world_actor(
                     {
                         let mut plugins = plugins.lock().await;
                         for runtime in plugins.iter_mut() {
-                            if !runtime.wants("on-npc-tick") {
+                            let wants_npc_tick = runtime.wants("on-npc-tick");
+                            let wants_tick = runtime.wants("on-tick");
+                            if !wants_npc_tick && !wants_tick {
                                 continue;
                             }
-                            for (entity, position, route) in &routes {
-                                let entity_str = entity.to_string();
-                                if let Err(e) = runtime.plugin.on_npc_tick(
-                                    &zone_id,
-                                    &entity_str,
-                                    position.0,
-                                    position.1,
-                                    &route.waypoints,
-                                    route.is_loop,
-                                    route.speed,
-                                    dt,
-                                ) {
-                                    tracing::warn!(plugin = %runtime.name, %entity, error = %e, "plugin on_npc_tick hook failed");
+                            if wants_npc_tick {
+                                for (entity, position, route) in &routes {
+                                    let entity_str = entity.to_string();
+                                    if let Err(e) = runtime.plugin.on_npc_tick(
+                                        &zone_id,
+                                        &entity_str,
+                                        position.0,
+                                        position.1,
+                                        &route.waypoints,
+                                        route.is_loop,
+                                        route.speed,
+                                        dt,
+                                    ) {
+                                        tracing::warn!(plugin = %runtime.name, %entity, error = %e, "plugin on_npc_tick hook failed");
+                                    }
                                 }
+                            }
+                            // Zone-wide, once per plugin per tick (#168)
+                            // — deliberately after this tick's
+                            // `on-npc-tick` fan-out above, so a plugin
+                            // declaring both sees this tick's NPC moves
+                            // already queued before its own aggregate
+                            // bookkeeping runs.
+                            if wants_tick
+                                && let Err(e) = runtime.plugin.on_tick(&zone_id, dt)
+                            {
+                                tracing::warn!(plugin = %runtime.name, error = %e, "plugin on_tick hook failed");
                             }
                             drain_and_apply_plugin_effects(
                                 runtime, &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &currency_schema, &plugin_state_store, &global_sessions,

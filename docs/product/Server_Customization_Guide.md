@@ -135,7 +135,7 @@ A plugin is a `wasmtime`-sandboxed WASM component plus a manifest, [`config/plug
 ```toml
 [plugin]
 name = "example-plugin"
-host_api_version = "0.10.0"
+host_api_version = "0.11.0"
 capabilities = []
 message_types = []
 chat_commands = []
@@ -153,7 +153,7 @@ Wire it in:
 |---|---|
 | `WZ_PLUGINS_DIR` | Default `<config_dir>/plugins`. Every `<name>/{plugin.toml,*.wasm}` subdirectory found there is auto-discovered and loaded at startup — more than one plugin loads just by having more than one subdirectory (#152). A plugin loads exactly once for the whole process, not once per zone; every zone-specific hook takes a `zone-id` argument instead of the plugin being attached to one zone. |
 
-`on-zone-loaded`, `on-message`, `on-interact`, `on-chat-command`, `on-player-join-zone`/`on-player-leave-zone`, `on-npc-tick`, `on-item-acquire`, and (as of #154) `on-damage-calc`/`on-item-use`/`on-npc-interact`/`on-death`/`on-respawn` are all live today — only the zone-wide `on-tick` hook still has no real call site, see [`docs/specs/Plugin_API.md`](../specs/Plugin_API.md)'s "Beyond this v0 slice." [`examples/example-plugin`](../../examples/example-plugin) is a real, minimal, copyable starting point — start there, not from scratch.
+`on-zone-loaded`, `on-message`, `on-interact`, `on-chat-command`, `on-player-join-zone`/`on-player-leave-zone`, `on-npc-tick`, `on-item-acquire`, (as of #154) `on-damage-calc`/`on-item-use`/`on-npc-interact`/`on-death`/`on-respawn`, and (as of #168) the zone-wide `on-tick` are all live today, see [`docs/specs/Plugin_API.md`](../specs/Plugin_API.md) for the full hook table. [`examples/example-plugin`](../../examples/example-plugin) is a real, minimal, copyable starting point — start there, not from scratch.
 
 **Persistent plugin state (`plugin-state-get`/`plugin-state-set`, #149).** Quest flags, NPC memory, per-guild economy counters — anything your plugin needs to remember belongs here, not in a stat (Step 1 is for character stats the core validates against a schema; this is an opaque blob entirely yours). No config of its own — it's two host functions your plugin calls directly, scoped by a `plugin-state-scope` variant:
 
