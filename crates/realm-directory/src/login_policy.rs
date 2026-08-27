@@ -3,11 +3,9 @@
 //! the single enforcement point #51 asks for, rather than checks
 //! scattered across `auth`/`character`/`server`.
 //!
-//! Not wired into `server`'s combined process yet — `server::main`
-//! still uses one placeholder realm (`placeholder_realm_id`), so there's
-//! nothing to enforce there today. This is the policy engine itself,
-//! real and tested, ready for whenever `server` resolves a connection's
-//! target realm for real — tracked as #136.
+//! Wired into `server`'s combined process as of #136 —
+//! `session::handle_session`'s `SelectCharacter` path calls
+//! [`LoginPolicy::authorize_login`] before completing a login.
 
 use std::time::Duration;
 
