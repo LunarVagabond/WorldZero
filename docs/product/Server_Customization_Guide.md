@@ -10,7 +10,7 @@ This is the guide for turning `make quickstart`'s default game into *your* game 
 
 A full reference table of everything in this guide is at the bottom if you just want to skim.
 
-**Checking your setup as you go.** `server` logs a real `INFO`-level line for the config that actually took effect, not just what you set: `worldzero server listening` (with the bound address, confirming [Step 4](#step-4--networking-gateway)'s `WZ_SERVER_ADDR`), plus `chat service enabled`/`disabled` and `metrics enabled`/`disabled` for [Step 6](#step-6--optional-services-chat-metrics)'s toggles. If metrics are on, `curl localhost:9090/metrics` (or wherever `WZ_METRICS_ADDR` points) is a quick liveness check. There's no equivalent startup log for a loaded stats schema today, but `server` does log `discovered plugin(s)` with a count at startup for plugins — beyond that, the first real signal is a client interaction actually working (a character loading with your declared stats, a plugin's `on-zone-loaded` NPC appearing).
+**Checking your setup as you go.** `server` logs a real `INFO`-level line for the config that actually took effect, not just what you set: `worldzero server listening` (with the bound address, confirming [Step 4](#step-4--networking-gateway)'s `WZ_SERVER_ADDR`), plus `chat service enabled`/`disabled`, `chat message persistence enabled`/`disabled`, and `metrics enabled`/`disabled` for [Step 6](#step-6--optional-services-chat-metrics)'s toggles. If metrics are on, `curl localhost:9090/metrics` (or wherever `WZ_METRICS_ADDR` points) is a quick liveness check. There's no equivalent startup log for a loaded stats schema today, but `server` does log `discovered plugin(s)` with a count at startup for plugins — beyond that, the first real signal is a client interaction actually working (a character loading with your declared stats, a plugin's `on-zone-loaded` NPC appearing).
 
 ---
 
@@ -31,6 +31,7 @@ Every other step assumes this one is done. `common` is the one crate every other
 |---|---|---|
 | `WZ_CONFIG_DIR` | `./config` | Where every config file in this guide (`stats.schema.yaml`, `zone.manifest.yaml`, `plugin.toml`, …) actually lives. Point this somewhere else if you want your game's config tracked in its own directory/repo. |
 | `WZ_SERVICE_CHAT_ENABLED` | `true` | See [Step 6](#step-6--optional-services-chat-metrics). |
+| `WZ_CHAT_PERSISTENCE_ENABLED` | `false` | See [Step 6](#step-6--optional-services-chat-metrics). |
 | `WZ_SERVICE_METRICS_ENABLED` | `true` | See [Step 6](#step-6--optional-services-chat-metrics). |
 | `WZ_OTEL_ENDPOINT` | unset (disabled) | An OTLP gRPC collector address (e.g. `http://localhost:4317`). Unset means distributed tracing export is off entirely — its *presence* is the enable signal, there's no separate on/off flag. |
 | `WZ_OTEL_SERVICE_NAME` | `"worldzero"` | The `service.name` every exported trace span carries. One value today since `server` is a single combined process (see [Step 7](#step-7--zone-layering-server) and [Step 8](#step-8--realms--transfers-real-but-not-yet-live) for what's still single-process). |
@@ -174,6 +175,7 @@ Optional services are a **runtime config toggle**, not a compile-time feature �
 | Var | Default | Purpose |
 |---|---|---|
 | `WZ_SERVICE_CHAT_ENABLED` | `true` | Cross-shard messaging/channels. `false` means no `ChannelStore`, no `ChatBus`, no per-connection chat dispatch at all — not a listener left running with nothing to do. |
+| `WZ_CHAT_PERSISTENCE_ENABLED` | `false` | Independent of `WZ_SERVICE_CHAT_ENABLED` above — durably logs every published chat message to Postgres (`chat_messages`) for operator-side analytics/moderation/disputes, never replayed to a client. Off by default: persisting message content is an operator's call to opt into, not something this project assumes. See [`docs/specs/Chat_Spec.md`](../specs/Chat_Spec.md#durable-message-log-174). |
 | `WZ_SERVICE_METRICS_ENABLED` | `true` | Prometheus-compatible `/metrics` endpoint. |
 | `WZ_METRICS_ADDR` | `127.0.0.1:9090` | Only consulted when metrics are enabled. |
 
@@ -232,7 +234,7 @@ See [`docs/specs/Realm_Character_Policy_Spec.md`](../specs/Realm_Character_Polic
 | `auth` | (shared Postgres/Redis only) | — | `UsernamePasswordProvider`, `AccountStore`/`AccountRoleStore` |
 | `gateway` | `WZ_TLS_CERT_PATH`, `WZ_TLS_KEY_PATH` | — | `CertMaterial` |
 | `plugin-host` | — | `plugin.toml` | `PluginManifest` |
-| `chat` | (toggle lives in `common`) | — | `ChannelStore`, `ChatBus` |
+| `chat` | `WZ_CHAT_PERSISTENCE_ENABLED` (`WZ_SERVICE_CHAT_ENABLED` toggle lives in `common`) | — | `ChannelStore`, `ChatBus`, `MessageLog` |
 | `server` | `WZ_SERVER_ADDR`, `WZ_METRICS_ADDR`, `WZ_LAYER_ENABLED`, `WZ_LAYER_POPULATION_THRESHOLD`, `WZ_PLUGINS_DIR`, `WZ_REALM_ID`, `WZ_REALM_LEASE_TTL_SECS` | — | — |
 | `realm-directory` | (consumed via `server`'s `WZ_REALM_ID`/`WZ_REALM_LEASE_TTL_SECS` above) | — | `RealmStore`, `LoginPolicy`, `RealmPresence` |
 | `transfer` | none (not wired into `server` yet) | — | `TransferExecutor`, `TransferGateStore`, `TransferAuditLog` |

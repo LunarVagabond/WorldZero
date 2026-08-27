@@ -4,9 +4,11 @@ Corresponds to the `chat` row in docs/PROPOSAL.md's Service / Crate Breakdown ("
 
 `chat` isn't placed in any Phased Roadmap phase yet — this spec covers the crate's own data model and pub/sub delivery, not when it ships relative to other phases.
 
-## No message persistence
+## No client-facing chat history
 
-A chat message is delivered to whoever is subscribed to its channel at the moment it's sent — nothing is stored. No `chat_messages` table, no scrollback. This matches how most live MMOs actually behave (you see chat from while you were logged in, not history from before). Revisit if a real, demonstrated need shows up (e.g. a companion mobile client wanting scrollback) — the schema below doesn't preclude adding history later, it's just not built now.
+A chat message is delivered to whoever is subscribed to its channel at the moment it's sent — nothing is replayed to a client on login or channel-join, and no read/scrollback API exists. This matches how most live MMOs actually behave (you see chat from while you were logged in, not history from before). Revisit if a real, demonstrated need shows up (e.g. a companion mobile client wanting scrollback) — that would be its own ticket built on top of the durable log below, not assumed here.
+
+This is a distinct question from whether messages are durably *recorded* at all — see "Durable message log" below, which does record them, for operator use, without adding any client-facing replay.
 
 ## Channel types
 
@@ -78,7 +80,27 @@ Every channel, regardless of type, publishes to Redis pub/sub topic `chat:<chann
 }
 ```
 
-Publishing and subscribing are the only two operations — no message is ever written to Postgres, per "No message persistence" above.
+Publishing and subscribing are the only two operations `ChatBus` itself exposes — delivery never depends on Postgres. See "Durable message log" below for the separate, optional write-through `ChatBus::publish` performs alongside this.
+
+## Durable message log ([#174](https://github.com/LunarVagabond/WorldZero/issues/174))
+
+A durable, write-only Postgres log of every published chat message — `chat_messages` (`db/migrations/0016_create_chat_messages`), written to by `chat::message_log::MessageLog`. Separate from, and in addition to, `ChatBus`'s Redis pub/sub above, which stays delivery-only and ephemeral. This is for operator-side use — analytics, moderation, disputes — not a chat-history feature: **there is no read method on `MessageLog`, and no client-facing replay of any kind is added by this**, see "No client-facing chat history" above.
+
+```sql
+CREATE TABLE chat_messages (
+    id UUID PRIMARY KEY,
+    channel_id UUID NOT NULL REFERENCES chat_channels(id) ON DELETE CASCADE,
+    sender_account_id UUID REFERENCES accounts(id) ON DELETE SET NULL,
+    body TEXT NOT NULL,
+    sent_at TIMESTAMPTZ NOT NULL
+);
+```
+
+`sender_account_id` is nullable with `ON DELETE SET NULL` (mirroring `chat_channels.created_by`) rather than `chat_channel_members`' `ON DELETE CASCADE` — an audit/moderation log should outlive the account it names, not disappear along with it.
+
+**Toggle:** `WZ_CHAT_PERSISTENCE_ENABLED` (`chat::persistence_enabled_from_env`), independent of `WZ_SERVICE_CHAT_ENABLED` — an operator can run chat live without persisting message content, since data retention/privacy is an operator decision this project doesn't force either way. **Defaults to `false`**: persisting message content is a stronger commitment than running chat at all, so an operator opts in rather than discovering after the fact that every player's chat is being written to durable storage. Same "unset keeps the default, a set-but-unparsable value is a config error" discipline as `common::config::ServicesConfig::from_env`. When disabled, `ChatBus` is constructed with `message_log: None` and no `MessageLog`/write path exists at all — not a per-message flag `publish` checks.
+
+**Ordering: fire-and-forget, after publish.** `ChatBus::publish` publishes to Redis first, then (only if persistence is enabled) spawns a detached task that writes the same message to `chat_messages`, logging a `WARN` on failure rather than propagating it. This means real-time delivery never waits on Postgres — the durable write can never add latency to, or become a hard dependency of, live chat — at the cost of a narrow window where a message was delivered but the process crashes before the spawned write completes, so it never makes it into the log. That tradeoff is deliberate: the log is for downstream analytics/moderation, not a delivery guarantee, and #174's acceptance criteria explicitly rule out slowing real-time delivery on the write.
 
 ## Gateway demo integration
 
@@ -129,4 +151,4 @@ Explicitly out of scope for the current implementation, to keep in mind rather t
 - **The real, production version of wiring a connected client's messages into/out of these channels** — a demo-scoped version now exists (see "Gateway demo integration" above), including real authenticated identity via `auth`'s gateway handshake. What's still not built: figuring out which channel(s) an authenticated client is actually allowed to publish to (right now any authenticated account can join/send to any named `group` channel), and validating zone membership for `zone` channels.
 - **Rate limiting / moderation / profanity filtering** — not designed at all yet.
 - **Presence** — the crate's PROPOSAL.md description mentions "presence" alongside channels, but that's a distinct concern (who's online, not what channel they're in) not covered by this spec.
-- **Message history/persistence** — explicitly deferred, see "No message persistence" above.
+- **Client-facing message history/replay** — explicitly deferred, see "No client-facing chat history" above. (Durable operator-side logging of message content now exists — see "Durable message log" — but nothing reads it back to a client.)
