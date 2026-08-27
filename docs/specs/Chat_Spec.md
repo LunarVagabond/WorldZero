@@ -57,6 +57,7 @@ system_channels:
     scope: global
   - category: local
     scope: zone
+    auto_join: true
 ```
 
 | Field | Type | Notes |
@@ -64,8 +65,17 @@ system_channels:
 | `schema_version` | integer | Same compatibility-contract pattern as the other declared-schema files. `1` for now. |
 | `system_channels[].category` | string | Freeform label (`trade`, `lfg`, `local`, ...) — becomes the `chat_channels.category` value and, combined with scope, the channel's name. |
 | `system_channels[].scope` | string | `"global"` — one channel for the whole deployment, `chat_channels.zone_id` is `NULL`. `"zone"` — one channel per zone, created (lazily or at startup) per `zone_id` that needs it, named after that zone. |
+| `system_channels[].auto_join` | boolean | Default `false`. `true` only valid alongside `scope: zone` (rejected at load time otherwise, see "Zone-scoped chat auto-join" below) — a connection auto-joins this category's channel for whichever zone it's currently in, and auto-leaves it on exit, with no explicit client `Join`/`Leave` needed (#186). |
 
-This is the dev-facing lever for "enable/disable/name system channels" — adding, removing, or renaming a category is a config change, not a code change.
+This is the dev-facing lever for "enable/disable/name system channels" — adding, removing, or renaming a category is a config change, not a code change. Optional at the `server` level too: a missing `chat.yaml` (unlike `stats.schema.yaml`/`party.schema.yaml`/etc.) is "no system channels declared," not a startup error (`SystemChannelConfig::from_config_dir_or_default`) — chat itself is an optional service, so requiring this file just to run it at all would be the wrong default.
+
+## Zone-scoped chat auto-join and blocking (#186)
+
+`server::chat_session::auto_join_zone_channels` is the automatic counterpart to the explicit `Join`/`Leave` client messages described below — it fires from `server::session` on initial zone join and on every `ZoneChanged` transition (never on an explicit client action), auto-joining every `auto_join: true` category's channel for the zone just entered and auto-leaving the previous zone's. **Global channels are completely unaffected** — they're never zone-triggered, and `chat.yaml` refuses to load a `global`-scope declaration with `auto_join: true`.
+
+This deliberately never touches `chat_channel_members` — a `zone` channel's membership is implicit via `character.zone_id` (see the channel-types table above), so auto-join only resolves the channel (`ChannelStore::ensure_zone_channel`, idempotent) and starts the same pub/sub forwarder an explicit `Join` starts; auto-leave just stops that forwarder. `ChatBus::publish` accordingly never requires `is_member` for a `zone`-type channel — checking it would always fail (a `zone` channel never has membership rows to check), so it's exempted the same way this doc already documented before #186 actually exercised the path.
+
+**Blocking:** a plugin can prevent a specific entity from auto-joining a specific category via the `block-zone-channel` host function (docs/specs/Plugin_API.md's "Zone-scoped chat auto-join" section has the full contract) — e.g. gating a city channel behind a quest flag. The block is in-memory, per-connection, and does not retroactively leave a channel already auto-joined.
 
 ## Redis pub/sub delivery
 

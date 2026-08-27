@@ -120,6 +120,17 @@ pub type PendingGuildInvites = Arc<Mutex<HashMap<EntityId, EntityId>>>;
 /// has an NPC entry, same as `EntityCharacters`.
 pub type EntityRoles = Arc<Mutex<HashMap<EntityId, Vec<String>>>>;
 
+/// Zone-scoped chat categories (`chat.yaml`'s `system_channels[].category`)
+/// a plugin has blocked a connected entity from auto-joining (or joining
+/// at all), via `block-zone-channel` (`wit/plugin.wit`, #186) — consulted
+/// by `chat_session::auto_join_zone_channels` right before it would
+/// otherwise auto-join a category on zone entry. In-memory only, same
+/// scope/durability as `EntityRoles`: cleared on disconnect, never
+/// persisted, and (like `EntityRoles`) answered from a cache a plugin's
+/// synchronous, sandboxed host-function call can actually read/write
+/// without touching the DB. Never has an NPC entry.
+pub type BlockedZoneChannels = Arc<Mutex<HashMap<EntityId, std::collections::HashSet<String>>>>;
+
 pub struct SessionDeps {
     pub auth_provider: Arc<auth::UsernamePasswordProvider>,
     pub character_store: Arc<CharacterStore>,
@@ -244,6 +255,14 @@ pub struct SessionDeps {
     /// never optional the way `chat`/`metrics` are.
     pub role_store: Arc<dyn auth::AccountRoleStore>,
     pub entity_roles: EntityRoles,
+    /// Backs `block-zone-channel` (#186) — see [`BlockedZoneChannels`]'s
+    /// own doc comment. `None` end-to-end would be wrong here (unlike
+    /// `chat`/`metrics`): this map is meaningful, and cheap to keep,
+    /// regardless of whether `chat` is enabled — a plugin can call
+    /// `block-zone-channel` either way, it just has no observable effect
+    /// while chat is disabled (there is nothing to auto-join in the first
+    /// place).
+    pub blocked_zone_channels: BlockedZoneChannels,
     /// `message_type`s the configured plugin declared in `plugin.toml`
     /// (empty if no plugin is configured) — checked here rather than
     /// only in the world actor so an envelope with an unroutable
@@ -802,6 +821,30 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
     // ready to receive it (#155).
     zone.world.dispatch_player_join(entity_id);
 
+    // Zone-scoped chat auto-join (#186) — initial zone entry, the other
+    // call site being the `ZoneChanged` handoff below. After
+    // `dispatch_player_join` for the same reason as that hook: a
+    // `Joined`/`Chat` message sent from here should reach a client that's
+    // already gotten its roster.
+    if let Some(chat) = &deps.chat {
+        let blocked = deps
+            .blocked_zone_channels
+            .lock()
+            .unwrap()
+            .get(&entity_id)
+            .cloned()
+            .unwrap_or_default();
+        chat_session::auto_join_zone_channels(
+            &current_zone_id,
+            account_id,
+            chat,
+            &outgoing_tx,
+            &mut joined_channels,
+            &blocked,
+        )
+        .await;
+    }
+
     // #21's lease renewal (open realms only — a bound one never held a
     // lease in the first place, and calling `renew` for one would just
     // log a spurious "doesn't hold a lease" warning every tick for no
@@ -1302,8 +1345,36 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
                 {
                     match deps.zones.get(&zone_id) {
                         Some(new_zone) => {
+                            // Zone-scoped chat auto-leave/-join (#186) —
+                            // leave the old zone's auto-joined channels
+                            // before switching `current_zone_id`, then
+                            // join the new zone's, same as initial join
+                            // above. Explicit user `Join`s are untouched
+                            // (`auto_leave_zone_channels` only tears down
+                            // its own `ZONE_AUTO_JOIN_KEY_PREFIX`-keyed
+                            // entries). Harmless no-op if chat is
+                            // disabled or nothing was auto-joined yet.
+                            chat_session::auto_leave_zone_channels(&mut joined_channels, &outgoing_tx);
                             current_zone_id = zone_id;
                             zone = new_zone;
+                            if let Some(chat) = &deps.chat {
+                                let blocked = deps
+                                    .blocked_zone_channels
+                                    .lock()
+                                    .unwrap()
+                                    .get(&entity_id)
+                                    .cloned()
+                                    .unwrap_or_default();
+                                chat_session::auto_join_zone_channels(
+                                    &current_zone_id,
+                                    account_id,
+                                    chat,
+                                    &outgoing_tx,
+                                    &mut joined_channels,
+                                    &blocked,
+                                )
+                                .await;
+                            }
                         }
                         None => {
                             tracing::error!(zone_id, "zone transition target vanished from the registry");
@@ -1341,6 +1412,10 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
     deps.entity_accounts.lock().unwrap().remove(&entity_id);
     deps.account_entities.lock().unwrap().remove(&account_id);
     deps.entity_roles.lock().unwrap().remove(&entity_id);
+    deps.blocked_zone_channels
+        .lock()
+        .unwrap()
+        .remove(&entity_id);
     // #21's clean-disconnect release — a harmless no-op for a bound-realm
     // character (never took a lease to begin with), so this runs
     // unconditionally rather than branching on `realm_open_or_bound`.

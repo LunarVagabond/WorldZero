@@ -42,6 +42,13 @@ pub struct ChatDeps {
     pub store: Arc<ChannelStore>,
     pub bus: Arc<ChatBus>,
     pub usernames: Usernames,
+    /// Zone-scoped categories declared `auto_join: true` in `chat.yaml`
+    /// (`chat::SystemChannelConfig::auto_join_zone_categories`, #186) —
+    /// what `auto_join_zone_channels` below iterates on every zone entry.
+    /// Empty (not `None`) when `chat.yaml` declares none, matching
+    /// `SystemChannelConfig::from_config_dir_or_default`'s "no file means
+    /// no declarations" default.
+    pub auto_join_categories: Arc<Vec<String>>,
 }
 
 /// Handles one decoded chat envelope for an already-authenticated
@@ -135,11 +142,30 @@ async fn join_channel(
     .await?;
     chat.store.join(channel_id, account_id).await?;
 
+    let handle = spawn_forwarder(channel_id, channel_name, account_id, chat, outgoing_tx).await?;
+    joined.insert(channel_name.to_string(), (channel_id, handle));
+    Ok(())
+}
+
+/// Subscribes to `channel_id`'s pub/sub traffic and spawns a task
+/// forwarding it back out over `outgoing_tx` as a `Chat` envelope labeled
+/// `display_name` — the piece `join_channel` and `auto_join_zone_channels`
+/// (#186) both need, factored out since neither differs in *how* a
+/// connection consumes a channel once resolved, only in how the channel
+/// id and membership got established in the first place (an explicit
+/// `Join` vs. an implicit zone entry).
+async fn spawn_forwarder(
+    channel_id: ChannelId,
+    display_name: &str,
+    account_id: AccountId,
+    chat: &ChatDeps,
+    outgoing_tx: &mpsc::UnboundedSender<Envelope>,
+) -> Result<JoinHandle<()>> {
     let mut incoming = Box::pin(chat.bus.subscribe(channel_id).await?);
     let outgoing_tx = outgoing_tx.clone();
     let usernames = chat.usernames.clone();
-    let channel_name_owned = channel_name.to_string();
-    let handle = tokio::spawn(async move {
+    let display_name = display_name.to_string();
+    Ok(tokio::spawn(async move {
         use futures_util::StreamExt;
 
         while let Some(message) = incoming.next().await {
@@ -154,7 +180,7 @@ async fn join_channel(
                 .unwrap_or_else(|| "unknown".to_string());
             let server_message = ServerMessage::Chat {
                 channel_id,
-                channel: channel_name_owned.clone(),
+                channel: display_name.clone(),
                 sender,
                 body: message.body,
             };
@@ -165,8 +191,133 @@ async fn join_channel(
                 break;
             }
         }
-    });
+    }))
+}
 
-    joined.insert(channel_name.to_string(), (channel_id, handle));
+/// Reserved prefix for `auto_join_zone_channels`' entries in
+/// `JoinedChannels` (#186) — distinguishes an automatic zone-channel join
+/// from a user's own explicit `Join` by name, so `auto_leave_zone_channels`
+/// only ever tears down what auto-join itself set up, never a channel the
+/// player joined on purpose. A player naming an explicit `group` channel
+/// with this exact prefix would collide in principle; in practice this is
+/// the same "reserved, not blocked at parse time" convention
+/// `chat::demo_support`'s `chat-demo-` username prefix already uses.
+const ZONE_AUTO_JOIN_KEY_PREFIX: &str = "#zone-auto:";
+
+fn zone_auto_join_key(category: &str) -> String {
+    format!("{ZONE_AUTO_JOIN_KEY_PREFIX}{category}")
+}
+
+/// Auto-joins `account_id` to every zone-scoped channel category declared
+/// `auto_join: true` in `chat.yaml` for `zone_id` (#186) — called by
+/// `server::session` on initial zone join and on each `ZoneChanged`
+/// transition, never by an explicit client `Join`. Skips (silently, not
+/// an error — this is normal, expected behavior, not a failure) any
+/// category listed in `blocked`, the in-memory set a plugin populated via
+/// `block-zone-channel` (`wit/plugin.wit`).
+///
+/// Deliberately never calls `ChannelStore::join`/`leave` — a `zone`
+/// channel's membership is implicit via `character.zone_id`
+/// (docs/specs/Chat_Spec.md's channel-types table: "`zone` channels never
+/// get rows in `chat_channel_members`"), so this only resolves the
+/// channel (idempotently, via `ensure_zone_channel`) and starts the same
+/// pub/sub forwarder an explicit `join_channel` starts — see
+/// `spawn_forwarder`.
+pub async fn auto_join_zone_channels(
+    zone_id: &str,
+    account_id: AccountId,
+    chat: &ChatDeps,
+    outgoing_tx: &mpsc::UnboundedSender<Envelope>,
+    joined: &mut JoinedChannels,
+    blocked: &std::collections::HashSet<String>,
+) {
+    for category in chat.auto_join_categories.iter() {
+        if blocked.contains(category) {
+            continue;
+        }
+        let key = zone_auto_join_key(category);
+        if joined.contains_key(&key) {
+            continue;
+        }
+        match auto_join_one(
+            zone_id,
+            category,
+            &key,
+            account_id,
+            chat,
+            outgoing_tx,
+            joined,
+        )
+        .await
+        {
+            Ok(()) => {}
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    zone_id,
+                    category,
+                    "failed to auto-join zone chat channel"
+                );
+            }
+        }
+    }
+}
+
+async fn auto_join_one(
+    zone_id: &str,
+    category: &str,
+    key: &str,
+    account_id: AccountId,
+    chat: &ChatDeps,
+    outgoing_tx: &mpsc::UnboundedSender<Envelope>,
+    joined: &mut JoinedChannels,
+) -> Result<()> {
+    let name = format!("{category} — {zone_id}");
+    let channel_id = chat
+        .store
+        .ensure_zone_channel(Some(zone_id), category, &name)
+        .await?;
+
+    let handle = spawn_forwarder(channel_id, category, account_id, chat, outgoing_tx).await?;
+    joined.insert(key.to_string(), (channel_id, handle));
+
+    let announce = ServerMessage::Joined {
+        channel_id,
+        channel: category.to_string(),
+    };
+    if let Ok(envelope) = announce.into_envelope() {
+        let _ = outgoing_tx.send(envelope);
+    }
     Ok(())
+}
+
+/// Leaves every zone channel `auto_join_zone_channels` joined — the
+/// counterpart called right before a `ZoneChanged` transition leaves the
+/// old zone (#186). Only tears down `ZONE_AUTO_JOIN_KEY_PREFIX`-keyed
+/// entries; a user's own explicit `Join`s are untouched (they don't
+/// track which zone they were made in, and aren't this function's
+/// business). No `ChannelStore::leave` call, mirroring
+/// `auto_join_zone_channels`'s own "zone membership is implicit" doc
+/// comment — there is no membership row to remove.
+pub fn auto_leave_zone_channels(
+    joined: &mut JoinedChannels,
+    outgoing_tx: &mpsc::UnboundedSender<Envelope>,
+) {
+    let keys: Vec<String> = joined
+        .keys()
+        .filter(|k| k.starts_with(ZONE_AUTO_JOIN_KEY_PREFIX))
+        .cloned()
+        .collect();
+    for key in keys {
+        if let Some((_, handle)) = joined.remove(&key) {
+            handle.abort();
+            let category = key
+                .strip_prefix(ZONE_AUTO_JOIN_KEY_PREFIX)
+                .unwrap_or(&key)
+                .to_string();
+            if let Ok(envelope) = (ServerMessage::Left { channel: category }).into_envelope() {
+                let _ = outgoing_tx.send(envelope);
+            }
+        }
+    }
 }

@@ -43,6 +43,15 @@
 //!   `config/currency.schema.example.yaml`) — the declared, possibly
 //!   multi-currency schema (#217/#218)
 //!
+//! Optional (only consulted while chat is enabled):
+//! `<config_dir>/chat.yaml` (see `config/chat.example.yaml`) — the
+//! dev-declared system channel categories (docs/specs/Chat_Spec.md,
+//! "chat.yaml"); a missing file means no system channels are declared,
+//! not a startup error (`chat::SystemChannelConfig::from_config_dir_or_default`).
+//! A `scope: zone` category declaring `auto_join: true` is auto-joined
+//! for every connection on entering that zone, and auto-left on exit
+//! (#186) — see `chat_session::auto_join_zone_channels`.
+//!
 //! Optional: `WZ_SERVER_ADDR` (default `127.0.0.1:7900`),
 //! `WZ_PLUGINS_DIR` (default `<config_dir>/plugins`) — a directory of
 //! `<name>/{plugin.toml,*.wasm}` subdirectories, auto-discovered at
@@ -100,8 +109,8 @@ use content::content_pack::ContentPack;
 use content::manifest::ZoneManifest;
 use futures_util::StreamExt;
 use session::{
-    AccountEntities, CharacterEntities, EntityAccounts, EntityCharacters, EntityRoles, NpcStats,
-    PendingGuildInvites, PendingPartyInvites, SessionDeps, Sessions,
+    AccountEntities, BlockedZoneChannels, CharacterEntities, EntityAccounts, EntityCharacters,
+    EntityRoles, NpcStats, PendingGuildInvites, PendingPartyInvites, SessionDeps, Sessions,
 };
 use session_protocol::{RosterEntry, ServerMessage};
 use tokio::sync::mpsc;
@@ -372,6 +381,22 @@ async fn main() {
             tracing::info!("chat message persistence disabled (WZ_CHAT_PERSISTENCE_ENABLED=false)");
             None
         };
+        // Optional (see this module's own doc comment) — a missing
+        // chat.yaml just means no auto-join categories exist, not a
+        // startup failure (#186).
+        let system_channels = chat::SystemChannelConfig::from_config_dir_or_default()
+            .unwrap_or_else(|e| {
+                panic!("failed to load chat.yaml (see config/chat.example.yaml): {e}")
+            });
+        let auto_join_categories: Vec<String> = system_channels
+            .auto_join_zone_categories()
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        tracing::info!(
+            auto_join_category_count = auto_join_categories.len(),
+            "loaded chat.yaml system channel declarations"
+        );
         Some(chat_session::ChatDeps {
             pool: pool.clone(),
             store: Arc::new(chat::ChannelStore::new(pool.clone())),
@@ -381,6 +406,7 @@ async fn main() {
                 message_log,
             )),
             usernames: Arc::new(RwLock::new(HashMap::new())),
+            auto_join_categories: Arc::new(auto_join_categories),
         })
     } else {
         tracing::info!("chat service disabled (WZ_SERVICE_CHAT_ENABLED=false)");
@@ -390,6 +416,11 @@ async fn main() {
     let entity_characters: EntityCharacters = Arc::new(Mutex::new(HashMap::new()));
     let character_entities: CharacterEntities = Arc::new(Mutex::new(HashMap::new()));
     let entity_roles: EntityRoles = Arc::new(Mutex::new(HashMap::new()));
+    // Backs `block-zone-channel` (#186) — see `BlockedZoneChannels`'s own
+    // doc comment. Constructed unconditionally, same as `entity_roles`:
+    // cheap to keep even with chat disabled, since a plugin can call
+    // `block-zone-channel` regardless of `WZ_SERVICE_CHAT_ENABLED`.
+    let blocked_zone_channels: BlockedZoneChannels = Arc::new(Mutex::new(HashMap::new()));
     let npc_stats: NpcStats = Arc::new(Mutex::new(HashMap::new()));
     let pending_party_invites: PendingPartyInvites = Arc::new(Mutex::new(HashMap::new()));
     let pending_guild_invites: PendingGuildInvites = Arc::new(Mutex::new(HashMap::new()));
@@ -455,6 +486,7 @@ async fn main() {
             global_sessions.clone(),
             entity_roles.clone(),
             plugin_state_cache.clone(),
+            blocked_zone_channels.clone(),
         )
         .unwrap_or_else(|e| {
             panic!(
@@ -737,6 +769,7 @@ async fn main() {
         account_entities,
         role_store,
         entity_roles,
+        blocked_zone_channels,
         plugin_message_types,
         plugin_chat_commands,
         chat: chat_deps,

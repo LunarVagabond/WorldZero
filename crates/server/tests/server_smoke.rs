@@ -607,7 +607,7 @@ fn setup_config_dir(test_name: &str) -> PathBuf {
             r#"
 [plugin]
 name = "test-plugin"
-host_api_version = "0.11.0"
+host_api_version = "0.12.0"
 capabilities = ["spawning", "movement", "combat", "economy", "messaging"]
 message_types = [1000]
 chat_commands = ["give", "spawn-track", "which-wolf"]
@@ -706,7 +706,7 @@ fn setup_multi_plugin_config_dir(test_name: &str) -> PathBuf {
         r#"
 [plugin]
 name = "test-plugin"
-host_api_version = "0.11.0"
+host_api_version = "0.12.0"
 capabilities = ["spawning", "movement", "combat", "economy", "messaging"]
 message_types = [1000]
 hooks = ["on-zone-loaded", "on-player-join-zone"]
@@ -726,7 +726,7 @@ hooks = ["on-zone-loaded", "on-player-join-zone"]
         r#"
 [plugin]
 name = "second-plugin"
-host_api_version = "0.11.0"
+host_api_version = "0.12.0"
 capabilities = ["messaging"]
 message_types = [1001]
 hooks = ["on-player-join-zone"]
