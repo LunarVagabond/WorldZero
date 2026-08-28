@@ -1558,8 +1558,7 @@ async fn zone_transition_crosses_a_link_without_reconnecting() {
 #[tokio::test]
 #[ignore]
 async fn zone_transition_fires_plugin_join_and_leave_hooks() {
-    let config_dir =
-        setup_content_pack_config_dir_with_join_leave_plugin("zone-transition-hooks");
+    let config_dir = setup_content_pack_config_dir_with_join_leave_plugin("zone-transition-hooks");
     let _server = start_server_with_env(
         &config_dir,
         ZONE_TRANSITION_HOOKS_ADDR,
@@ -1635,9 +1634,7 @@ async fn zone_transition_fires_plugin_join_and_leave_hooks() {
     loop {
         match recv_world(&mut mover).await {
             ServerMessage::ZoneChanged {
-                zone_id,
-                entity_id,
-                ..
+                zone_id, entity_id, ..
             } if entity_id == mover_entity_id => {
                 assert_eq!(zone_id, "stonebridge-village");
                 break;
