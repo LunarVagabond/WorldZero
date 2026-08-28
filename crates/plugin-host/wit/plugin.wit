@@ -325,12 +325,15 @@ interface hooks {
     /// this hook reaches a client that's actually ready to receive it
     /// (docs/PROPOSAL.md's "Player session" hook group,
     /// `on_player_join_zone`). Fires for every zone a player is ever in
-    /// — a plugin checks `zone-id` itself if it only cares about some.
+    /// — initial connection, a mid-session zone-link crossing (#233), or
+    /// both — a plugin checks `zone-id` itself if it only cares about
+    /// some.
     on-player-join-zone: func(zone-id: string, entity-id: string);
 
-    /// Fired on a player's clean disconnect from `zone-id` — the
-    /// counterpart to `on-player-join-zone` (`on_player_leave_zone`),
-    /// same entity id.
+    /// Fired on a player's clean disconnect from `zone-id`, and also
+    /// right before a mid-session zone-link crossing carries them into a
+    /// different zone (#233) — the counterpart to `on-player-join-zone`
+    /// (`on_player_leave_zone`), same entity id.
     on-player-leave-zone: func(zone-id: string, entity-id: string);
 
     /// Fired when a player's entity enters a trigger volume in `zone-id`

@@ -1345,6 +1345,18 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
                 {
                     match deps.zones.get(&zone_id) {
                         Some(new_zone) => {
+                            // #233's plugin-hook counterpart to the chat
+                            // auto-leave/-join below — the old zone's
+                            // `on-player-leave-zone` fires here, before
+                            // this connection switches over, since
+                            // `zone`/`current_zone_id` still name the
+                            // zone being left at this point (the same
+                            // "old zone" `zone.world` reference the
+                            // initial-join/final-disconnect call sites
+                            // use, just reached from a mid-session
+                            // zone-link crossing instead).
+                            zone.world.dispatch_player_leave(entity_id).await;
+
                             // Zone-scoped chat auto-leave/-join (#186) —
                             // leave the old zone's auto-joined channels
                             // before switching `current_zone_id`, then
@@ -1357,6 +1369,16 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
                             chat_session::auto_leave_zone_channels(&mut joined_channels, &outgoing_tx);
                             current_zone_id = zone_id;
                             zone = new_zone;
+
+                            // #233: on-player-join-zone for the new
+                            // zone — the roster for it was already built
+                            // into this very `ZoneChanged` envelope
+                            // (`spawn_into_layer`), so this is "after
+                            // roster delivery" the same way the
+                            // initial-join call site is, just delivered
+                            // via a queued envelope instead of `queue()`.
+                            zone.world.dispatch_player_join(entity_id);
+
                             if let Some(chat) = &deps.chat {
                                 let blocked = deps
                                     .blocked_zone_channels
