@@ -1683,6 +1683,10 @@ async fn zone_transition_fires_plugin_join_and_leave_hooks() {
                 break;
             }
             ServerMessage::Moved { .. } => {}
+            // Roster fallout from `mover` actually leaving greenwood-forest
+            // (broadcast to `witness`, who's still there) — expected, not
+            // what this loop is asserting on.
+            ServerMessage::EntityDespawned { .. } => {}
             other => panic!("expected the last-left reply, got {other:?}"),
         }
     }
