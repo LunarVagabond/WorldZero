@@ -91,6 +91,7 @@ const HEALTH_ADDR: &str = "127.0.0.1:7948";
 const HEALTH_LISTENER_ADDR: &str = "127.0.0.1:7949";
 const HEALTH_METRICS_DISABLED_ADDR: &str = "127.0.0.1:7950";
 const HEALTH_METRICS_DISABLED_LISTENER_ADDR: &str = "127.0.0.1:7951";
+const SYSTEM_CHANNEL_ADDR: &str = "127.0.0.1:7952";
 
 struct ServerProcess {
     child: Child,
@@ -191,6 +192,27 @@ async fn guild_chat_channel_id(guild_name: &str) -> Option<uuid::Uuid> {
         .fetch_one(&pool)
         .await
         .unwrap()
+}
+
+/// Direct DB read of a system channel's id by `(zone_id, category)` —
+/// same shape as `guild_chat_channel_id` above, and the same lookup
+/// `chat::store::ChannelStore::find_zone_channel` uses internally —
+/// proving `SystemChannelConfig::ensure_channels` (#234) actually
+/// created the row at real server startup rather than trusting a
+/// client-facing message.
+async fn system_channel_id(zone_id: Option<&str>, category: &str) -> Option<uuid::Uuid> {
+    let pg_config = common::config::PostgresConfig::from_env().expect("WZ_POSTGRES_* env vars set");
+    let pool = common::pool::postgres_pool(&pg_config, common::pool::PoolOptions::default())
+        .await
+        .expect("failed to connect to Postgres to read a system channel id");
+    sqlx::query_scalar(
+        "SELECT id FROM chat_channels WHERE channel_type = 'zone' AND zone_id IS NOT DISTINCT FROM $1 AND category = $2",
+    )
+    .bind(zone_id)
+    .bind(category)
+    .fetch_optional(&pool)
+    .await
+    .unwrap()
 }
 
 /// Every account currently a member of chat channel `channel_id` (#179's
@@ -4192,4 +4214,36 @@ async fn a_transfer_into_an_open_realm_is_rejected_with_a_clear_reason() {
         recv_world(&mut stream).await,
         ServerMessage::Joined { .. }
     ));
+}
+
+/// #234: `SystemChannelConfig::ensure_channels` was implemented and
+/// tested (`crates/chat/src/schema.rs`) but nothing in `server::main`
+/// ever called it, so a declared `global`-scope category (e.g. `trade`)
+/// never actually got created — nothing else in the codebase triggers
+/// it. Proves the real fix: after a fresh server startup with a
+/// `chat.yaml` declaring a `global`-scope `trade` category, that
+/// channel already exists in the database with no client having
+/// joined, sent a message, or done anything else chat-related.
+#[tokio::test]
+#[ignore]
+async fn declared_global_system_channel_exists_after_server_startup() {
+    let config_dir = setup_config_dir("system-channels");
+    std::fs::write(
+        config_dir.join("chat.yaml"),
+        r#"
+schema_version: 1
+system_channels:
+  - category: trade
+    scope: global
+"#,
+    )
+    .unwrap();
+
+    let _server = start_server(&config_dir, SYSTEM_CHANNEL_ADDR).await;
+    wait_for_port(SYSTEM_CHANNEL_ADDR).await;
+
+    assert!(
+        system_channel_id(None, "trade").await.is_some(),
+        "expected the declared global-scope `trade` channel to exist right after startup"
+    );
 }
