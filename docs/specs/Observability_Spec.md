@@ -110,6 +110,17 @@ OpenTelemetry-compatible spans, layered onto the exact same `tracing` instrument
 
 **Hot-path overhead:** measured, not assumed — `world::zone::tests::tick_span_overhead_is_negligible` runs 1,000 instrumented ticks under a real (non-no-op) subscriber and confirms the total stays several orders of magnitude under the 20Hz tick budget (50ms/tick).
 
+## Service instance registry (#134)
+
+`service-registry` (per decision #132) gives a running service instance a way to announce its own presence — register/heartbeat/deregister/query, Redis-backed with a TTL so a crashed instance simply expires out of `query` rather than needing a separate liveness check, plus pub/sub notification on register/deregister. Its public API doesn't leak the Redis backing — callers see `ServiceRegistry`/`InstanceInfo`/`RegistryEvent`, not a Redis client.
+
+This crate has no caller yet: `server` is still one combined process (`crates/server/src/zone_registry.rs`), so there's no independently-registerable instance to wire it to. That means the two forward-looking observability hooks this registry sets up for are still deferred rather than real today:
+
+- Per-instance `service.name`/`instance_id` distinguishing one running instance's spans/logs/metrics from another's of the same service — currently moot since #49's tracing setup and the metrics/health endpoints above are all still scoped to one combined process.
+- The admin API (below) listing live instances by querying this registry.
+
+Both are expected to land alongside #130 (the multi-process split this registry exists to support), not as part of this crate itself.
+
 ## The admin API
 
 Still placeholder — the admin/introspection API surface (#56) is designed at a high level in the proposal but not yet at spec detail.
