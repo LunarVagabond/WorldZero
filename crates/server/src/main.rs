@@ -397,9 +397,30 @@ async fn main() {
             auto_join_category_count = auto_join_categories.len(),
             "loaded chat.yaml system channel declarations"
         );
+        let store = Arc::new(chat::ChannelStore::new(pool.clone()));
+        // #234: `ensure_channels` was implemented and tested but nothing
+        // ever called it, so a declared `global`-scope category (e.g.
+        // `trade`/`lfg`) never actually got created. `zone_manifests` is
+        // still intact here — consumed only by the per-zone-actor loop
+        // further down — so this is the full set of zone ids known at
+        // startup, covering every declared `zone`-scope category too.
+        let known_zone_ids: Vec<String> = zone_manifests
+            .iter()
+            .map(|manifest| manifest.id.clone())
+            .collect();
+        let system_channel_ids = system_channels
+            .ensure_channels(&store, &known_zone_ids)
+            .await
+            .unwrap_or_else(|e| {
+                panic!("failed to ensure declared chat.yaml system channels exist: {e}")
+            });
+        tracing::info!(
+            system_channel_count = system_channel_ids.len(),
+            "ensured declared chat.yaml system channels exist"
+        );
         Some(chat_session::ChatDeps {
             pool: pool.clone(),
-            store: Arc::new(chat::ChannelStore::new(pool.clone())),
+            store,
             bus: Arc::new(chat::ChatBus::new(
                 redis.clone(),
                 redis_config.clone(),
