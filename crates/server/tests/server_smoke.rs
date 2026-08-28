@@ -92,6 +92,7 @@ const HEALTH_LISTENER_ADDR: &str = "127.0.0.1:7949";
 const HEALTH_METRICS_DISABLED_ADDR: &str = "127.0.0.1:7950";
 const HEALTH_METRICS_DISABLED_LISTENER_ADDR: &str = "127.0.0.1:7951";
 const SYSTEM_CHANNEL_ADDR: &str = "127.0.0.1:7952";
+const ZONE_TRANSITION_HOOKS_ADDR: &str = "127.0.0.1:7953";
 
 struct ServerProcess {
     child: Child,
@@ -816,6 +817,43 @@ fn setup_content_pack_config_dir(test_name: &str) -> PathBuf {
     config_dir
 }
 
+/// Same content pack as `setup_content_pack_config_dir` (two zones,
+/// linked), plus `test-plugin` attached with only
+/// `on-player-join-zone`/`on-player-leave-zone` declared (#233) —
+/// deliberately *not* `on-zone-loaded`, so this never spawns
+/// `test-plugin`'s usual `wolf-pack-01` NPC into either zone, which would
+/// otherwise pollute the empty-roster assertions the plain zone-transition
+/// tests rely on. Only writes the plugin config if the fixture wasm was
+/// actually built, same gate `setup_config_dir` uses.
+fn setup_content_pack_config_dir_with_join_leave_plugin(test_name: &str) -> PathBuf {
+    let config_dir = setup_content_pack_config_dir(test_name);
+
+    let plugin_wasm = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+        "../plugin-host/tests/fixtures/test-plugin/target/wasm32-wasip2/release/test_plugin.wasm",
+    );
+    assert!(
+        plugin_wasm.exists(),
+        "test-plugin must be built for wasm32-wasip2 first — see server_smoke.rs's own doc comment"
+    );
+    let plugin_dir = config_dir.join("plugins").join("test-plugin");
+    std::fs::create_dir_all(&plugin_dir).unwrap();
+    std::fs::copy(&plugin_wasm, plugin_dir.join("test_plugin.wasm")).unwrap();
+    std::fs::write(
+        plugin_dir.join("plugin.toml"),
+        r#"
+[plugin]
+name = "test-plugin"
+host_api_version = "0.12.0"
+capabilities = ["combat", "messaging"]
+message_types = [1000]
+hooks = ["on-player-join-zone", "on-player-leave-zone"]
+"#,
+    )
+    .unwrap();
+
+    config_dir
+}
+
 #[tokio::test]
 #[ignore]
 async fn connect_register_move_and_persist_across_reconnect() {
@@ -1496,6 +1534,159 @@ async fn zone_transition_crosses_a_link_without_reconnecting() {
                 panic!("expected the cross-zone move to be accepted, was rejected: {reason}");
             }
             _ => {}
+        }
+    }
+}
+
+/// #233: a real zone-link crossing (same mechanics as the test above)
+/// must fire `on-player-leave-zone` for the zone being left and
+/// `on-player-join-zone` for the zone being entered, not just at initial
+/// connection/final disconnect.
+///
+/// Proven two ways on the same crossing: the crossing connection itself
+/// (`mover`) sees a second `on-player-join-zone` "welcome" `PluginMessage`
+/// after its `ZoneChanged` into stonebridge-village, on top of the one it
+/// already got joining greenwood-forest initially — direct proof the join
+/// hook fired again for the new zone. A second connection (`witness`)
+/// stays behind in greenwood-forest and, after the crossing, queries
+/// `test-plugin`'s zone-scoped `last-left-entity` state (the same
+/// `message_type` 1000 path `player_join_and_leave_hooks_fire_for_real`
+/// uses) and gets `mover`'s own entity id back — proof the leave hook
+/// fired for greenwood-forest specifically, while `mover`'s connection is
+/// still alive and playing in a different zone, not just recorded once at
+/// eventual disconnect.
+#[tokio::test]
+#[ignore]
+async fn zone_transition_fires_plugin_join_and_leave_hooks() {
+    let config_dir =
+        setup_content_pack_config_dir_with_join_leave_plugin("zone-transition-hooks");
+    let _server = start_server_with_env(
+        &config_dir,
+        ZONE_TRANSITION_HOOKS_ADDR,
+        true,
+        &[("WZ_WORLD_MAX_SPEED_MPS", "1000000")],
+    )
+    .await;
+    wait_for_port(ZONE_TRANSITION_HOOKS_ADDR).await;
+
+    let mut mover = connect(&config_dir, ZONE_TRANSITION_HOOKS_ADDR).await;
+    register_and_authenticate(
+        &mut mover,
+        &format!("zone-transition-hooks-mover-{}", uuid::Uuid::now_v7()),
+        "hunter2",
+        _server.realm_id,
+    )
+    .await;
+    let mover_entity_id = loop {
+        if let ServerMessage::Joined { entity_id, .. } = recv_world(&mut mover).await {
+            break entity_id;
+        }
+    };
+    // Drain the initial-join greeting (#155) before the crossing, so the
+    // post-crossing loop below can't mistake it for the new one.
+    loop {
+        match recv_world(&mut mover).await {
+            ServerMessage::PluginMessage { body } => {
+                assert!(body.contains("welcome"), "{body}");
+                assert!(body.contains(&mover_entity_id), "{body}");
+                break;
+            }
+            ServerMessage::Moved { .. } => {}
+            other => panic!("expected mover's initial on-player-join-zone greeting, got {other:?}"),
+        }
+    }
+
+    let mut witness = connect(&config_dir, ZONE_TRANSITION_HOOKS_ADDR).await;
+    register_and_authenticate(
+        &mut witness,
+        &format!("zone-transition-hooks-witness-{}", uuid::Uuid::now_v7()),
+        "hunter2",
+        _server.realm_id,
+    )
+    .await;
+    loop {
+        if let ServerMessage::Joined { .. } = recv_world(&mut witness).await {
+            break;
+        }
+    }
+    // Drain witness's own initial-join greeting too, so it doesn't get
+    // mistaken for the "last-left" reply queried below.
+    loop {
+        match recv_world(&mut witness).await {
+            ServerMessage::PluginMessage { .. } => break,
+            ServerMessage::Moved { .. } => {}
+            other => panic!("expected witness's own join greeting, got {other:?}"),
+        }
+    }
+
+    // Same cross-zone move as the plain zone-transition test above —
+    // greenwood-forest's link to stonebridge-village sits at x=500,
+    // y in [200,300].
+    send_world(
+        &mut mover,
+        &ClientMessage::Move {
+            x: 505.0,
+            y: 250.0,
+            seq: 1,
+        },
+    )
+    .await;
+
+    loop {
+        match recv_world(&mut mover).await {
+            ServerMessage::ZoneChanged {
+                zone_id,
+                entity_id,
+                ..
+            } if entity_id == mover_entity_id => {
+                assert_eq!(zone_id, "stonebridge-village");
+                break;
+            }
+            ServerMessage::Rejected { reason, .. } => {
+                panic!("expected the cross-zone move to be accepted, was rejected: {reason}");
+            }
+            _ => {}
+        }
+    }
+
+    // The new zone's own on-player-join-zone greeting — proves the join
+    // hook fired again for stonebridge-village, not just once at initial
+    // connection.
+    loop {
+        match recv_world(&mut mover).await {
+            ServerMessage::PluginMessage { body } => {
+                assert!(body.contains("welcome"), "{body}");
+                assert!(body.contains(&mover_entity_id), "{body}");
+                break;
+            }
+            ServerMessage::Moved { .. } => {}
+            other => panic!(
+                "expected mover's post-crossing on-player-join-zone greeting for stonebridge-village, got {other:?}"
+            ),
+        }
+    }
+
+    // Query greenwood-forest's own zone-scoped `last-left-entity` state
+    // (#149) from `witness`, who's still there — only reachable if
+    // `on-player-leave-zone` actually fired for greenwood-forest when
+    // `mover` crossed out of it, since `mover`'s connection is still
+    // alive and hasn't disconnected at all.
+    witness
+        .send(gateway::Envelope::new(1000, b"last-left".to_vec()))
+        .await
+        .unwrap();
+    loop {
+        match recv_world(&mut witness).await {
+            ServerMessage::PluginMessage { body } => {
+                assert!(
+                    body.contains(&mover_entity_id),
+                    "expected on-player-leave-zone to have recorded {mover_entity_id} for \
+                     greenwood-forest, got {body:?}"
+                );
+                break;
+            }
+            ServerMessage::Moved { .. } => {}
+            other => panic!("expected the last-left reply, got {other:?}"),
         }
     }
 }
