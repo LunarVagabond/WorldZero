@@ -64,6 +64,25 @@ impl ClientMessage {
     pub fn from_envelope(envelope: &Envelope) -> Result<Self> {
         decode::<proto::ClientMessage>(envelope)?.try_into()
     }
+
+    /// Reads a `Send`'s `body` without validating `channel_id` as a UUID.
+    ///
+    /// A plugin-declared chat-command dispatch (`server::session`'s
+    /// `plugin_chat_command`) matches on `body` alone and never looks at
+    /// `channel_id`, but the full `from_envelope`/`TryFrom` path always
+    /// requires `channel_id` to parse as a well-formed `ChannelId` even on
+    /// that path — forcing a command-only client to invent a placeholder
+    /// UUID it never uses. Callers that only need to check for a command
+    /// match should use this first and fall back to `from_envelope` (which
+    /// does validate `channel_id`) once they know the message isn't one.
+    pub fn peek_send_body(envelope: &Envelope) -> Result<Option<String>> {
+        use proto::client_message::Kind;
+        let decoded = decode::<proto::ClientMessage>(envelope)?;
+        Ok(match decoded.kind {
+            Some(Kind::Send(proto::Send { body, .. })) => Some(body),
+            _ => None,
+        })
+    }
 }
 
 impl ServerMessage {

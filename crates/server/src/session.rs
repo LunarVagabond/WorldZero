@@ -1276,13 +1276,15 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
                             }).await?;
                         }
                         Some(chat) => {
-                            let parsed = chat::gateway_protocol::ClientMessage::from_envelope(&envelope);
-                            let command_send = match &parsed {
-                                Ok(chat::gateway_protocol::ClientMessage::Send { body, .. }) => {
-                                    plugin_chat_command(&deps.plugin_chat_commands, body)
-                                }
-                                _ => None,
-                            };
+                            // Check for a plugin-command match on `body` alone
+                            // before doing the full parse below, which also
+                            // validates `channel_id` as a well-formed UUID —
+                            // irrelevant to a command dispatch that never
+                            // looks at `channel_id` at all.
+                            let command_send = chat::gateway_protocol::ClientMessage::peek_send_body(&envelope)
+                                .ok()
+                                .flatten()
+                                .and_then(|body| plugin_chat_command(&deps.plugin_chat_commands, &body));
                             if let Some((command, args)) = command_send {
                                 // A matched command is consumed here — never
                                 // also forwarded to
@@ -1290,6 +1292,7 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
                                 // an ordinary chat message (#57).
                                 zone.world.dispatch_chat_command(command, args, entity_id);
                             } else {
+                                let parsed = chat::gateway_protocol::ClientMessage::from_envelope(&envelope);
                                 match parsed {
                                     Ok(message) => {
                                         if let Some(reply) = chat_session::handle_message(
