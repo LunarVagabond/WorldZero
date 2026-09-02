@@ -40,6 +40,11 @@ message RealmSummary {
   string realm_id = 1;
   string name = 2;
   string open_or_bound = 3;
+  // Census of characters whose realm_id row is this specific realm, not
+  // "characters the connecting account can select here" — for an `open`
+  // realm those differ, since ListCharacters spans every open realm's
+  // characters for that account. See RealmSummary's Rust doc comment
+  // (server::realm_protocol) for the full explanation.
   int64 character_count = 4;
   uint64 live_connection_count = 5;
 }

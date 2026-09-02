@@ -45,6 +45,17 @@ pub struct RealmSummary {
     pub realm_id: String,
     pub name: String,
     pub open_or_bound: String,
+    /// A strict census of characters whose `characters.realm_id` row is
+    /// *this specific realm* (`character::CharacterStore::count_for_realm`)
+    /// — a population number, not "characters this account can select
+    /// here". For an `open`-policy realm those are different things: the
+    /// character *list* a client actually gets back (`ListCharacters` →
+    /// `realm_directory::login_policy::list_characters` →
+    /// `CharacterStore::list_by_account_in_open_realms`) spans every open
+    /// realm's characters for that account, not just this one, by design
+    /// (open realms share one character pool). A realm-select picker
+    /// showing `character_count: 0` for an open realm does not mean the
+    /// connecting account has no characters selectable there.
     pub character_count: i64,
     pub live_connection_count: u64,
 }

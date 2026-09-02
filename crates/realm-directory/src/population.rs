@@ -30,6 +30,13 @@ use uuid::Uuid;
 /// both are computed from" framing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RealmPopulation {
+    /// Strict single-realm census (`CharacterStore::count_for_realm`) — for
+    /// an `open`-policy realm this is *not* the same number as "characters
+    /// the requesting account can select here", since selection
+    /// (`CharacterStore::list_by_account_in_open_realms`) deliberately
+    /// spans every open realm's characters for that account, not just this
+    /// one. A caller surfacing this on a realm picker should label it as a
+    /// realm-specific census, not a selectable-character count.
     pub character_count: i64,
     pub live_connections: u64,
 }
