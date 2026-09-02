@@ -22,6 +22,7 @@ use std::sync::{Arc, Mutex};
 use common::Result;
 use common::id::EntityId;
 use plugin_host::{HostCallbacks, LoadedPlugin, PluginHost, PluginManifest, PluginStateScope};
+use plugin_host::manifest::KNOWN_HOOKS;
 
 use crate::plugin_state::{PluginStateCache, cache_key};
 use crate::session::{BlockedZoneChannels, EntityRoles, Sessions};
@@ -485,6 +486,26 @@ pub fn load_plugin(
         pending_respawns: pending_respawns.clone(),
         blocked_zone_channels,
     };
+
+    // A plugin's compiled component always exports every hook function in
+    // the WIT `Guest` interface regardless of whether the author wrote real
+    // logic into it — `hooks` (this plugin's declared opt-in list) is the
+    // only thing that gates whether the host ever calls it (`wants` above).
+    // Implementing a hook without declaring it here compiles and loads
+    // fine; the hook then just silently never fires. Surface the gap at
+    // load time rather than leaving it to be found by reading source.
+    let undeclared_hooks: Vec<&str> = KNOWN_HOOKS
+        .iter()
+        .copied()
+        .filter(|known| !hooks.iter().any(|h| h == known))
+        .collect();
+    if !undeclared_hooks.is_empty() {
+        tracing::debug!(
+            plugin = %name,
+            ?undeclared_hooks,
+            "hooks not declared in plugin.toml's `hooks` list — even if implemented, these will never be called"
+        );
+    }
 
     let mut plugin = host.load(manifest, wasm_path, Box::new(callbacks))?;
     if hooks.iter().any(|h| h == "on-load") {
