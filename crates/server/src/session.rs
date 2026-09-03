@@ -855,6 +855,7 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
             z: position.2,
             roster,
             tick: join_tick,
+            zone_id: current_zone_id.clone(),
         },
     );
 

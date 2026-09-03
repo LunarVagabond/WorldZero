@@ -332,6 +332,7 @@ message Joined {
   repeated RosterEntry roster = 4;
   uint64 tick = 5;
   double z = 6;
+  string zone_id = 7;
 }
 
 // An entity (never this connection's own) newly exists in the zone.
