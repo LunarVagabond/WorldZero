@@ -143,13 +143,16 @@ impl Guest for Plugin {
         entity_id: String,
         _x: f64,
         _y: f64,
+        z: f64,
         route_waypoints: Vec<(f64, f64)>,
         _route_loop: bool,
         _route_speed: f64,
         _dt: f64,
     ) {
         if let Some((wx, wy)) = route_waypoints.first() {
-            let _ = worldzero::plugin::host::move_entity(&entity_id, *wx, *wy);
+            // Route waypoints are 2D (manifest-declared) — hold the
+            // NPC's current z steady rather than inventing one.
+            let _ = worldzero::plugin::host::move_entity(&entity_id, *wx, *wy, z);
         }
     }
 

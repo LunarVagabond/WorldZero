@@ -78,6 +78,7 @@ impl Guest for Plugin {
         _entity_id: String,
         _x: f64,
         _y: f64,
+        _z: f64,
         _route_waypoints: Vec<(f64, f64)>,
         _route_loop: bool,
         _route_speed: f64,

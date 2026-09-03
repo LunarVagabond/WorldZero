@@ -83,8 +83,14 @@ pub trait HostCallbacks: Send + 'static {
     /// Queues a move for `entity_id` (`wit/plugin.wit`'s `move-entity`)
     /// — applied and validated on the zone's next tick through the same
     /// path a player's own movement goes through, never a direct
-    /// position write.
-    fn move_entity(&mut self, entity_id: &str, x: f64, y: f64) -> std::result::Result<(), String>;
+    /// position write. `z` is authoritative, same as `x`/`y` (#249).
+    fn move_entity(
+        &mut self,
+        entity_id: &str,
+        x: f64,
+        y: f64,
+        z: f64,
+    ) -> std::result::Result<(), String>;
 
     /// Grants an item stack (`wit/plugin.wit`'s `grant-item`) — queued,
     /// applied through `character::CharacterStore::grant_item` (#112).
@@ -265,9 +271,15 @@ impl HostCallbacks for CapabilityGatedCallbacks {
             .apply_stat_delta_for_character(character_id, stat_key, delta)
     }
 
-    fn move_entity(&mut self, entity_id: &str, x: f64, y: f64) -> std::result::Result<(), String> {
+    fn move_entity(
+        &mut self,
+        entity_id: &str,
+        x: f64,
+        y: f64,
+        z: f64,
+    ) -> std::result::Result<(), String> {
         self.check("move-entity")?;
-        self.inner.move_entity(entity_id, x, y)
+        self.inner.move_entity(entity_id, x, y, z)
     }
 
     fn grant_item(
@@ -394,8 +406,9 @@ impl HostInterface for PluginState {
         entity_id: String,
         x: f64,
         y: f64,
+        z: f64,
     ) -> std::result::Result<(), String> {
-        self.callbacks.move_entity(&entity_id, x, y)
+        self.callbacks.move_entity(&entity_id, x, y, z)
     }
 
     fn grant_item(
@@ -777,6 +790,7 @@ impl LoadedPlugin {
         entity_id: &str,
         x: f64,
         y: f64,
+        z: f64,
         route_waypoints: &[(f64, f64)],
         route_loop: bool,
         route_speed: f64,
@@ -790,6 +804,7 @@ impl LoadedPlugin {
                 entity_id,
                 x,
                 y,
+                z,
                 route_waypoints,
                 route_loop,
                 route_speed,
@@ -908,7 +923,13 @@ mod tests {
         ) -> std::result::Result<(), String> {
             Ok(())
         }
-        fn move_entity(&mut self, _: &str, _: f64, _: f64) -> std::result::Result<(), String> {
+        fn move_entity(
+            &mut self,
+            _: &str,
+            _: f64,
+            _: f64,
+            _: f64,
+        ) -> std::result::Result<(), String> {
             Ok(())
         }
         fn grant_item(&mut self, _: &str, _: &str, _: i64) -> std::result::Result<(), String> {
@@ -980,7 +1001,7 @@ mod tests {
         let mut none = gated(&[]);
         assert!(none.spawn_npc("table").is_err());
         assert!(none.send_message("e1", "hi").is_err());
-        assert!(none.move_entity("e1", 0.0, 0.0).is_err());
+        assert!(none.move_entity("e1", 0.0, 0.0, 0.0).is_err());
         assert!(none.apply_stat_delta("e1", "hp", -1).is_err());
         assert!(none.apply_stat_delta_for_character("c1", "hp", -1).is_err());
         assert!(none.report_death("e1").is_err());
@@ -992,7 +1013,7 @@ mod tests {
 
         let mut spawning = gated(&["spawning"]);
         assert!(spawning.spawn_npc("table").is_ok());
-        assert!(spawning.move_entity("e1", 0.0, 0.0).is_err());
+        assert!(spawning.move_entity("e1", 0.0, 0.0, 0.0).is_err());
 
         let mut messaging = gated(&["messaging"]);
         assert!(messaging.send_message("e1", "hi").is_ok());
@@ -1000,7 +1021,7 @@ mod tests {
         assert!(messaging.spawn_npc("table").is_err());
 
         let mut movement = gated(&["movement"]);
-        assert!(movement.move_entity("e1", 0.0, 0.0).is_ok());
+        assert!(movement.move_entity("e1", 0.0, 0.0, 0.0).is_ok());
         assert!(movement.apply_stat_delta("e1", "hp", -1).is_err());
 
         let mut combat = gated(&["combat"]);
