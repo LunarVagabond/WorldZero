@@ -15,7 +15,7 @@ EXAMPLE_PLUGIN_WASM := $(EXAMPLE_PLUGIN_DIR)/target/wasm32-wasip2/release/exampl
 # their own WZ_REALM_ID in .env skips this file entirely.
 QUICKSTART_REALM_ID_FILE := $(RUN_DIR)/quickstart_realm_id
 
-.PHONY: help build run quickstart start stop restart status test test-live fmt fmt-check lint check clean migrate migrate-down chat-server chat realm docker-up docker-down docker-status docker-logs
+.PHONY: help build run quickstart start stop restart status test test-live fmt fmt-check lint check clean migrate migrate-down chat-server chat realm role docker-up docker-down docker-status docker-logs
 
 help:
 	@echo "WorldZero — local dev commands"
@@ -39,6 +39,8 @@ help:
 	@echo "  make migrate-down  revert the most recently applied migration (its .down.sql)"
 	@echo "  make realm ARGS='create MyRealm open'   realm-directory CLI (create/ensure/list/get/update/"
 	@echo "                     delete/assign-zone/unassign-zone — needs WZ_POSTGRES_*, run 'make realm ARGS=' for full usage)"
+	@echo "  make role ARGS='grant alice admin'      auth account-role CLI (grant/revoke/list — needs"
+	@echo "                     WZ_POSTGRES_*, run 'make role ARGS=' for full usage)"
 	@echo "  make chat-server   run the chat gateway demo server (TCP+TLS+auth, routes into chat) — start this first"
 	@echo "  make chat NAME=x   run an interactive chat demo client as username 'x' (gateway mode by default,"
 	@echo "                     needs ARGS='--password <pw>' — add --register on first use to create the account;"
@@ -138,6 +140,9 @@ migrate-down:
 
 realm:
 	$(CARGO) run -p realm-directory --bin realm -- $(ARGS)
+
+role:
+	$(CARGO) run -p auth --bin role -- $(ARGS)
 
 chat-server:
 	$(CARGO) run -p chat --bin gateway_server
