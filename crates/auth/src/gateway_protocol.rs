@@ -46,6 +46,12 @@ pub enum ServerMessage {
         account_id: AccountId,
         username: String,
         session_token: String,
+        /// Global-scope v0 account roles (docs/specs/Auth_Spec.md's
+        /// "Account roles") held by this account right now — empty if
+        /// none. So a client can build an admin-only UI directly, rather
+        /// than inventing an ad-hoc convention for something the server
+        /// already knows.
+        roles: Vec<String>,
     },
     Error {
         message: String,
@@ -120,10 +126,12 @@ impl From<&ServerMessage> for proto::ServerMessage {
                 account_id,
                 username,
                 session_token,
+                roles,
             } => Kind::Authenticated(proto::Authenticated {
                 account_id: account_id.to_string(),
                 username: username.clone(),
                 session_token: session_token.clone(),
+                roles: roles.clone(),
             }),
             ServerMessage::Error { message } => Kind::Error(proto::Error {
                 message: message.clone(),
@@ -143,12 +151,14 @@ impl TryFrom<proto::ServerMessage> for ServerMessage {
                 account_id,
                 username,
                 session_token,
+                roles,
             })) => Ok(ServerMessage::Authenticated {
                 account_id: account_id
                     .parse()
                     .map_err(|e| Error::wrap("auth", "invalid account_id in wire message", e))?,
                 username,
                 session_token,
+                roles,
             }),
             Some(Kind::Error(proto::Error { message })) => Ok(ServerMessage::Error { message }),
             None => Err(Error::new("auth", "gateway auth message has no kind set")),
@@ -221,11 +231,30 @@ mod tests {
             account_id: AccountId::new(),
             username: "alice".to_string(),
             session_token: "tok".to_string(),
+            roles: vec!["admin".to_string(), "dev".to_string()],
         };
         let envelope = message.into_envelope().unwrap();
         let decoded = ServerMessage::from_envelope(&envelope).unwrap();
-        assert!(
-            matches!(decoded, ServerMessage::Authenticated { username, .. } if username == "alice")
-        );
+        assert!(matches!(
+            decoded,
+            ServerMessage::Authenticated { username, roles, .. }
+                if username == "alice" && roles == ["admin", "dev"]
+        ));
+    }
+
+    #[test]
+    fn server_message_authenticated_round_trips_no_roles() {
+        let message = ServerMessage::Authenticated {
+            account_id: AccountId::new(),
+            username: "bob".to_string(),
+            session_token: "tok".to_string(),
+            roles: Vec::new(),
+        };
+        let envelope = message.into_envelope().unwrap();
+        let decoded = ServerMessage::from_envelope(&envelope).unwrap();
+        assert!(matches!(
+            decoded,
+            ServerMessage::Authenticated { roles, .. } if roles.is_empty()
+        ));
     }
 }

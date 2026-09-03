@@ -325,12 +325,14 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
             }
         };
 
+    let roles = deps.role_store.roles_for(account_id).await?;
     send_auth(
         &mut sink,
         &auth::gateway_protocol::ServerMessage::Authenticated {
             account_id,
             username: username.clone(),
             session_token,
+            roles,
         },
     )
     .await?;

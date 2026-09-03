@@ -52,6 +52,12 @@ message Authenticated {
   string account_id = 1;
   string username = 2;
   string session_token = 3;
+  // Global-scope v0 account roles (docs/specs/Auth_Spec.md's "Account
+  // roles") held by this account right now, in no particular order —
+  // empty if none. Lets a client build an admin-only UI without
+  // inventing its own ad-hoc convention for a question the server
+  // already has a structured answer to.
+  repeated string roles = 4;
 }
 
 message Error {

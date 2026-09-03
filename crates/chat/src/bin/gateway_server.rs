@@ -153,6 +153,10 @@ async fn handle_session(
             account_id,
             username,
             session_token,
+            // This demo server has no AccountRoleStore wired in — roles
+            // are a real `server::session` concern, not this crate's demo
+            // gateway.
+            roles: Vec::new(),
         },
     )
     .await?;
