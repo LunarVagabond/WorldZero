@@ -116,6 +116,25 @@ impl CharacterSessionLease {
         Ok(())
     }
 
+    /// Whether `character_id` currently has an unexpired lease held by
+    /// any zone-service instance — a plain read, no side effects (unlike
+    /// [`Self::acquire`]). For a caller that just wants to know, e.g.
+    /// `server::session`'s `DeleteCharacter` guarding against deleting a
+    /// character that's currently connected somewhere (#246); mirrors
+    /// [`crate::bound_liveness::BoundRealmLiveness::is_live_now`]'s shape
+    /// for the open-realm side of that same check.
+    pub async fn is_active(&self, character_id: CharacterId) -> Result<bool> {
+        let row = sqlx::query(
+            "SELECT 1 FROM character_sessions WHERE character_id = $1 AND expires_at > now()",
+        )
+        .bind(character_id.as_uuid())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| Error::wrap("character", "failed to check session lease activity", e))?;
+
+        Ok(row.is_some())
+    }
+
     /// The clean-shutdown path — removes the lease immediately rather
     /// than waiting out its TTL. A harmless no-op if no lease is held
     /// (already expired, or never acquired), since a disconnect handler
@@ -193,6 +212,27 @@ mod tests {
         assert_eq!(outcome, LeaseOutcome::Acquired);
 
         lease.release(character_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn is_active_reflects_an_acquired_lease() {
+        let (lease, character_id, realm_id) = lease_with_character().await;
+        assert!(!lease.is_active(character_id).await.unwrap());
+
+        lease
+            .acquire(
+                character_id,
+                realm_id,
+                "zone-service-a",
+                Duration::from_secs(30),
+            )
+            .await
+            .unwrap();
+        assert!(lease.is_active(character_id).await.unwrap());
+
+        lease.release(character_id).await.unwrap();
+        assert!(!lease.is_active(character_id).await.unwrap());
     }
 
     #[tokio::test]

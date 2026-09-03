@@ -71,6 +71,7 @@ const CHARACTER_CAP_ADDR: &str = "127.0.0.1:7928";
 const CHARACTER_CREATE_HOOK_ADDR: &str = "127.0.0.1:7929";
 const SESSION_RESUME_ADDR: &str = "127.0.0.1:7930";
 const ACCOUNT_ROLES_ADDR: &str = "127.0.0.1:7954";
+const DELETE_CHARACTER_ADDR: &str = "127.0.0.1:7955";
 const SESSION_RESUME_INVALID_ADDR: &str = "127.0.0.1:7931";
 const MOVE_CORRELATION_ADDR: &str = "127.0.0.1:7932";
 const PING_PONG_ADDR: &str = "127.0.0.1:7933";
@@ -2624,6 +2625,178 @@ async fn an_account_can_create_list_and_select_between_multiple_characters() {
         }
         other => panic!("expected Joined, got {other:?}"),
     }
+}
+
+/// #246: `DeleteCharacter` — ownership-checked (rejects someone else's
+/// character), rejects deleting a character that's currently connected,
+/// and on success the character is really gone (no longer listed, and a
+/// second delete attempt errors instead of silently "succeeding" again).
+#[tokio::test]
+#[ignore]
+async fn delete_character_removes_it_and_is_ownership_and_liveness_checked() {
+    let config_dir = setup_config_dir("delete-character");
+    let _server = start_server(&config_dir, DELETE_CHARACTER_ADDR).await;
+    wait_for_port(DELETE_CHARACTER_ADDR).await;
+
+    let username = format!("delete-character-{}", uuid::Uuid::now_v7());
+    let password = "hunter2";
+
+    let mut stream = connect(&config_dir, DELETE_CHARACTER_ADDR).await;
+    send_auth(
+        &mut stream,
+        &AuthClientMessage::Register {
+            username: username.clone(),
+            password: password.to_string(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv_auth(&mut stream).await,
+        AuthServerMessage::Authenticated { .. }
+    ));
+    select_realm(&mut stream, _server.realm_id).await;
+
+    send_character(
+        &mut stream,
+        &CharacterClientMessage::CreateCharacter {
+            name: "Aria".to_string(),
+            archetype_key: String::new(),
+        },
+    )
+    .await;
+    let aria_id = match recv_character(&mut stream).await {
+        CharacterServerMessage::CharacterCreated { character_id } => character_id,
+        other => panic!("expected a CharacterCreated, got {other:?}"),
+    };
+    send_character(
+        &mut stream,
+        &CharacterClientMessage::CreateCharacter {
+            name: "Bram".to_string(),
+            archetype_key: String::new(),
+        },
+    )
+    .await;
+    let bram_id = match recv_character(&mut stream).await {
+        CharacterServerMessage::CharacterCreated { character_id } => character_id,
+        other => panic!("expected a CharacterCreated, got {other:?}"),
+    };
+
+    // A second account cannot delete Aria — ownership-checked the same
+    // way SelectCharacter/RequestTransfer are.
+    let other_username = format!("delete-character-other-{}", uuid::Uuid::now_v7());
+    let mut other_stream = connect(&config_dir, DELETE_CHARACTER_ADDR).await;
+    send_auth(
+        &mut other_stream,
+        &AuthClientMessage::Register {
+            username: other_username,
+            password: password.to_string(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv_auth(&mut other_stream).await,
+        AuthServerMessage::Authenticated { .. }
+    ));
+    select_realm(&mut other_stream, _server.realm_id).await;
+    send_character(
+        &mut other_stream,
+        &CharacterClientMessage::DeleteCharacter {
+            character_id: aria_id.clone(),
+        },
+    )
+    .await;
+    match recv_character(&mut other_stream).await {
+        CharacterServerMessage::Error { message } => {
+            assert!(message.contains("not one of your characters"), "{message}");
+        }
+        other => panic!("expected an Error, got {other:?}"),
+    }
+    drop(other_stream);
+
+    // Select and join Bram on this connection, then try to delete Bram
+    // from a second connection on the same account — rejected while
+    // it's connected.
+    send_character(
+        &mut stream,
+        &CharacterClientMessage::SelectCharacter {
+            character_id: bram_id.clone(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv_character(&mut stream).await,
+        CharacterServerMessage::CharacterSelected { .. }
+    ));
+    assert!(matches!(
+        recv_world(&mut stream).await,
+        ServerMessage::Joined { .. }
+    ));
+
+    let mut second_stream = connect(&config_dir, DELETE_CHARACTER_ADDR).await;
+    send_auth(
+        &mut second_stream,
+        &AuthClientMessage::Login {
+            username: username.clone(),
+            password: password.to_string(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv_auth(&mut second_stream).await,
+        AuthServerMessage::Authenticated { .. }
+    ));
+    select_realm(&mut second_stream, _server.realm_id).await;
+    send_character(
+        &mut second_stream,
+        &CharacterClientMessage::DeleteCharacter {
+            character_id: bram_id.clone(),
+        },
+    )
+    .await;
+    match recv_character(&mut second_stream).await {
+        CharacterServerMessage::Error { message } => {
+            assert!(message.contains("currently connected"), "{message}");
+        }
+        other => panic!("expected an Error, got {other:?}"),
+    }
+
+    // Aria isn't connected — deletable, and really gone afterward.
+    send_character(
+        &mut second_stream,
+        &CharacterClientMessage::DeleteCharacter {
+            character_id: aria_id.clone(),
+        },
+    )
+    .await;
+    match recv_character(&mut second_stream).await {
+        CharacterServerMessage::CharacterDeleted { character_id } => {
+            assert_eq!(character_id, aria_id);
+        }
+        other => panic!("expected a CharacterDeleted, got {other:?}"),
+    }
+
+    send_character(&mut second_stream, &CharacterClientMessage::ListCharacters).await;
+    match recv_character(&mut second_stream).await {
+        CharacterServerMessage::CharacterList { characters } => {
+            assert_eq!(characters.len(), 1, "{characters:?}");
+            assert_eq!(characters[0].character_id, bram_id);
+        }
+        other => panic!("expected a CharacterList, got {other:?}"),
+    }
+
+    // A second delete of the same (now-gone) character errors rather
+    // than silently "succeeding" again.
+    send_character(
+        &mut second_stream,
+        &CharacterClientMessage::DeleteCharacter {
+            character_id: aria_id,
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv_character(&mut second_stream).await,
+        CharacterServerMessage::Error { .. }
+    ));
 }
 
 /// #193's character-creation cap — a third `CreateCharacter` is rejected

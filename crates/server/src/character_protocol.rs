@@ -59,6 +59,11 @@ pub enum ClientMessage {
         character_id: String,
         destination_realm_id: String,
     },
+    /// Permanently deletes one of this account's own characters (#246) —
+    /// must be owned by this account and not currently connected
+    /// anywhere. Reachable anywhere in this pre-join phase, same as the
+    /// others. No undo.
+    DeleteCharacter { character_id: String },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -101,6 +106,11 @@ pub enum ServerMessage {
     TransferComplete {
         character_id: String,
         realm_id: String,
+    },
+    /// Confirms a successful `DeleteCharacter` (#246) — `character_id`
+    /// no longer exists anywhere.
+    CharacterDeleted {
+        character_id: String,
     },
 }
 
@@ -194,6 +204,11 @@ impl From<&ClientMessage> for proto::ClientMessage {
                 character_id: character_id.clone(),
                 destination_realm_id: destination_realm_id.clone(),
             }),
+            ClientMessage::DeleteCharacter { character_id } => {
+                Kind::DeleteCharacter(proto::DeleteCharacter {
+                    character_id: character_id.clone(),
+                })
+            }
         };
         proto::ClientMessage { kind: Some(kind) }
     }
@@ -228,6 +243,9 @@ impl TryFrom<proto::ClientMessage> for ClientMessage {
                 character_id,
                 destination_realm_id,
             }),
+            Some(Kind::DeleteCharacter(proto::DeleteCharacter { character_id })) => {
+                Ok(ClientMessage::DeleteCharacter { character_id })
+            }
             None => Err(Error::new(
                 "server",
                 "gateway character message has no kind set",
@@ -276,6 +294,11 @@ impl From<&ServerMessage> for proto::ServerMessage {
                 character_id: character_id.clone(),
                 realm_id: realm_id.clone(),
             }),
+            ServerMessage::CharacterDeleted { character_id } => {
+                Kind::CharacterDeleted(proto::CharacterDeleted {
+                    character_id: character_id.clone(),
+                })
+            }
         };
         proto::ServerMessage { kind: Some(kind) }
     }
@@ -311,6 +334,9 @@ impl TryFrom<proto::ServerMessage> for ServerMessage {
                 character_id,
                 realm_id,
             }),
+            Some(Kind::CharacterDeleted(proto::CharacterDeleted { character_id })) => {
+                Ok(ServerMessage::CharacterDeleted { character_id })
+            }
             None => Err(Error::new(
                 "server",
                 "gateway character message has no kind set",
@@ -456,6 +482,30 @@ mod tests {
             ServerMessage::TransferComplete { character_id, realm_id }
                 if character_id == "c1" && realm_id == "r2"
         ));
+    }
+
+    #[test]
+    fn delete_character_round_trips_through_an_envelope() {
+        let message = ClientMessage::DeleteCharacter {
+            character_id: "c1".to_string(),
+        };
+        let envelope = message.into_envelope().unwrap();
+        let decoded = ClientMessage::from_envelope(&envelope).unwrap();
+        assert!(
+            matches!(decoded, ClientMessage::DeleteCharacter { character_id } if character_id == "c1")
+        );
+    }
+
+    #[test]
+    fn character_deleted_round_trips_through_an_envelope() {
+        let message = ServerMessage::CharacterDeleted {
+            character_id: "c1".to_string(),
+        };
+        let envelope = message.into_envelope().unwrap();
+        let decoded = ServerMessage::from_envelope(&envelope).unwrap();
+        assert!(
+            matches!(decoded, ServerMessage::CharacterDeleted { character_id } if character_id == "c1")
+        );
     }
 
     #[test]
