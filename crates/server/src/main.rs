@@ -1051,9 +1051,9 @@ async fn spawn_into_layer(
         .await
         .into_iter()
         .filter(|(id, ..)| *id != entity_id)
-        .map(|(id, kind, position)| RosterEntry {
+        .map(|(id, _kind, position, entity_type)| RosterEntry {
             entity_id: id.to_string(),
-            entity_type: session::entity_type_label(kind),
+            entity_type,
             x: position.0,
             y: position.1,
             z: position.2,

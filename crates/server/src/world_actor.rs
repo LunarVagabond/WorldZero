@@ -52,7 +52,7 @@ enum WorldCommand {
         reply: oneshot::Sender<u64>,
     },
     EntitiesSnapshot {
-        reply: oneshot::Sender<Vec<(EntityId, EntityKind, Point)>>,
+        reply: oneshot::Sender<Vec<(EntityId, EntityKind, Point, String)>>,
     },
     /// A gateway-received message whose `message_type` matched the
     /// configured plugin's declared `message_types` (#95) — routed here
@@ -219,7 +219,7 @@ impl WorldHandle {
     }
 
     /// Empty (not an error) if the actor task is gone.
-    pub async fn entities_snapshot(&self) -> Vec<(EntityId, EntityKind, Point)> {
+    pub async fn entities_snapshot(&self) -> Vec<(EntityId, EntityKind, Point, String)> {
         let (reply_tx, reply_rx) = oneshot::channel();
         if !self.send(WorldCommand::EntitiesSnapshot { reply: reply_tx }) {
             return Vec::new();
@@ -1038,6 +1038,10 @@ pub fn spawn_npc_from_table(zone: &mut Zone, spawn_table_id: &str) -> Option<(En
         Some(route_id) => zone.spawn_npc_with_route(entity_id, point, route_id),
         None => zone.spawn(entity_id, EntityKind::Npc, point),
     }
+    // #239: without this, RosterEntry/EntitySpawned on the wire only ever
+    // learn EntityKind::Npc, collapsing every NPC to the bare "npc"
+    // literal instead of this spawn table's declared type.
+    zone.record_entity_type(entity_id, entity_type.clone());
     tracing::info!(%entity_id, spawn_table_id, ?route_id, "spawned NPC from plugin");
     Some((entity_id, entity_type))
 }

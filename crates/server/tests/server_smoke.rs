@@ -910,8 +910,9 @@ async fn connect_register_move_and_persist_across_reconnect() {
         } = recv_world(&mut stream).await
         {
             assert!(
-                roster.iter().any(|entry| entry.entity_type == "npc"),
-                "expected the plugin-spawned NPC in the join roster: {roster:?}"
+                roster.iter().any(|entry| entry.entity_type == "npc.wolf"),
+                "expected the plugin-spawned NPC, with its real declared \
+                 entity_type (#239), in the join roster: {roster:?}"
             );
             break entity_id;
         }
@@ -1150,7 +1151,7 @@ async fn combat_item_use_npc_interact_and_death_respawn_hooks_fire_for_real() {
         {
             let npc_id = roster
                 .iter()
-                .find(|entry| entry.entity_type == "npc")
+                .find(|entry| entry.entity_type == "npc.wolf")
                 .map(|entry| entry.entity_id.clone())
                 .expect("expected the plugin-spawned NPC in the join roster");
             break (entity_id, npc_id);
@@ -3498,7 +3499,7 @@ async fn attacking_an_npc_applies_real_stats_and_kills_it_at_zero() {
         if let ServerMessage::Joined { roster, .. } = recv_world(&mut attacker).await {
             break roster
                 .iter()
-                .find(|entry| entry.entity_type == "npc")
+                .find(|entry| entry.entity_type == "npc.wolf")
                 .map(|entry| entry.entity_id.clone())
                 .expect("expected the plugin-spawned NPC in the join roster");
         }

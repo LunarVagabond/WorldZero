@@ -42,6 +42,14 @@ pub struct Zone {
     /// data every tick, it never drives NPC movement on its own).
     /// Player entities are never present here.
     npc_routes: HashMap<EntityId, String>,
+    /// An NPC entity's spawn-table-declared `entity_type` (e.g.
+    /// `"npc.wolf"`, `content::manifest::SpawnTable::entity_type`) — #239:
+    /// without this, `entities()` had no way to tell a caller anything
+    /// more specific than `EntityKind::Npc`, and `RosterEntry`/
+    /// `EntitySpawned` on the wire collapsed every NPC to the bare literal
+    /// `"npc"`. Set once via `record_entity_type` right after a
+    /// spawn-table-originated NPC spawns; never populated for a player.
+    entity_types: HashMap<EntityId, String>,
     pending_moves: Vec<(EntityId, Point, u32)>,
     /// How many ticks this zone has run since it was created (#196) — the
     /// server-authoritative counter `Moved`/`Rejected`/`Joined`/
@@ -112,6 +120,7 @@ impl Zone {
             config,
             entities: HashMap::new(),
             npc_routes: HashMap::new(),
+            entity_types: HashMap::new(),
             pending_moves: Vec::new(),
             tick_count: 0,
         }
@@ -146,7 +155,17 @@ impl Zone {
     pub fn despawn(&mut self, entity: EntityId) {
         self.entities.remove(&entity);
         self.npc_routes.remove(&entity);
+        self.entity_types.remove(&entity);
         self.index.remove(entity);
+    }
+
+    /// Records `entity`'s spawn-table-declared `entity_type` (#239) —
+    /// called once, right after `spawn`/`spawn_npc_with_route`, by a
+    /// caller spawning an NPC from a manifest spawn table
+    /// (`server::world_actor::spawn_npc_from_table`). Never called for a
+    /// player entity, which has no spawn-table-declared type of its own.
+    pub fn record_entity_type(&mut self, entity: EntityId, entity_type: String) {
+        self.entity_types.insert(entity, entity_type);
     }
 
     /// Every currently-spawned NPC that has a route assigned, alongside
@@ -180,17 +199,22 @@ impl Zone {
         self.entities.get(&entity).copied()
     }
 
-    /// Every currently-spawned entity, its kind, and its position — the
-    /// "here's who's already here" roster a newly-joining client needs
-    /// (a pre-spawned NPC otherwise has no way to become visible to a
-    /// client that joins after it spawned).
-    pub fn entities(&self) -> Vec<(EntityId, EntityKind, Point)> {
+    /// Every currently-spawned entity, its kind, its position, and its
+    /// declared `entity_type` (#239) — the "here's who's already here"
+    /// roster a newly-joining client needs (a pre-spawned NPC otherwise
+    /// has no way to become visible to a client that joins after it
+    /// spawned). `entity_type` is `""` for a player, or an NPC with no
+    /// `record_entity_type` call on record — same "empty means no
+    /// declared type" convention the wire protocol already uses for
+    /// players.
+    pub fn entities(&self) -> Vec<(EntityId, EntityKind, Point, String)> {
         self.entities
             .iter()
             .filter_map(|(&id, &kind)| {
-                self.index
-                    .position_of(id)
-                    .map(|position| (id, kind, position))
+                self.index.position_of(id).map(|position| {
+                    let entity_type = self.entity_types.get(&id).cloned().unwrap_or_default();
+                    (id, kind, position, entity_type)
+                })
             })
             .collect()
     }
@@ -537,15 +561,37 @@ routes:
         let npc = EntityId::new();
         zone.spawn(player, EntityKind::Player, (1.0, 1.0, 0.0));
         zone.spawn(npc, EntityKind::Npc, (2.0, 2.0, 0.0));
+        zone.record_entity_type(npc, "npc.wolf".to_string());
 
         let mut entities = zone.entities();
         entities.sort_by_key(|(id, ..)| *id);
         let mut expected = vec![
-            (player, EntityKind::Player, (1.0, 1.0, 0.0)),
-            (npc, EntityKind::Npc, (2.0, 2.0, 0.0)),
+            (player, EntityKind::Player, (1.0, 1.0, 0.0), String::new()),
+            (
+                npc,
+                EntityKind::Npc,
+                (2.0, 2.0, 0.0),
+                "npc.wolf".to_string(),
+            ),
         ];
         expected.sort_by_key(|(id, ..)| *id);
         assert_eq!(entities, expected);
+    }
+
+    #[test]
+    fn despawn_forgets_the_entitys_recorded_entity_type() {
+        let mut zone = zone_with_square_bounds();
+        let npc = EntityId::new();
+        zone.spawn(npc, EntityKind::Npc, (1.0, 1.0, 0.0));
+        zone.record_entity_type(npc, "npc.wolf".to_string());
+        zone.despawn(npc);
+        zone.spawn(npc, EntityKind::Npc, (1.0, 1.0, 0.0));
+
+        let entities = zone.entities();
+        assert_eq!(
+            entities[0].3, "",
+            "a respawn without a fresh record_entity_type call should not inherit the old one"
+        );
     }
 
     #[test]
