@@ -397,12 +397,12 @@ routes:
     fn a_spawned_npc_with_a_known_route_is_returned_by_npcs_with_routes() {
         let mut zone = zone_with_a_route();
         let entity = EntityId::new();
-        zone.spawn_npc_with_route(entity, (10.0, 10.0), "patrol-01");
+        zone.spawn_npc_with_route(entity, (10.0, 10.0, 0.0), "patrol-01");
 
         let routes = zone.npcs_with_routes();
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].0, entity);
-        assert_eq!(routes[0].1, (10.0, 10.0));
+        assert_eq!(routes[0].1, (10.0, 10.0, 0.0));
         assert_eq!(routes[0].2.id, "patrol-01");
         assert_eq!(routes[0].2.waypoints.len(), 3);
     }
@@ -411,7 +411,7 @@ routes:
     fn spawn_npc_with_an_unknown_route_id_records_no_route() {
         let mut zone = zone_with_a_route();
         let entity = EntityId::new();
-        zone.spawn_npc_with_route(entity, (10.0, 10.0), "does-not-exist");
+        zone.spawn_npc_with_route(entity, (10.0, 10.0, 0.0), "does-not-exist");
 
         assert!(zone.npcs_with_routes().is_empty());
     }
@@ -426,7 +426,7 @@ routes:
     fn kind_of_reflects_a_spawned_entitys_kind_and_forgets_it_on_despawn() {
         let mut zone = zone_with_a_route();
         let entity = EntityId::new();
-        zone.spawn(entity, EntityKind::Player, (0.0, 0.0));
+        zone.spawn(entity, EntityKind::Player, (0.0, 0.0, 0.0));
         assert_eq!(zone.kind_of(entity), Some(EntityKind::Player));
 
         zone.despawn(entity);
@@ -437,7 +437,7 @@ routes:
     fn despawning_an_npc_removes_it_from_npcs_with_routes() {
         let mut zone = zone_with_a_route();
         let entity = EntityId::new();
-        zone.spawn_npc_with_route(entity, (10.0, 10.0), "patrol-01");
+        zone.spawn_npc_with_route(entity, (10.0, 10.0, 0.0), "patrol-01");
         zone.despawn(entity);
 
         assert!(zone.npcs_with_routes().is_empty());
@@ -447,9 +447,9 @@ routes:
     fn a_reasonable_queued_move_is_applied_on_tick() {
         let mut zone = zone_with_square_bounds();
         let entity = EntityId::new();
-        zone.spawn(entity, EntityKind::Player, (50.0, 50.0));
+        zone.spawn(entity, EntityKind::Player, (50.0, 50.0, 0.0));
 
-        zone.request_move(entity, (50.1, 50.1), 1);
+        zone.request_move(entity, (50.1, 50.1, 0.0), 1);
         let outcomes = zone.tick();
 
         assert_eq!(
@@ -458,11 +458,11 @@ routes:
                 entity,
                 MovementOutcome::Applied {
                     seq: 1,
-                    to: (50.1, 50.1)
+                    to: (50.1, 50.1, 0.0)
                 }
             )]
         );
-        assert_eq!(zone.position_of(entity), Some((50.1, 50.1)));
+        assert_eq!(zone.position_of(entity), Some((50.1, 50.1, 0.0)));
     }
 
     #[test]
@@ -478,9 +478,9 @@ routes:
             },
         );
         let entity = EntityId::new();
-        zone.spawn(entity, EntityKind::Player, (99.0, 50.0));
+        zone.spawn(entity, EntityKind::Player, (99.0, 50.0, 0.0));
 
-        zone.request_move(entity, (500.0, 50.0), 1);
+        zone.request_move(entity, (500.0, 50.0, 0.0), 1);
         let outcomes = zone.tick();
 
         assert!(matches!(
@@ -493,15 +493,15 @@ routes:
                 }
             ) if e == entity
         ));
-        assert_eq!(zone.position_of(entity), Some((99.0, 50.0)));
+        assert_eq!(zone.position_of(entity), Some((99.0, 50.0, 0.0)));
     }
 
     #[test]
     fn a_move_for_a_despawned_entity_is_silently_skipped() {
         let mut zone = zone_with_square_bounds();
         let entity = EntityId::new();
-        zone.spawn(entity, EntityKind::Player, (50.0, 50.0));
-        zone.request_move(entity, (50.1, 50.1), 1);
+        zone.spawn(entity, EntityKind::Player, (50.0, 50.0, 0.0));
+        zone.request_move(entity, (50.1, 50.1, 0.0), 1);
         zone.despawn(entity);
 
         let outcomes = zone.tick();
@@ -511,7 +511,7 @@ routes:
     #[test]
     fn tick_clears_the_pending_queue_even_with_no_entities() {
         let mut zone = zone_with_square_bounds();
-        zone.request_move(EntityId::new(), (1.0, 1.0), 1);
+        zone.request_move(EntityId::new(), (1.0, 1.0, 0.0), 1);
         assert!(zone.tick().is_empty());
         // A second tick with nothing newly queued does nothing further.
         assert!(zone.tick().is_empty());
@@ -535,14 +535,14 @@ routes:
         let mut zone = zone_with_square_bounds();
         let player = EntityId::new();
         let npc = EntityId::new();
-        zone.spawn(player, EntityKind::Player, (1.0, 1.0));
-        zone.spawn(npc, EntityKind::Npc, (2.0, 2.0));
+        zone.spawn(player, EntityKind::Player, (1.0, 1.0, 0.0));
+        zone.spawn(npc, EntityKind::Npc, (2.0, 2.0, 0.0));
 
         let mut entities = zone.entities();
         entities.sort_by_key(|(id, ..)| *id);
         let mut expected = vec![
-            (player, EntityKind::Player, (1.0, 1.0)),
-            (npc, EntityKind::Npc, (2.0, 2.0)),
+            (player, EntityKind::Player, (1.0, 1.0, 0.0)),
+            (npc, EntityKind::Npc, (2.0, 2.0, 0.0)),
         ];
         expected.sort_by_key(|(id, ..)| *id);
         assert_eq!(entities, expected);
@@ -580,9 +580,9 @@ links:
             },
         );
         let entity = EntityId::new();
-        zone.spawn(entity, EntityKind::Player, (49.0, 50.0));
+        zone.spawn(entity, EntityKind::Player, (49.0, 50.0, 0.0));
 
-        zone.request_move(entity, (51.0, 50.0), 1);
+        zone.request_move(entity, (51.0, 50.0, 0.0), 1);
         let outcomes = zone.tick();
 
         assert_eq!(
@@ -627,9 +627,9 @@ links:
         // one tick.
         let mut zone = Zone::new(manifest, WorldConfig::default());
         let entity = EntityId::new();
-        zone.spawn(entity, EntityKind::Player, (49.0, 50.0));
+        zone.spawn(entity, EntityKind::Player, (49.0, 50.0, 0.0));
 
-        zone.request_move(entity, (500.1, 50.0), 1);
+        zone.request_move(entity, (500.1, 50.0, 0.0), 1);
         let outcomes = zone.tick();
 
         assert!(
@@ -647,7 +647,7 @@ links:
         );
         // Rejected, not transitioned — still spawned in this zone, at
         // its original position.
-        assert_eq!(zone.position_of(entity), Some((49.0, 50.0)));
+        assert_eq!(zone.position_of(entity), Some((49.0, 50.0, 0.0)));
     }
 
     #[test]
@@ -682,9 +682,9 @@ links:
             },
         );
         let entity = EntityId::new();
-        zone.spawn(entity, EntityKind::Npc, (49.0, 50.0));
+        zone.spawn(entity, EntityKind::Npc, (49.0, 50.0, 0.0));
 
-        zone.request_move(entity, (51.0, 50.0), 0);
+        zone.request_move(entity, (51.0, 50.0, 0.0), 0);
         let outcomes = zone.tick();
 
         assert_eq!(
@@ -693,11 +693,11 @@ links:
                 entity,
                 MovementOutcome::Applied {
                     seq: 0,
-                    to: (51.0, 50.0)
+                    to: (51.0, 50.0, 0.0)
                 }
             )]
         );
-        assert_eq!(zone.position_of(entity), Some((51.0, 50.0)));
+        assert_eq!(zone.position_of(entity), Some((51.0, 50.0, 0.0)));
     }
 
     #[test]
@@ -717,12 +717,12 @@ links:
         tracing::subscriber::with_default(subscriber, || {
             let mut zone = zone_with_square_bounds();
             let entity = EntityId::new();
-            zone.spawn(entity, EntityKind::Player, (50.0, 50.0));
+            zone.spawn(entity, EntityKind::Player, (50.0, 50.0, 0.0));
 
             let start = std::time::Instant::now();
             for i in 0..1000 {
                 let offset = if i % 2 == 0 { 0.05 } else { -0.05 };
-                zone.request_move(entity, (50.0 + offset, 50.0), i as u32);
+                zone.request_move(entity, (50.0 + offset, 50.0, 0.0), i as u32);
                 zone.tick();
             }
             let elapsed = start.elapsed();
@@ -739,7 +739,7 @@ links:
     fn entities_excludes_a_despawned_entity() {
         let mut zone = zone_with_square_bounds();
         let entity = EntityId::new();
-        zone.spawn(entity, EntityKind::Player, (1.0, 1.0));
+        zone.spawn(entity, EntityKind::Player, (1.0, 1.0, 0.0));
         zone.despawn(entity);
 
         assert!(zone.entities().is_empty());

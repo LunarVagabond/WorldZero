@@ -23,14 +23,16 @@ pub const WORLD_MESSAGE_TYPE: u16 = 200;
 
 #[derive(Debug, Clone)]
 pub enum ClientMessage {
-    /// Requests moving this connection's own entity to `(x, y)` — queued
+    /// Requests moving this connection's own entity to `(x, y, z)` (#249:
+    /// `z` is authoritative, validated the same as `x`/`y` — see
+    /// `world::spatial::Point`'s doc comment for what stays 2D) — queued
     /// for the next simulation tick, never applied immediately
     /// (`world::Zone::request_move`). `seq` is client-assigned and
     /// monotonically increasing per connection (#196, start at `1`) —
     /// the server only ever echoes it back on `Moved`/`Rejected`, never
     /// interprets it, so a client can correlate a specific outcome to
     /// the specific predicted step it corresponds to.
-    Move { x: f64, y: f64, seq: u32 },
+    Move { x: f64, y: f64, z: f64, seq: u32 },
     /// A latency probe, independent of gameplay/movement traffic (#196)
     /// — `client_sent_at` is opaque to the server, echoed back verbatim
     /// on `Pong` so the client can compute round-trip time against its
@@ -148,6 +150,7 @@ pub struct RosterEntry {
     pub entity_type: String,
     pub x: f64,
     pub y: f64,
+    pub z: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -165,6 +168,7 @@ pub enum ServerMessage {
         entity_id: String,
         x: f64,
         y: f64,
+        z: f64,
         roster: Vec<RosterEntry>,
         /// The zone's server-authoritative simulation-step counter at
         /// the moment this was built (#196) — this connection's own
@@ -181,6 +185,7 @@ pub enum ServerMessage {
         entity_type: String,
         x: f64,
         y: f64,
+        z: f64,
     },
     EntityDespawned {
         entity_id: String,
@@ -198,6 +203,7 @@ pub enum ServerMessage {
         entity_id: String,
         x: f64,
         y: f64,
+        z: f64,
         roster: Vec<RosterEntry>,
         /// The *destination* zone's own tick counter (#196) — each
         /// zone-service instance ticks independently, so this is a
@@ -219,6 +225,7 @@ pub enum ServerMessage {
         entity_id: String,
         x: f64,
         y: f64,
+        z: f64,
         seq: u32,
         tick: u64,
     },
@@ -372,6 +379,7 @@ impl From<&RosterEntry> for proto::RosterEntry {
             entity_type: entry.entity_type.clone(),
             x: entry.x,
             y: entry.y,
+            z: entry.z,
         }
     }
 }
@@ -383,6 +391,7 @@ impl From<proto::RosterEntry> for RosterEntry {
             entity_type: entry.entity_type,
             x: entry.x,
             y: entry.y,
+            z: entry.z,
         }
     }
 }
@@ -409,9 +418,10 @@ impl From<&ClientMessage> for proto::ClientMessage {
     fn from(message: &ClientMessage) -> Self {
         use proto::client_message::Kind;
         let kind = match message {
-            ClientMessage::Move { x, y, seq } => Kind::Move(proto::Move {
+            ClientMessage::Move { x, y, z, seq } => Kind::Move(proto::Move {
                 x: *x,
                 y: *y,
+                z: *z,
                 seq: *seq,
             }),
             ClientMessage::Ping { client_sent_at } => Kind::Ping(proto::Ping {
@@ -496,7 +506,9 @@ impl TryFrom<proto::ClientMessage> for ClientMessage {
     fn try_from(message: proto::ClientMessage) -> Result<Self> {
         use proto::client_message::Kind;
         match message.kind {
-            Some(Kind::Move(proto::Move { x, y, seq })) => Ok(ClientMessage::Move { x, y, seq }),
+            Some(Kind::Move(proto::Move { x, y, z, seq })) => {
+                Ok(ClientMessage::Move { x, y, z, seq })
+            }
             Some(Kind::Ping(proto::Ping { client_sent_at })) => {
                 Ok(ClientMessage::Ping { client_sent_at })
             }
@@ -580,12 +592,14 @@ impl From<&ServerMessage> for proto::ServerMessage {
                 entity_id,
                 x,
                 y,
+                z,
                 roster,
                 tick,
             } => Kind::Joined(proto::Joined {
                 entity_id: entity_id.clone(),
                 x: *x,
                 y: *y,
+                z: *z,
                 roster: roster.iter().map(proto::RosterEntry::from).collect(),
                 tick: *tick,
             }),
@@ -594,11 +608,13 @@ impl From<&ServerMessage> for proto::ServerMessage {
                 entity_type,
                 x,
                 y,
+                z,
             } => Kind::EntitySpawned(proto::EntitySpawned {
                 entity_id: entity_id.clone(),
                 entity_type: entity_type.clone(),
                 x: *x,
                 y: *y,
+                z: *z,
             }),
             ServerMessage::EntityDespawned { entity_id } => {
                 Kind::EntityDespawned(proto::EntityDespawned {
@@ -610,6 +626,7 @@ impl From<&ServerMessage> for proto::ServerMessage {
                 entity_id,
                 x,
                 y,
+                z,
                 roster,
                 tick,
             } => Kind::ZoneChanged(proto::ZoneChanged {
@@ -617,6 +634,7 @@ impl From<&ServerMessage> for proto::ServerMessage {
                 entity_id: entity_id.clone(),
                 x: *x,
                 y: *y,
+                z: *z,
                 roster: roster.iter().map(proto::RosterEntry::from).collect(),
                 tick: *tick,
             }),
@@ -624,12 +642,14 @@ impl From<&ServerMessage> for proto::ServerMessage {
                 entity_id,
                 x,
                 y,
+                z,
                 seq,
                 tick,
             } => Kind::Moved(proto::Moved {
                 entity_id: entity_id.clone(),
                 x: *x,
                 y: *y,
+                z: *z,
                 seq: *seq,
                 tick: *tick,
             }),
@@ -723,12 +743,14 @@ impl TryFrom<proto::ServerMessage> for ServerMessage {
                 entity_id,
                 x,
                 y,
+                z,
                 roster,
                 tick,
             })) => Ok(ServerMessage::Joined {
                 entity_id,
                 x,
                 y,
+                z,
                 roster: roster.into_iter().map(RosterEntry::from).collect(),
                 tick,
             }),
@@ -737,11 +759,13 @@ impl TryFrom<proto::ServerMessage> for ServerMessage {
                 entity_type,
                 x,
                 y,
+                z,
             })) => Ok(ServerMessage::EntitySpawned {
                 entity_id,
                 entity_type,
                 x,
                 y,
+                z,
             }),
             Some(Kind::EntityDespawned(proto::EntityDespawned { entity_id })) => {
                 Ok(ServerMessage::EntityDespawned { entity_id })
@@ -751,6 +775,7 @@ impl TryFrom<proto::ServerMessage> for ServerMessage {
                 entity_id,
                 x,
                 y,
+                z,
                 roster,
                 tick,
             })) => Ok(ServerMessage::ZoneChanged {
@@ -758,6 +783,7 @@ impl TryFrom<proto::ServerMessage> for ServerMessage {
                 entity_id,
                 x,
                 y,
+                z,
                 roster: roster.into_iter().map(RosterEntry::from).collect(),
                 tick,
             }),
@@ -765,12 +791,14 @@ impl TryFrom<proto::ServerMessage> for ServerMessage {
                 entity_id,
                 x,
                 y,
+                z,
                 seq,
                 tick,
             })) => Ok(ServerMessage::Moved {
                 entity_id,
                 x,
                 y,
+                z,
                 seq,
                 tick,
             }),
@@ -871,14 +899,17 @@ mod tests {
         let message = ClientMessage::Move {
             x: 1.5,
             y: -2.0,
+            z: 3.5,
             seq: 7,
         };
         let envelope = message.into_envelope().unwrap();
         assert_eq!(envelope.message_type, WORLD_MESSAGE_TYPE);
         let decoded = ClientMessage::from_envelope(&envelope).unwrap();
-        assert!(
-            matches!(decoded, ClientMessage::Move { x, y, seq } if x == 1.5 && y == -2.0 && seq == 7)
-        );
+        assert!(matches!(
+            decoded,
+            ClientMessage::Move { x, y, z, seq }
+                if x == 1.5 && y == -2.0 && z == 3.5 && seq == 7
+        ));
     }
 
     #[test]
@@ -940,11 +971,13 @@ mod tests {
             entity_id: "e1".to_string(),
             x: 1.0,
             y: 2.0,
+            z: 5.0,
             roster: vec![RosterEntry {
                 entity_id: "e2".to_string(),
                 entity_type: "npc.wolf".to_string(),
                 x: 3.0,
                 y: 4.0,
+                z: 6.0,
             }],
             tick: 42,
         };
@@ -952,7 +985,26 @@ mod tests {
         let decoded = ServerMessage::from_envelope(&envelope).unwrap();
         assert!(matches!(
             decoded,
-            ServerMessage::Joined { roster, .. } if roster.len() == 1 && roster[0].entity_id == "e2"
+            ServerMessage::Joined { z, roster, .. }
+                if z == 5.0 && roster.len() == 1 && roster[0].entity_id == "e2" && roster[0].z == 6.0
+        ));
+    }
+
+    #[test]
+    fn moved_round_trips_z() {
+        let message = ServerMessage::Moved {
+            entity_id: "e1".to_string(),
+            x: 1.0,
+            y: 2.0,
+            z: 3.0,
+            seq: 5,
+            tick: 9,
+        };
+        let envelope = message.into_envelope().unwrap();
+        let decoded = ServerMessage::from_envelope(&envelope).unwrap();
+        assert!(matches!(
+            decoded,
+            ServerMessage::Moved { z, .. } if z == 3.0
         ));
     }
 }

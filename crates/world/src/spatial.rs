@@ -13,16 +13,19 @@ use std::collections::HashMap;
 
 use common::id::EntityId;
 
-/// A 2D position — the manifest format is polygon/2D-only for now (see
-/// `content::manifest`'s note on decision #89, 2D vs 3D support), so the
-/// spatial index matches that scope rather than carrying an unused third
-/// axis around.
-pub type Point = (f64, f64);
+/// A 3D position (#89's "3D vs 2D" decision, #249's implementation of
+/// it) — `(x, y, z)`. The zone-manifest format (`content::manifest::Point`)
+/// stays 2D deliberately (real 3D zone geometry is #242's job, not this
+/// one), so `world::movement::validate_movement`'s bounds check projects
+/// this down to `(x, y)` before comparing against manifest data; nothing
+/// else in this module needs to know that.
+pub type Point = (f64, f64, f64);
 
 fn distance(a: Point, b: Point) -> f64 {
     let dx = a.0 - b.0;
     let dy = a.1 - b.1;
-    (dx * dx + dy * dy).sqrt()
+    let dz = a.2 - b.2;
+    (dx * dx + dy * dy + dz * dz).sqrt()
 }
 
 /// Whatever query operations movement/collision validation and interest
@@ -69,6 +72,14 @@ impl GridIndex {
         }
     }
 
+    /// Deliberately 2D bucketing (`x`/`y` only, `z` ignored) — a column
+    /// spanning every height at a given `(x, y)`, not a real 3D
+    /// partition. `query_radius`'s per-entity `distance` check is what
+    /// actually filters by full 3D distance; this just narrows which
+    /// cells are worth visiting at all. Revisit if entity density per
+    /// column (multi-floor buildings stacking many entities at the same
+    /// `x, y`) ever makes that column-wide candidate set too big — not
+    /// a problem yet since #242's real interior geometry doesn't exist.
     fn cell_key(&self, position: Point) -> CellKey {
         (
             (position.0 / self.cell_size).floor() as i64,
@@ -116,8 +127,8 @@ impl SpatialIndex for GridIndex {
     }
 
     fn query_radius(&self, center: Point, radius: f64) -> Vec<EntityId> {
-        let min_key = self.cell_key((center.0 - radius, center.1 - radius));
-        let max_key = self.cell_key((center.0 + radius, center.1 + radius));
+        let min_key = self.cell_key((center.0 - radius, center.1 - radius, center.2));
+        let max_key = self.cell_key((center.0 + radius, center.1 + radius, center.2));
 
         let mut found = Vec::new();
         for cx in min_key.0..=max_key.0 {
@@ -152,10 +163,10 @@ mod tests {
         let mut index = GridIndex::new(10.0);
         let near = EntityId::new();
         let far = EntityId::new();
-        index.insert(near, (1.0, 1.0));
-        index.insert(far, (500.0, 500.0));
+        index.insert(near, (1.0, 1.0, 0.0));
+        index.insert(far, (500.0, 500.0, 0.0));
 
-        let found = index.query_radius((0.0, 0.0), 5.0);
+        let found = index.query_radius((0.0, 0.0, 0.0), 5.0);
         assert_eq!(found, vec![near]);
     }
 
@@ -166,29 +177,29 @@ mod tests {
         // check, not just cell membership, gates the result.
         let mut index = GridIndex::new(100.0);
         let entity = EntityId::new();
-        index.insert(entity, (90.0, 90.0));
+        index.insert(entity, (90.0, 90.0, 0.0));
 
-        assert!(index.query_radius((0.0, 0.0), 10.0).is_empty());
-        assert_eq!(index.query_radius((0.0, 0.0), 200.0), vec![entity]);
+        assert!(index.query_radius((0.0, 0.0, 0.0), 10.0).is_empty());
+        assert_eq!(index.query_radius((0.0, 0.0, 0.0), 200.0), vec![entity]);
     }
 
     #[test]
     fn update_moves_an_entity_to_its_new_cell() {
         let mut index = GridIndex::new(10.0);
         let entity = EntityId::new();
-        index.insert(entity, (1.0, 1.0));
-        index.update(entity, (500.0, 500.0));
+        index.insert(entity, (1.0, 1.0, 0.0));
+        index.update(entity, (500.0, 500.0, 0.0));
 
-        assert!(index.query_radius((1.0, 1.0), 5.0).is_empty());
-        assert_eq!(index.query_radius((500.0, 500.0), 5.0), vec![entity]);
-        assert_eq!(index.position_of(entity), Some((500.0, 500.0)));
+        assert!(index.query_radius((1.0, 1.0, 0.0), 5.0).is_empty());
+        assert_eq!(index.query_radius((500.0, 500.0, 0.0), 5.0), vec![entity]);
+        assert_eq!(index.position_of(entity), Some((500.0, 500.0, 0.0)));
     }
 
     #[test]
     fn update_on_an_unknown_entity_is_a_harmless_no_op() {
         let mut index = GridIndex::new(10.0);
         let entity = EntityId::new();
-        index.update(entity, (1.0, 1.0));
+        index.update(entity, (1.0, 1.0, 0.0));
         assert_eq!(index.position_of(entity), None);
     }
 
@@ -202,22 +213,22 @@ mod tests {
         // intervening despawn is a real caller scenario, not hypothetical).
         let mut index = GridIndex::new(10.0);
         let entity = EntityId::new();
-        index.insert(entity, (1.0, 1.0));
-        index.insert(entity, (500.0, 500.0));
+        index.insert(entity, (1.0, 1.0, 0.0));
+        index.insert(entity, (500.0, 500.0, 0.0));
 
-        assert!(index.query_radius((1.0, 1.0), 5.0).is_empty());
-        assert_eq!(index.query_radius((500.0, 500.0), 5.0), vec![entity]);
-        assert_eq!(index.position_of(entity), Some((500.0, 500.0)));
+        assert!(index.query_radius((1.0, 1.0, 0.0), 5.0).is_empty());
+        assert_eq!(index.query_radius((500.0, 500.0, 0.0), 5.0), vec![entity]);
+        assert_eq!(index.position_of(entity), Some((500.0, 500.0, 0.0)));
     }
 
     #[test]
     fn remove_clears_the_entity_from_its_cell() {
         let mut index = GridIndex::new(10.0);
         let entity = EntityId::new();
-        index.insert(entity, (1.0, 1.0));
+        index.insert(entity, (1.0, 1.0, 0.0));
         index.remove(entity);
 
-        assert!(index.query_radius((1.0, 1.0), 5.0).is_empty());
+        assert!(index.query_radius((1.0, 1.0, 0.0), 5.0).is_empty());
         assert_eq!(index.position_of(entity), None);
     }
 
@@ -240,12 +251,12 @@ mod tests {
         };
 
         for _ in 0..5_000 {
-            index.insert(EntityId::new(), (next(), next()));
+            index.insert(EntityId::new(), (next(), next(), next()));
         }
 
         let start = Instant::now();
         for _ in 0..1_000 {
-            index.query_radius((next(), next()), 50.0);
+            index.query_radius((next(), next(), next()), 50.0);
         }
         let elapsed = start.elapsed();
 

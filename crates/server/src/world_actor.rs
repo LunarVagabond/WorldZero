@@ -781,8 +781,12 @@ async fn apply_plugin_pending_effects(
     for (entity_id, x, y) in pending_moves {
         match entity_id.parse::<EntityId>() {
             // `0`: a plugin-driven move (`move-entity`) has no client
-            // sequence number to echo (#196).
-            Ok(entity_id) => zone.request_move(entity_id, (x, y), 0),
+            // sequence number to echo (#196). `z: 0.0` — the `move-entity`
+            // WIT host function is still 2D-only (#249's scope note: the
+            // plugin ABI is a separately-versioned surface, not touched
+            // by this ticket); a real z parameter there is tracked as a
+            // follow-up.
+            Ok(entity_id) => zone.request_move(entity_id, (x, y, 0.0), 0),
             Err(_) => {
                 tracing::warn!(
                     entity_id,
@@ -1024,6 +1028,9 @@ pub fn spawn_npc_from_table(zone: &mut Zone, spawn_table_id: &str) -> Option<(En
         tracing::warn!(spawn_table_id, "plugin requested an empty spawn table");
         return None;
     };
+    // `table.points` is manifest-declared, 2D — ground level (#249's
+    // scope note: real per-spawn-table height is #242's job).
+    let point: world::Point = (point.0, point.1, 0.0);
     let route_id = table.route_id.clone();
     let entity_type = table.entity_type.clone();
 

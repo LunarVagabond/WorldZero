@@ -55,7 +55,11 @@ pub fn validate_movement(
         });
     }
 
-    if !point_in_polygon(to, &manifest.bounds.points) {
+    // Zone bounds are 2D-only, deliberately (#242 owns real 3D zone
+    // geometry) — project `to` down to its (x, y) footprint before
+    // checking it against the manifest's flat polygon. In effect: no
+    // vertical limit within a zone's footprint yet.
+    if !point_in_polygon((to.0, to.1), &manifest.bounds.points) {
         return Err(MovementRejection::OutOfBounds);
     }
 
@@ -81,7 +85,8 @@ pub fn validate_movement(
 pub(crate) fn distance(a: Point, b: Point) -> f64 {
     let dx = a.0 - b.0;
     let dy = a.1 - b.1;
-    (dx * dx + dy * dy).sqrt()
+    let dz = a.2 - b.2;
+    (dx * dx + dy * dy + dz * dz).sqrt()
 }
 
 /// Standard ray-casting point-in-polygon test: count crossings of a
@@ -89,7 +94,12 @@ pub(crate) fn distance(a: Point, b: Point) -> f64 {
 /// edges; odd crossing count means inside. `content::manifest::ZoneManifest`
 /// already requires `bounds.points.len() >= 3` and `bounds.shape ==
 /// "polygon"` at load time, so this doesn't re-validate the shape here.
-fn point_in_polygon(point: Point, polygon: &[Point]) -> bool {
+///
+/// Takes `content::manifest::Point` (2D), not `crate::spatial::Point` —
+/// zone bounds stay flat/2D deliberately (see `validate_movement`'s call
+/// site), so this operates on the manifest's own point type directly
+/// rather than the 3D simulation `Point`.
+fn point_in_polygon(point: content::manifest::Point, polygon: &[content::manifest::Point]) -> bool {
     let (px, py) = point;
     let mut inside = false;
 
@@ -146,8 +156,8 @@ collision:
             mover,
             10.0,
             0.05,
-            (50.0, 50.0),
-            (50.3, 50.3),
+            (50.0, 50.0, 0.0),
+            (50.3, 50.3, 0.0),
         );
         assert_eq!(result, Ok(()));
     }
@@ -166,8 +176,8 @@ collision:
             mover,
             10_000.0,
             0.05,
-            (99.0, 50.0),
-            (150.0, 50.0),
+            (99.0, 50.0, 0.0),
+            (150.0, 50.0, 0.0),
         );
         assert_eq!(result, Err(MovementRejection::OutOfBounds));
     }
@@ -185,8 +195,8 @@ collision:
             mover,
             10.0,
             0.05,
-            (0.0, 0.0),
-            (50.0, 0.0),
+            (0.0, 0.0, 0.0),
+            (50.0, 0.0, 0.0),
         );
         assert!(matches!(result, Err(MovementRejection::TooFast { .. })));
     }
@@ -206,8 +216,8 @@ collision:
             mover,
             10.0,
             0.05,
-            (10.0, 10.0),
-            (10.5, 10.0),
+            (10.0, 10.0, 0.0),
+            (10.5, 10.0, 0.0),
         );
         assert_eq!(result, Ok(()));
     }
@@ -217,7 +227,7 @@ collision:
         let manifest = square_manifest();
         let mut index = crate::spatial::GridIndex::new(10.0);
         let blocker = EntityId::new();
-        index.insert(blocker, (50.1, 50.1));
+        index.insert(blocker, (50.1, 50.1, 0.0));
         let mover = EntityId::new();
 
         let result = validate_movement(
@@ -226,8 +236,8 @@ collision:
             mover,
             10.0,
             0.05,
-            (50.0, 50.0),
-            (50.1, 50.1),
+            (50.0, 50.0, 0.0),
+            (50.1, 50.1, 0.0),
         );
         assert_eq!(
             result,
@@ -235,6 +245,70 @@ collision:
                 blocking_entity: blocker
             })
         );
+    }
+
+    #[test]
+    fn a_purely_vertical_move_faster_than_the_speed_cap_is_rejected() {
+        // Same (x, y) — pure altitude change — still counts against the
+        // speed cap now that distance is 3D-aware (#249).
+        let manifest = square_manifest();
+        let index = crate::spatial::GridIndex::new(10.0);
+        let mover = EntityId::new();
+
+        let result = validate_movement(
+            &manifest,
+            &index,
+            mover,
+            10.0,
+            0.05,
+            (50.0, 50.0, 0.0),
+            (50.0, 50.0, 50.0),
+        );
+        assert!(matches!(result, Err(MovementRejection::TooFast { .. })));
+    }
+
+    #[test]
+    fn a_move_that_only_changes_altitude_within_bounds_is_accepted() {
+        // The bounds check projects onto (x, y) — no vertical limit
+        // within a zone's flat footprint yet (#242 owns real 3D zone
+        // geometry, not this).
+        let manifest = square_manifest();
+        let index = crate::spatial::GridIndex::new(10.0);
+        let mover = EntityId::new();
+
+        let result = validate_movement(
+            &manifest,
+            &index,
+            mover,
+            10_000.0,
+            0.05,
+            (50.0, 50.0, 0.0),
+            (50.0, 50.0, 500.0),
+        );
+        assert_eq!(result, Ok(()));
+    }
+
+    #[test]
+    fn entities_stacked_at_different_altitudes_do_not_block_each_other() {
+        // Same (x, y), far apart in z — distance being 3D-aware means
+        // this is correctly outside the collision radius, unlike a 2D
+        // distance check which would have wrongly reported a collision.
+        let manifest = square_manifest();
+        let mut index = crate::spatial::GridIndex::new(10.0);
+        let other = EntityId::new();
+        index.insert(other, (50.0, 50.0, 100.0));
+        let mover = EntityId::new();
+
+        let result = validate_movement(
+            &manifest,
+            &index,
+            mover,
+            10.0,
+            0.05,
+            (50.0, 50.0, 0.0),
+            (50.0, 50.0, 0.3),
+        );
+        assert_eq!(result, Ok(()));
     }
 
     #[test]

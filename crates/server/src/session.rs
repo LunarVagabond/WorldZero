@@ -700,7 +700,7 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
         }
     };
     let character_id = character.id;
-    let position = (character.position.0, character.position.1);
+    let position = character.position;
 
     // #137's live-connection registration — applies regardless of
     // open/bound (unlike `character_lease` above), see `realm_presence`'s
@@ -832,6 +832,7 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
             entity_type: entity_type_label(kind),
             x: other_position.0,
             y: other_position.1,
+            z: other_position.2,
         })
         .collect();
     let join_tick = zone.world.current_tick().await;
@@ -851,6 +852,7 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
             entity_id: entity_id.to_string(),
             x: position.0,
             y: position.1,
+            z: position.2,
             roster,
             tick: join_tick,
         },
@@ -864,6 +866,7 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
             entity_type: entity_type_label(EntityKind::Player),
             x: position.0,
             y: position.1,
+            z: position.2,
         },
     );
 
@@ -935,8 +938,8 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
                 let Ok(envelope) = frame else { break };
                 if envelope.message_type == WORLD_MESSAGE_TYPE {
                     match ClientMessage::from_envelope(&envelope) {
-                        Ok(ClientMessage::Move { x, y, seq }) => {
-                            zone.world.request_move(entity_id, (x, y), seq);
+                        Ok(ClientMessage::Move { x, y, z, seq }) => {
+                            zone.world.request_move(entity_id, (x, y, z), seq);
                         }
                         Ok(ClientMessage::Ping { client_sent_at }) => {
                             send_world(&mut sink, &ServerMessage::Pong {
@@ -1531,9 +1534,9 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
         },
     );
 
-    if let Some((x, y)) = final_position {
+    if let Some(position) = final_position {
         deps.character_store
-            .update_position_and_zone(character_id, (x, y, 0.0), &current_zone_id)
+            .update_position_and_zone(character_id, position, &current_zone_id)
             .await?;
     }
 
