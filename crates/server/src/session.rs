@@ -827,13 +827,15 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
         .await
         .into_iter()
         .filter(|(other_id, ..)| *other_id != entity_id)
-        .map(|(other_id, kind, other_position)| RosterEntry {
-            entity_id: other_id.to_string(),
-            entity_type: entity_type_label(kind),
-            x: other_position.0,
-            y: other_position.1,
-            z: other_position.2,
-        })
+        .map(
+            |(other_id, _kind, other_position, entity_type)| RosterEntry {
+                entity_id: other_id.to_string(),
+                entity_type,
+                x: other_position.0,
+                y: other_position.1,
+                z: other_position.2,
+            },
+        )
         .collect();
     let join_tick = zone.world.current_tick().await;
 
