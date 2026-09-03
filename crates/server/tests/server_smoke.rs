@@ -70,6 +70,7 @@ const MULTI_CHARACTER_ADDR: &str = "127.0.0.1:7927";
 const CHARACTER_CAP_ADDR: &str = "127.0.0.1:7928";
 const CHARACTER_CREATE_HOOK_ADDR: &str = "127.0.0.1:7929";
 const SESSION_RESUME_ADDR: &str = "127.0.0.1:7930";
+const ACCOUNT_ROLES_ADDR: &str = "127.0.0.1:7954";
 const SESSION_RESUME_INVALID_ADDR: &str = "127.0.0.1:7931";
 const MOVE_CORRELATION_ADDR: &str = "127.0.0.1:7932";
 const PING_PONG_ADDR: &str = "127.0.0.1:7933";
@@ -177,6 +178,24 @@ async fn account_id_for_username(username: &str) -> uuid::Uuid {
         .fetch_one(&pool)
         .await
         .unwrap()
+}
+
+/// Grants an account a role by inserting straight into `account_roles`
+/// (#248's roles-on-`Authenticated` test) — same "direct DB write, no
+/// client-facing message for this" shape as `account_id_for_username`,
+/// since there's no wire message for role grants either (that's `auth`'s
+/// `role` CLI's job, not something a connecting client can do to itself).
+async fn grant_account_role(account_id: uuid::Uuid, role: &str) {
+    let pg_config = common::config::PostgresConfig::from_env().expect("WZ_POSTGRES_* env vars set");
+    let pool = common::pool::postgres_pool(&pg_config, common::pool::PoolOptions::default())
+        .await
+        .expect("failed to connect to Postgres to grant an account role");
+    sqlx::query("INSERT INTO account_roles (account_id, role) VALUES ($1, $2)")
+        .bind(account_id)
+        .bind(role)
+        .execute(&pool)
+        .await
+        .unwrap();
 }
 
 /// Reads a guild's synced chat channel id straight from `guilds.name`
@@ -2943,6 +2962,59 @@ async fn a_client_resumes_a_session_with_only_the_token_no_login() {
             assert_eq!((x, y), MOVE_TO, "should resume at the same position")
         }
         other => panic!("expected Joined, got {other:?}"),
+    }
+}
+
+/// #248: `Authenticated` echoes the connecting account's own roles, so a
+/// client can build an admin-only UI without inventing an ad-hoc
+/// convention for something the server already knows. A freshly
+/// registered account has none; granting one directly in the DB (there's
+/// no client-facing "grant myself a role" message — that's `auth`'s
+/// `role` CLI's job) and reconnecting picks it up.
+#[tokio::test]
+#[ignore]
+async fn authenticated_echoes_the_accounts_own_roles() {
+    let config_dir = setup_config_dir("account-roles");
+    let _server = start_server(&config_dir, ACCOUNT_ROLES_ADDR).await;
+    wait_for_port(ACCOUNT_ROLES_ADDR).await;
+
+    let username = format!("account-roles-{}", uuid::Uuid::now_v7());
+    let password = "hunter2";
+
+    let mut stream = connect(&config_dir, ACCOUNT_ROLES_ADDR).await;
+    send_auth(
+        &mut stream,
+        &AuthClientMessage::Register {
+            username: username.clone(),
+            password: password.to_string(),
+        },
+    )
+    .await;
+    match recv_auth(&mut stream).await {
+        AuthServerMessage::Authenticated { roles, .. } => {
+            assert!(roles.is_empty(), "a fresh account should hold no roles");
+        }
+        other => panic!("expected Authenticated, got {other:?}"),
+    }
+    drop(stream);
+
+    let account_id = account_id_for_username(&username).await;
+    grant_account_role(account_id, "admin").await;
+
+    let mut stream = connect(&config_dir, ACCOUNT_ROLES_ADDR).await;
+    send_auth(
+        &mut stream,
+        &AuthClientMessage::Login {
+            username: username.clone(),
+            password: password.to_string(),
+        },
+    )
+    .await;
+    match recv_auth(&mut stream).await {
+        AuthServerMessage::Authenticated { roles, .. } => {
+            assert_eq!(roles, vec!["admin".to_string()]);
+        }
+        other => panic!("expected Authenticated, got {other:?}"),
     }
 }
 
