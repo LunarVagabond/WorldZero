@@ -13,7 +13,7 @@ The framework-required columns — never a superset or subset per deployment —
 | `name` | `TEXT NOT NULL` | Identity — display name. No uniqueness constraint at this layer; whether names must be globally unique is a per-game policy concern, not a core one. |
 | `realm_id` | `UUID NOT NULL REFERENCES realms(id)` | Realm. A real foreign key as of #170 (`db/migrations/0013_add_character_realm_fk/`) — no `ON DELETE` behavior specified (defaults to `NO ACTION`/`RESTRICT`), so deleting a realm that still has characters pointing at it is a hard error, not a silent cascade that deletes player data. |
 | `zone_id` | `TEXT NOT NULL` | Which zone the character is currently in, by the content manifest's zone `id` slug (docs/specs/Content_Manifest_Spec.md) — not a DB foreign key, since zones are content-defined, not database rows. |
-| `position_x`, `position_y`, `position_z` | `DOUBLE PRECISION NOT NULL DEFAULT 0` | Position, in the zone's own coordinate system. |
+| `position_x`, `position_y`, `position_z` | `DOUBLE PRECISION NOT NULL DEFAULT 0` | Position, in the zone's own coordinate system. `position_z` is now live-tracked through a whole session (#249), not just persisted-and-ignored — see docs/specs/Networking_Spec.md's "`z` is authoritative" note. |
 | `stats` | `JSONB NOT NULL DEFAULT '{}'` | The declared-attribute-schema column — see below. |
 | `created_at`, `updated_at` | `TIMESTAMPTZ NOT NULL DEFAULT now()` | Timestamps. |
 

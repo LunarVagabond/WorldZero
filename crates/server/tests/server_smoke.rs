@@ -72,6 +72,7 @@ const CHARACTER_CREATE_HOOK_ADDR: &str = "127.0.0.1:7929";
 const SESSION_RESUME_ADDR: &str = "127.0.0.1:7930";
 const ACCOUNT_ROLES_ADDR: &str = "127.0.0.1:7954";
 const DELETE_CHARACTER_ADDR: &str = "127.0.0.1:7955";
+const Z_MOVEMENT_ADDR: &str = "127.0.0.1:7956";
 const SESSION_RESUME_INVALID_ADDR: &str = "127.0.0.1:7931";
 const MOVE_CORRELATION_ADDR: &str = "127.0.0.1:7932";
 const PING_PONG_ADDR: &str = "127.0.0.1:7933";
@@ -924,6 +925,7 @@ async fn connect_register_move_and_persist_across_reconnect() {
         &ClientMessage::Move {
             x: MOVE_TO.0,
             y: MOVE_TO.1,
+            z: 0.0,
             seq: 1,
         },
     )
@@ -1528,6 +1530,7 @@ async fn zone_transition_crosses_a_link_without_reconnecting() {
         &ClientMessage::Move {
             x: 505.0,
             y: 250.0,
+            z: 0.0,
             seq: 1,
         },
     )
@@ -1646,6 +1649,7 @@ async fn zone_transition_fires_plugin_join_and_leave_hooks() {
         &ClientMessage::Move {
             x: 505.0,
             y: 250.0,
+            z: 0.0,
             seq: 1,
         },
     )
@@ -2538,6 +2542,7 @@ async fn an_account_can_create_list_and_select_between_multiple_characters() {
         &ClientMessage::Move {
             x: MOVE_TO.0,
             y: MOVE_TO.1,
+            z: 0.0,
             seq: 1,
         },
     )
@@ -2797,6 +2802,93 @@ async fn delete_character_removes_it_and_is_ownership_and_liveness_checked() {
         recv_character(&mut second_stream).await,
         CharacterServerMessage::Error { .. }
     ));
+}
+
+/// #249: z is authoritative and round-trips through a real move — a
+/// client-requested `Move` to a nonzero z is validated, broadcast back
+/// with the same z on `Moved`, and survives a disconnect/reconnect
+/// (`Joined.z` on rejoin matches where it was left), proving
+/// `server::session`'s load/disconnect z plumbing actually works, not
+/// just the wire-protocol round-trip `session_protocol`'s own unit
+/// tests already cover.
+#[tokio::test]
+#[ignore]
+async fn z_is_authoritative_and_survives_a_reconnect() {
+    let config_dir = setup_config_dir("z-movement");
+    let _server = start_server(&config_dir, Z_MOVEMENT_ADDR).await;
+    wait_for_port(Z_MOVEMENT_ADDR).await;
+
+    let username = format!("z-movement-{}", uuid::Uuid::now_v7());
+    let password = "hunter2";
+
+    let mut stream = connect(&config_dir, Z_MOVEMENT_ADDR).await;
+    send_auth(
+        &mut stream,
+        &AuthClientMessage::Register {
+            username: username.clone(),
+            password: password.to_string(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv_auth(&mut stream).await,
+        AuthServerMessage::Authenticated { .. }
+    ));
+    select_realm(&mut stream, _server.realm_id).await;
+    select_or_create_character(&mut stream, &username).await;
+    assert!(matches!(
+        recv_world(&mut stream).await,
+        ServerMessage::Joined { z, .. } if z == 0.0
+    ));
+
+    const MOVE_TO: (f64, f64, f64) = (0.3, 0.2, 12.5);
+    send_world(
+        &mut stream,
+        &ClientMessage::Move {
+            x: MOVE_TO.0,
+            y: MOVE_TO.1,
+            z: MOVE_TO.2,
+            seq: 1,
+        },
+    )
+    .await;
+    loop {
+        match recv_world(&mut stream).await {
+            ServerMessage::Moved { x, y, z, .. } => {
+                assert_eq!((x, y, z), MOVE_TO);
+                break;
+            }
+            ServerMessage::Rejected { reason, .. } => panic!("move rejected: {reason}"),
+            _ => {}
+        }
+    }
+    drop(stream);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Reconnect — the persisted z from the move above should come back
+    // on Joined, not the truncated/hardcoded-0.0 z the pre-#249 code
+    // would have shown here.
+    let mut stream = connect(&config_dir, Z_MOVEMENT_ADDR).await;
+    send_auth(
+        &mut stream,
+        &AuthClientMessage::Login {
+            username: username.clone(),
+            password: password.to_string(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv_auth(&mut stream).await,
+        AuthServerMessage::Authenticated { .. }
+    ));
+    select_realm(&mut stream, _server.realm_id).await;
+    select_or_create_character(&mut stream, &username).await;
+    match recv_world(&mut stream).await {
+        ServerMessage::Joined { x, y, z, .. } => {
+            assert_eq!((x, y, z), MOVE_TO, "should resume at the same 3D position")
+        }
+        other => panic!("expected Joined, got {other:?}"),
+    }
 }
 
 /// #193's character-creation cap — a third `CreateCharacter` is rejected
@@ -3089,6 +3181,7 @@ async fn a_client_resumes_a_session_with_only_the_token_no_login() {
         &ClientMessage::Move {
             x: MOVE_TO.0,
             y: MOVE_TO.1,
+            z: 0.0,
             seq: 1,
         },
     )
@@ -3269,6 +3362,7 @@ async fn several_in_flight_moves_correlate_to_the_right_outcome_by_sequence_numb
         &ClientMessage::Move {
             x: start.0 + 0.1,
             y: start.1,
+            z: 0.0,
             seq: 11,
         },
     )
@@ -3278,6 +3372,7 @@ async fn several_in_flight_moves_correlate_to_the_right_outcome_by_sequence_numb
         &ClientMessage::Move {
             x: start.0 + 400.0,
             y: start.1,
+            z: 0.0,
             seq: 12,
         },
     )
@@ -3287,6 +3382,7 @@ async fn several_in_flight_moves_correlate_to_the_right_outcome_by_sequence_numb
         &ClientMessage::Move {
             x: start.0 + 0.2,
             y: start.1,
+            z: 0.0,
             seq: 13,
         },
     )

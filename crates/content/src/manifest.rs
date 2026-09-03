@@ -205,7 +205,13 @@ impl ZoneManifest {
             problems.push("display_name: must not be empty".to_string());
         }
 
-        // "polygon" is a 2D-only representation; see #89 (2D vs 3D movement/space support decision).
+        // "polygon" is a 2D-only representation. #89 (2D vs 3D movement/
+        // space support decision) is already closed — 3D-first, but not
+        // 3D-only. Bounds staying 2D here isn't blocked on that decision;
+        // it's a deliberate v0 scope cut (#249's own scope note) —
+        // world::spatial::Point is 3D and movement/collision are
+        // 3D-aware, but real 3D zone geometry (floors, interiors) is
+        // #242's job, not this field's, yet.
         if self.bounds.shape != "polygon" {
             problems.push(format!(
                 "bounds.shape: unsupported shape {:?} (only \"polygon\" is supported)",

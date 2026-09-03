@@ -62,8 +62,13 @@
 use std::collections::HashMap;
 use std::sync::RwLock;
 
-use content::manifest::ZoneManifest;
-use world::Point;
+// `content::manifest::Point` (2D), not `world::Point` (3D since #249) —
+// `entry_point`/`centroid`/`nudge_toward` below only ever consume/produce
+// manifest-declared geometry (`Link.edge`, `Bounds.points`), which stays
+// 2D deliberately (#242 owns real 3D zone geometry). The caller
+// (`main::complete_zone_transition`) combines the 2D result with the
+// crossing entity's own z to build a real `world::Point`.
+use content::manifest::{Point, ZoneManifest};
 
 use common::id::EntityId;
 

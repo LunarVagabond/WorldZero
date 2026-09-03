@@ -929,13 +929,14 @@ fn handle_tick_outcomes(
     let tick = zone.current_tick();
     for (entity_id, outcome) in outcomes {
         match outcome {
-            MovementOutcome::Applied { seq, to: (x, y) } => {
+            MovementOutcome::Applied { seq, to: (x, y, z) } => {
                 broadcast_all(
                     source_sessions,
                     ServerMessage::Moved {
                         entity_id: entity_id.to_string(),
                         x,
                         y,
+                        z,
                         seq,
                         tick,
                     },
@@ -1009,7 +1010,12 @@ async fn complete_zone_transition(
         return;
     };
 
-    let entry: Point = zones.entry_point(&source_zone_id, &target_zone_id);
+    // `entry_point` is manifest-derived and stays 2D (see
+    // `zone_registry`'s own doc comment) — a zone-link crossing doesn't
+    // carry the mover's prior z across (that's #242's "which floor do
+    // you arrive on" territory, not this), so it resets to ground level.
+    let entry_2d: content::manifest::Point = zones.entry_point(&source_zone_id, &target_zone_id);
+    let entry: Point = (entry_2d.0, entry_2d.1, 0.0);
     let message = spawn_into_layer(&target, target_zone_id, entity_id, entry, sender.clone()).await;
     if let Ok(envelope) = message.into_envelope() {
         let _ = sender.send(envelope);
@@ -1050,6 +1056,7 @@ async fn spawn_into_layer(
             entity_type: session::entity_type_label(kind),
             x: position.0,
             y: position.1,
+            z: position.2,
         })
         .collect();
 
@@ -1061,6 +1068,7 @@ async fn spawn_into_layer(
             entity_type: session::entity_type_label(EntityKind::Player),
             x: position.0,
             y: position.1,
+            z: position.2,
         },
     );
 
@@ -1074,6 +1082,7 @@ async fn spawn_into_layer(
         entity_id: entity_id.to_string(),
         x: position.0,
         y: position.1,
+        z: position.2,
         roster,
         tick,
     }
