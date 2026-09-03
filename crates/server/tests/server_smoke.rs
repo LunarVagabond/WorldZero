@@ -1515,9 +1515,14 @@ async fn zone_transition_crosses_a_link_without_reconnecting() {
 
     // A freshly created character starts at (0, 0) in the pack's first
     // zone — greenwood-forest (config/content-pack.example.yaml's
-    // declaration order).
+    // declaration order). #240: `Joined` itself carries that zone_id, no
+    // need to wait for a later `ZoneChanged` to learn it.
     let own_entity_id = loop {
-        if let ServerMessage::Joined { entity_id, .. } = recv_world(&mut stream).await {
+        if let ServerMessage::Joined {
+            entity_id, zone_id, ..
+        } = recv_world(&mut stream).await
+        {
+            assert_eq!(zone_id, "greenwood-forest");
             break entity_id;
         }
     };

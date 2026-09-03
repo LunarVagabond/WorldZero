@@ -175,6 +175,11 @@ pub enum ServerMessage {
         /// baseline for reasoning about the ordering/staleness of every
         /// later `Moved`/`Rejected`.
         tick: u64,
+        /// The zone this connection actually spawned into (the realm's
+        /// default zone for a new character, or the character's
+        /// last-known zone for a returning one) — #240, so a client never
+        /// has to guess before a later `ZoneChanged` (if any) arrives.
+        zone_id: String,
     },
     /// An entity (never this connection's own — see `Joined` above)
     /// newly exists in the zone — broadcast to already-connected clients
@@ -595,6 +600,7 @@ impl From<&ServerMessage> for proto::ServerMessage {
                 z,
                 roster,
                 tick,
+                zone_id,
             } => Kind::Joined(proto::Joined {
                 entity_id: entity_id.clone(),
                 x: *x,
@@ -602,6 +608,7 @@ impl From<&ServerMessage> for proto::ServerMessage {
                 z: *z,
                 roster: roster.iter().map(proto::RosterEntry::from).collect(),
                 tick: *tick,
+                zone_id: zone_id.clone(),
             }),
             ServerMessage::EntitySpawned {
                 entity_id,
@@ -746,6 +753,7 @@ impl TryFrom<proto::ServerMessage> for ServerMessage {
                 z,
                 roster,
                 tick,
+                zone_id,
             })) => Ok(ServerMessage::Joined {
                 entity_id,
                 x,
@@ -753,6 +761,7 @@ impl TryFrom<proto::ServerMessage> for ServerMessage {
                 z,
                 roster: roster.into_iter().map(RosterEntry::from).collect(),
                 tick,
+                zone_id,
             }),
             Some(Kind::EntitySpawned(proto::EntitySpawned {
                 entity_id,
@@ -980,13 +989,15 @@ mod tests {
                 z: 6.0,
             }],
             tick: 42,
+            zone_id: "greenwood-forest".to_string(),
         };
         let envelope = message.into_envelope().unwrap();
         let decoded = ServerMessage::from_envelope(&envelope).unwrap();
         assert!(matches!(
             decoded,
-            ServerMessage::Joined { z, roster, .. }
+            ServerMessage::Joined { z, roster, zone_id, .. }
                 if z == 5.0 && roster.len() == 1 && roster[0].entity_id == "e2" && roster[0].z == 6.0
+                    && zone_id == "greenwood-forest"
         ));
     }
 
