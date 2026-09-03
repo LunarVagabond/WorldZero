@@ -95,6 +95,15 @@ impl BoundRealmLiveness {
 
         Ok(row.is_some())
     }
+
+    /// [`Self::is_live`] against this store's own pool — for a caller
+    /// that isn't already inside a transaction (unlike `transfer::execute`)
+    /// and just wants a plain read, e.g. `server::session`'s
+    /// `DeleteCharacter` guarding against deleting a character that's
+    /// currently connected (#246).
+    pub async fn is_live_now(&self, character_id: CharacterId) -> Result<bool> {
+        Self::is_live(&self.pool, character_id).await
+    }
 }
 
 #[cfg(test)]
@@ -172,6 +181,22 @@ mod tests {
                 .await
                 .unwrap()
         );
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn is_live_now_matches_is_live_against_the_stores_own_pool() {
+        let (liveness, character_id, realm_id) = liveness_with_character().await;
+        assert!(!liveness.is_live_now(character_id).await.unwrap());
+
+        liveness
+            .join(character_id, realm_id, Duration::from_secs(30))
+            .await
+            .unwrap();
+        assert!(liveness.is_live_now(character_id).await.unwrap());
+
+        liveness.leave(character_id).await.unwrap();
+        assert!(!liveness.is_live_now(character_id).await.unwrap());
     }
 
     #[tokio::test]

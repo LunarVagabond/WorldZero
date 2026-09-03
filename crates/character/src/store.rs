@@ -222,6 +222,31 @@ impl CharacterStore {
         Ok(row.map(row_to_character_summary))
     }
 
+    /// Permanently deletes `character_id` — a hard delete, not a soft
+    /// `deleted_at` flag: every other table referencing `character_id`
+    /// (`items`, `character_currency`, `character_bound_liveness`,
+    /// `character_sessions`, `plugin_state`, `party_members`, ...)
+    /// declares `ON DELETE CASCADE`, so this cleanly removes a
+    /// character's whole footprint in one statement with nothing left
+    /// orphaned. `transfer_log` is the one deliberate exception — its own
+    /// migration comment explains why `character_id` there is *not* a
+    /// foreign key (a failed transfer against a nonexistent character
+    /// must still be logged), so a deleted character's transfer history
+    /// survives this call untouched, same as it already survives a
+    /// realm's own deletion. Caller (#246's `server::session`) is
+    /// responsible for the ownership check (`Self::get_for_account`) and
+    /// any "is this character currently connected" guard *before* calling
+    /// this — this method itself does neither. A harmless no-op if
+    /// `character_id` doesn't exist.
+    pub async fn delete(&self, character_id: CharacterId) -> Result<()> {
+        sqlx::query("DELETE FROM characters WHERE id = $1")
+            .bind(character_id.as_uuid())
+            .execute(&self.pool)
+            .await
+            .map_err(|e| Error::wrap("character", "failed to delete character", e))?;
+        Ok(())
+    }
+
     /// How many characters `account_id` already owns on `realm_id` — the
     /// count #193's character-creation cap checks against
     /// (`WZ_CHARACTER_MAX_PER_ACCOUNT`, enforced by `server`, not this
@@ -698,6 +723,50 @@ stats:
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn delete_removes_the_character() {
+        let (store, account_id, realm_id) = store_with_account().await;
+        let character_id = store
+            .create(account_id, "Aria", realm_id, "greenwood-forest")
+            .await
+            .unwrap();
+
+        store.delete(character_id).await.unwrap();
+
+        assert_eq!(
+            store
+                .get_for_account(character_id, account_id)
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn delete_cascades_to_items() {
+        let (store, character_id) = store_with_character().await;
+        store.grant_item(character_id, "torch", 1).await.unwrap();
+
+        store.delete(character_id).await.unwrap();
+
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM items WHERE character_id = $1")
+                .bind(character_id.as_uuid())
+                .fetch_one(store.pool())
+                .await
+                .unwrap();
+        assert_eq!(remaining, 0);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn delete_of_a_nonexistent_character_is_a_harmless_no_op() {
+        let (store, _account_id, _realm_id) = store_with_account().await;
+        store.delete(CharacterId::new()).await.unwrap();
     }
 
     #[tokio::test]

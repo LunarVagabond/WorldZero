@@ -24,6 +24,9 @@ message ClientMessage {
     // logged in (`transfer::TransferExecutor::transfer`'s active-lease
     // check).
     RequestTransfer request_transfer = 5;
+    // #246: permanently deletes one of this account's own characters —
+    // reachable anywhere in this pre-join phase, same as the others.
+    DeleteCharacter delete_character = 6;
   }
 }
 
@@ -56,6 +59,14 @@ message RequestTransfer {
   string destination_realm_id = 2;
 }
 
+// #246: character_id must name one of the caller's own characters
+// (same ownership check SelectCharacter/RequestTransfer make) and must
+// not currently be connected anywhere — rejected with an Error rather
+// than a panic either way. Permanent: no undo, no soft-delete/restore.
+message DeleteCharacter {
+  string character_id = 1;
+}
+
 message ServerMessage {
   oneof kind {
     CharacterList character_list = 1;
@@ -66,6 +77,8 @@ message ServerMessage {
     CharacterOptions character_options = 5;
     // #225: response to a successful RequestTransfer.
     TransferComplete transfer_complete = 6;
+    // #246: response to a successful DeleteCharacter.
+    CharacterDeleted character_deleted = 7;
   }
 }
 
@@ -113,4 +126,11 @@ message Error {
 message TransferComplete {
   string character_id = 1;
   string realm_id = 2;
+}
+
+// Confirms a successful DeleteCharacter (#246) — character_id no longer
+// exists, on this realm or anywhere else; a subsequent ListCharacters
+// on this same connection no longer includes it.
+message CharacterDeleted {
+  string character_id = 1;
 }

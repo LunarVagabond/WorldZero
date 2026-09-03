@@ -605,6 +605,55 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
                     Err(e) => send_character_error(&mut sink, e.to_string()).await?,
                 }
             }
+            character_protocol::ClientMessage::DeleteCharacter { character_id } => {
+                let Ok(parsed_character_id) = character_id.parse::<CharacterId>() else {
+                    send_character_error(
+                        &mut sink,
+                        format!("{character_id:?} is not a valid character id"),
+                    )
+                    .await?;
+                    continue;
+                };
+                // Same ownership check SelectCharacter/RequestTransfer
+                // make — never a caller-supplied character outside this
+                // account.
+                if deps
+                    .character_store
+                    .get_for_account(parsed_character_id, account_id)
+                    .await?
+                    .is_none()
+                {
+                    send_character_error(
+                        &mut sink,
+                        format!("{character_id:?} is not one of your characters"),
+                    )
+                    .await?;
+                    continue;
+                }
+                // Guard against deleting a character that's connected
+                // right now, on either kind of realm — an open-realm
+                // lease and a bound-realm liveness row are mutually
+                // exclusive per-character (session_lease.rs's own doc:
+                // "bound realms never touch this"), so checking both
+                // unconditionally is correct without first resolving
+                // which policy the character's own realm uses.
+                if deps.character_lease.is_active(parsed_character_id).await?
+                    || deps.bound_liveness.is_live_now(parsed_character_id).await?
+                {
+                    send_character_error(
+                        &mut sink,
+                        format!("{character_id:?} is currently connected and cannot be deleted"),
+                    )
+                    .await?;
+                    continue;
+                }
+                deps.character_store.delete(parsed_character_id).await?;
+                send_character(
+                    &mut sink,
+                    &character_protocol::ServerMessage::CharacterDeleted { character_id },
+                )
+                .await?;
+            }
             character_protocol::ClientMessage::SelectCharacter { character_id } => {
                 let Ok(parsed_id) = character_id.parse::<CharacterId>() else {
                     send_character_error(
