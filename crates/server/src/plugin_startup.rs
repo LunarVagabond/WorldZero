@@ -21,8 +21,8 @@ use std::sync::{Arc, Mutex};
 
 use common::Result;
 use common::id::EntityId;
-use plugin_host::{HostCallbacks, LoadedPlugin, PluginHost, PluginManifest, PluginStateScope};
 use plugin_host::manifest::KNOWN_HOOKS;
+use plugin_host::{HostCallbacks, LoadedPlugin, PluginHost, PluginManifest, PluginStateScope};
 
 use crate::plugin_state::{PluginStateCache, cache_key};
 use crate::session::{BlockedZoneChannels, EntityRoles, Sessions};
