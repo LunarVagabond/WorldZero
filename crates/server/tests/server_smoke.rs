@@ -2841,7 +2841,10 @@ async fn z_is_authoritative_and_survives_a_reconnect() {
         ServerMessage::Joined { z, .. } if z == 0.0
     ));
 
-    const MOVE_TO: (f64, f64, f64) = (0.3, 0.2, 12.5);
+    // 3D distance from the origin must stay within the default speed
+    // cap (0.5m/tick, same as every other move-test in this file) —
+    // sqrt(0.1² + 0.1² + 0.3²) ≈ 0.332m.
+    const MOVE_TO: (f64, f64, f64) = (0.1, 0.1, 0.3);
     send_world(
         &mut stream,
         &ClientMessage::Move {
