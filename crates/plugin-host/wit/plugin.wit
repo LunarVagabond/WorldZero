@@ -55,7 +55,7 @@
 // and/or lands as a new world, rather than silently changing what
 // `plugin` means underneath existing compiled plugins.
 
-package worldzero:plugin@0.12.0;
+package worldzero:plugin@0.13.0;
 
 /// What the host exposes for a plugin to call out to — nothing crosses
 /// this boundary that isn't listed here (docs/PROPOSAL.md, "Plugin
@@ -105,15 +105,16 @@ interface host {
     /// doesn't name a real character.
     apply-stat-delta-for-character: func(character-id: string, stat-key: string, delta: s64) -> result<_, string>;
 
-    /// Queues a move for `entity-id` to `(x, y)`, applied and validated
-    /// on the zone's next tick through the exact same authoritative path
-    /// a player's own movement goes through (`world::Zone::request_move`
-    /// / `world::movement::validate_movement`) — a plugin never moves an
-    /// entity by writing its position directly. This is the primitive
-    /// `on-npc-tick` is expected to drive: the host hands the plugin its
-    /// NPC's route data every tick, the plugin decides where it should
-    /// be next and calls this to make it happen.
-    move-entity: func(entity-id: string, x: f64, y: f64) -> result<_, string>;
+    /// Queues a move for `entity-id` to `(x, y, z)`, applied and
+    /// validated on the zone's next tick through the exact same
+    /// authoritative path a player's own movement goes through
+    /// (`world::Zone::request_move` / `world::movement::validate_movement`,
+    /// 3D-aware since #249) — a plugin never moves an entity by writing
+    /// its position directly. This is the primitive `on-npc-tick` is
+    /// expected to drive: the host hands the plugin its NPC's route data
+    /// every tick, the plugin decides where it should be next and calls
+    /// this to make it happen.
+    move-entity: func(entity-id: string, x: f64, y: f64, z: f64) -> result<_, string>;
 
     /// Grants `quantity` of `item-type` to `entity-id` — queued and
     /// applied through `character::CharacterStore::grant_item` on the
@@ -383,14 +384,16 @@ interface hooks {
 
     /// Called once per simulation tick, per zone, for an NPC entity whose
     /// spawn table declared a `route_id` (content::manifest::Route) —
-    /// gives the plugin the NPC's current position and its full route
-    /// (waypoints, whether it loops, its declared speed) so the plugin
-    /// can decide the NPC's next position and drive it there via
-    /// `move-entity`. The host never moves an NPC on its own
-    /// (docs/PROPOSAL.md, "World Content": "the core provides the data
-    /// structure and movement validation; behavior is a plugin
-    /// concern").
-    on-npc-tick: func(zone-id: string, entity-id: string, x: f64, y: f64, route-waypoints: list<tuple<f64, f64>>, route-loop: bool, route-speed: f64, dt: f64);
+    /// gives the plugin the NPC's current position (`x`, `y`, `z` —
+    /// authoritative since #249) and its full route (waypoints, whether
+    /// it loops, its declared speed) so the plugin can decide the NPC's
+    /// next position and drive it there via `move-entity`. The host
+    /// never moves an NPC on its own (docs/PROPOSAL.md, "World Content":
+    /// "the core provides the data structure and movement validation;
+    /// behavior is a plugin concern"). `route-waypoints` stays 2D
+    /// (`content::manifest::Route.waypoints` — #249's scope note: real
+    /// 3D zone/route geometry is #242's job, not this interface's).
+    on-npc-tick: func(zone-id: string, entity-id: string, x: f64, y: f64, z: f64, route-waypoints: list<tuple<f64, f64>>, route-loop: bool, route-speed: f64, dt: f64);
 
     /// Fired when a player interacts with an NPC entity specifically
     /// (as opposed to `on-interact`'s generic trigger-volume case) —

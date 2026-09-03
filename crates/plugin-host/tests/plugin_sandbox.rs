@@ -35,7 +35,7 @@ fn manifest() -> PluginManifest {
         r#"
 [plugin]
 name = "test-plugin"
-host_api_version = "0.12.0"
+host_api_version = "0.13.0"
 capabilities = ["spawning", "movement", "combat", "economy", "messaging"]
 message_types = [1000]
 "#,
@@ -53,7 +53,7 @@ fn restricted_manifest() -> PluginManifest {
         r#"
 [plugin]
 name = "test-plugin"
-host_api_version = "0.12.0"
+host_api_version = "0.13.0"
 capabilities = ["messaging"]
 message_types = [1000]
 "#,
@@ -61,13 +61,17 @@ message_types = [1000]
     .unwrap()
 }
 
+/// `(entity_id, x, y, z)` recorded via `move-entity` — `z` is
+/// authoritative since #249/#254.
+type RecordedMoves = Arc<Mutex<Vec<(String, f64, f64, f64)>>>;
+
 #[derive(Default, Clone)]
 struct RecordingCallbacks {
     spawned: Arc<Mutex<Vec<String>>>,
     messages: Arc<Mutex<Vec<(String, String)>>>,
     stat_deltas: Arc<Mutex<Vec<(String, String, i64)>>>,
     character_stat_deltas: Arc<Mutex<Vec<(String, String, i64)>>>,
-    moves: Arc<Mutex<Vec<(String, f64, f64)>>>,
+    moves: RecordedMoves,
     item_grants: Arc<Mutex<Vec<(String, String, i64)>>>,
     item_removals: Arc<Mutex<Vec<(String, String, i64)>>>,
     currency_deltas: Arc<Mutex<Vec<(String, String, i64)>>>,
@@ -138,11 +142,11 @@ impl HostCallbacks for RecordingCallbacks {
         Ok(())
     }
 
-    fn move_entity(&mut self, entity_id: &str, x: f64, y: f64) -> Result<(), String> {
+    fn move_entity(&mut self, entity_id: &str, x: f64, y: f64, z: f64) -> Result<(), String> {
         self.moves
             .lock()
             .unwrap()
-            .push((entity_id.to_string(), x, y));
+            .push((entity_id.to_string(), x, y, z));
         Ok(())
     }
 
@@ -333,6 +337,7 @@ fn a_plugin_computes_damage_ticks_a_route_and_handles_a_chat_command() {
             "npc-1",
             0.0,
             0.0,
+            7.0,
             &[(5.0, 5.0), (10.0, 10.0)],
             true,
             2.0,
@@ -341,7 +346,9 @@ fn a_plugin_computes_damage_ticks_a_route_and_handles_a_chat_command() {
         .expect("on_npc_tick should succeed");
     assert_eq!(
         callbacks.moves.lock().unwrap().as_slice(),
-        [("npc-1".to_string(), 5.0, 5.0)]
+        // The fixture's on_npc_tick holds the NPC's current z steady
+        // (route waypoints are 2D) — 7.0, unchanged from the call above.
+        [("npc-1".to_string(), 5.0, 5.0, 7.0)]
     );
 
     plugin

@@ -399,6 +399,7 @@ pub fn spawn_world_actor(
                                         &entity_str,
                                         position.0,
                                         position.1,
+                                        position.2,
                                         &route.waypoints,
                                         route.is_loop,
                                         route.speed,
@@ -754,7 +755,7 @@ async fn fire_hook(
 #[allow(clippy::too_many_arguments)]
 async fn apply_plugin_pending_effects(
     zone: &mut Zone,
-    pending_moves: Vec<(String, f64, f64)>,
+    pending_moves: Vec<(String, f64, f64, f64)>,
     pending_stat_deltas: Vec<(String, String, i64)>,
     pending_item_grants: Vec<(String, String, i64)>,
     pending_item_removals: Vec<(String, String, i64)>,
@@ -778,15 +779,13 @@ async fn apply_plugin_pending_effects(
     // this codebase already accepts).
     global_sessions: &Sessions,
 ) -> Vec<(String, String, i64)> {
-    for (entity_id, x, y) in pending_moves {
+    for (entity_id, x, y, z) in pending_moves {
         match entity_id.parse::<EntityId>() {
             // `0`: a plugin-driven move (`move-entity`) has no client
-            // sequence number to echo (#196). `z: 0.0` — the `move-entity`
-            // WIT host function is still 2D-only (#249's scope note: the
-            // plugin ABI is a separately-versioned surface, not touched
-            // by this ticket); a real z parameter there is tracked as a
-            // follow-up.
-            Ok(entity_id) => zone.request_move(entity_id, (x, y, 0.0), 0),
+            // sequence number to echo (#196). `z` is authoritative here
+            // too, same as a player's own move (#254, the plugin-ABI
+            // half of #249).
+            Ok(entity_id) => zone.request_move(entity_id, (x, y, z), 0),
             Err(_) => {
                 tracing::warn!(
                     entity_id,

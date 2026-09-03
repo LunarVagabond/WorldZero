@@ -33,6 +33,11 @@ use crate::session_protocol::ServerMessage;
 /// `PluginCallbacks`'s `pending_state_writes` field.
 type PendingStateWrites = Arc<Mutex<Vec<(PluginStateScope, String, Vec<u8>)>>>;
 
+/// `(entity_id, x, y, z)` requested via `move-entity` (#249/#254 — `z`
+/// is authoritative), queued for the caller's own drain — see
+/// `PluginCallbacks`'s `pending_moves` field.
+type PendingMoves = Arc<Mutex<Vec<(String, f64, f64, f64)>>>;
+
 /// `HostCallbacks` used for the plugin's whole lifetime — both the
 /// one-time `on_load` call at startup and every later `on_message` call
 /// once the plugin is owned by the world actor (#95). `spawn_npc` always
@@ -57,9 +62,9 @@ pub struct PluginCallbacks {
     /// this is only ever called from `on-character-create`, before any
     /// entity exists.
     pending_character_stat_deltas: Arc<Mutex<Vec<(String, String, i64)>>>,
-    /// `(entity_id, x, y)`, drained and applied via
+    /// `(entity_id, x, y, z)`, drained and applied via
     /// `world::Zone::request_move` by the caller.
-    pending_moves: Arc<Mutex<Vec<(String, f64, f64)>>>,
+    pending_moves: PendingMoves,
     /// `(entity_id, item_type, quantity)`, drained and applied through
     /// `character::CharacterStore::grant_item` by the caller (#57/#112).
     pending_item_grants: Arc<Mutex<Vec<(String, String, i64)>>>,
@@ -168,11 +173,17 @@ impl HostCallbacks for PluginCallbacks {
         Ok(())
     }
 
-    fn move_entity(&mut self, entity_id: &str, x: f64, y: f64) -> std::result::Result<(), String> {
+    fn move_entity(
+        &mut self,
+        entity_id: &str,
+        x: f64,
+        y: f64,
+        z: f64,
+    ) -> std::result::Result<(), String> {
         self.pending_moves
             .lock()
             .unwrap()
-            .push((entity_id.to_string(), x, y));
+            .push((entity_id.to_string(), x, y, z));
         Ok(())
     }
 
@@ -333,7 +344,7 @@ pub struct PluginRuntime {
     pending_spawns: Arc<Mutex<Vec<String>>>,
     pending_stat_deltas: Arc<Mutex<Vec<(String, String, i64)>>>,
     pending_character_stat_deltas: Arc<Mutex<Vec<(String, String, i64)>>>,
-    pending_moves: Arc<Mutex<Vec<(String, f64, f64)>>>,
+    pending_moves: PendingMoves,
     pending_item_grants: Arc<Mutex<Vec<(String, String, i64)>>>,
     pending_item_removals: Arc<Mutex<Vec<(String, String, i64)>>>,
     pending_currency_deltas: Arc<Mutex<Vec<(String, String, i64)>>>,
@@ -362,9 +373,9 @@ impl PluginRuntime {
         std::mem::take(&mut self.pending_character_stat_deltas.lock().unwrap())
     }
 
-    /// `(entity_id, x, y)` requested via `move-entity` since the last
+    /// `(entity_id, x, y, z)` requested via `move-entity` since the last
     /// drain, in call order.
-    pub fn drain_pending_moves(&self) -> Vec<(String, f64, f64)> {
+    pub fn drain_pending_moves(&self) -> Vec<(String, f64, f64, f64)> {
         std::mem::take(&mut self.pending_moves.lock().unwrap())
     }
 
