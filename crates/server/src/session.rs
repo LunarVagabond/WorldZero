@@ -107,6 +107,85 @@ pub type AccountEntities = Arc<Mutex<HashMap<AccountId, EntityId>>>;
 /// `PendingPartyInvites` (see its own doc comment for why).
 pub type PendingGuildInvites = Arc<Mutex<HashMap<EntityId, EntityId>>>;
 
+/// A trade request awaiting a response, keyed by the *invitee's* entity
+/// id (value: the requester's entity id) — #278's request/accept/decline
+/// flow, same "entity-id-scoped, process-wide, not durable, last request
+/// wins" shape as `PendingPartyInvites`/`PendingGuildInvites` (see
+/// `PendingPartyInvites`'s own doc comment for why).
+pub type PendingTradeRequests = Arc<Mutex<HashMap<EntityId, EntityId>>>;
+
+/// One side's negotiated trade offer, as *sets* (not deltas) keyed by
+/// item_type/currency_key — `TradeOfferItem`/`TradeOfferCurrency` always
+/// overwrite the whole entry for that key, `0` removing it. Ownership
+/// isn't validated here at all (see [`TradeSession`]'s own doc comment)
+/// — this is purely negotiation-state bookkeeping.
+#[derive(Debug, Clone, Default)]
+pub struct TradeOffer {
+    pub items: HashMap<String, i64>,
+    pub currency: HashMap<String, i64>,
+    pub confirmed: bool,
+}
+
+/// An in-progress trade negotiation between exactly two connected
+/// players (#278) — ephemeral, in-memory only, same "nothing durable
+/// until it actually executes" shape as a pending party/guild invite:
+/// there's nothing worth persisting about a negotiation that never
+/// completed, and a disconnect mid-negotiation just drops the session
+/// (the still-connected side's next offer/confirm/cancel simply finds no
+/// session and gets an `Error`, same as if it had never opened).
+/// Deliberately holds no validated "this is real" state — a side's
+/// offered items/currency are only re-checked against actual holdings at
+/// execution time (`character::CharacterStore::execute_trade`), not
+/// while being negotiated, so nothing here is a source of truth for
+/// anything except what's currently *offered*.
+#[derive(Debug, Clone)]
+pub struct TradeSession {
+    pub entity_a: EntityId,
+    pub entity_b: EntityId,
+    pub offer_a: TradeOffer,
+    pub offer_b: TradeOffer,
+}
+
+impl TradeSession {
+    fn other(&self, entity_id: EntityId) -> Option<EntityId> {
+        if entity_id == self.entity_a {
+            Some(self.entity_b)
+        } else if entity_id == self.entity_b {
+            Some(self.entity_a)
+        } else {
+            None
+        }
+    }
+
+    fn offer(&self, entity_id: EntityId) -> Option<&TradeOffer> {
+        if entity_id == self.entity_a {
+            Some(&self.offer_a)
+        } else if entity_id == self.entity_b {
+            Some(&self.offer_b)
+        } else {
+            None
+        }
+    }
+
+    fn offer_mut(&mut self, entity_id: EntityId) -> Option<&mut TradeOffer> {
+        if entity_id == self.entity_a {
+            Some(&mut self.offer_a)
+        } else if entity_id == self.entity_b {
+            Some(&mut self.offer_b)
+        } else {
+            None
+        }
+    }
+}
+
+/// Every currently-active trade session, keyed by *both* participants'
+/// entity ids pointing at the same shared session (#278) — so either
+/// side's handler can look up "am I in a trade, and with what state" via
+/// a single map lookup on its own entity id, and a mutation through
+/// either key is immediately visible to the other. Removed under both
+/// keys together on cancel/completion/either side's disconnect.
+pub type ActiveTrades = Arc<Mutex<HashMap<EntityId, Arc<Mutex<TradeSession>>>>>;
+
 /// Which roles (docs/specs/Auth_Spec.md, "Account roles", #114/#124) the
 /// account behind a connected player entity holds — populated once at
 /// join time (below) and consulted synchronously by `plugin_startup`'s
@@ -251,6 +330,10 @@ pub struct SessionDeps {
     pub guild_store: Arc<guild::GuildStore>,
     /// See [`PendingGuildInvites`]'s own doc comment (#179).
     pub pending_guild_invites: PendingGuildInvites,
+    /// See [`PendingTradeRequests`]'s own doc comment (#278).
+    pub pending_trade_requests: PendingTradeRequests,
+    /// See [`ActiveTrades`]'s own doc comment (#278).
+    pub active_trades: ActiveTrades,
     /// See [`EntityAccounts`]'s own doc comment (#179).
     pub entity_accounts: EntityAccounts,
     /// See [`AccountEntities`]'s own doc comment (#179).
@@ -1366,6 +1449,212 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
                                 }
                             }
                         }
+                        Ok(ClientMessage::TradeRequest { target_entity_id }) => {
+                            let Ok(target_entity_id) = target_entity_id.parse::<EntityId>() else {
+                                send_world(&mut sink, &ServerMessage::Error {
+                                    message: format!("{target_entity_id:?} is not a valid entity id"),
+                                }).await?;
+                                continue;
+                            };
+                            if target_entity_id == entity_id {
+                                send_world(&mut sink, &ServerMessage::Error {
+                                    message: "you can't trade with yourself".to_string(),
+                                }).await?;
+                                continue;
+                            }
+                            let target_is_player = deps
+                                .entity_characters
+                                .lock()
+                                .unwrap()
+                                .contains_key(&target_entity_id);
+                            if !target_is_player {
+                                send_world(&mut sink, &ServerMessage::Error {
+                                    message: "that entity isn't a player you can trade with".to_string(),
+                                }).await?;
+                                continue;
+                            }
+                            deps.pending_trade_requests
+                                .lock()
+                                .unwrap()
+                                .insert(target_entity_id, entity_id);
+                            send_to(&deps.global_sessions, target_entity_id, ServerMessage::TradeRequestReceived {
+                                from_entity_id: entity_id.to_string(),
+                            });
+                        }
+                        Ok(ClientMessage::TradeRequestResponse { accept }) => {
+                            let Some(requester_entity_id) = deps
+                                .pending_trade_requests
+                                .lock()
+                                .unwrap()
+                                .remove(&entity_id)
+                            else {
+                                send_world(&mut sink, &ServerMessage::Error {
+                                    message: "you have no pending trade request".to_string(),
+                                }).await?;
+                                continue;
+                            };
+                            if !accept {
+                                send_to(&deps.global_sessions, requester_entity_id, ServerMessage::TradeRequestDeclined {
+                                    by_entity_id: entity_id.to_string(),
+                                });
+                                continue;
+                            }
+                            let session = Arc::new(Mutex::new(TradeSession {
+                                entity_a: requester_entity_id,
+                                entity_b: entity_id,
+                                offer_a: TradeOffer::default(),
+                                offer_b: TradeOffer::default(),
+                            }));
+                            deps.active_trades.lock().unwrap().insert(requester_entity_id, session.clone());
+                            deps.active_trades.lock().unwrap().insert(entity_id, session.clone());
+                            push_trade_state_both(&deps, &session.lock().unwrap());
+                        }
+                        Ok(ClientMessage::TradeOfferItem { item_type, quantity }) => {
+                            if quantity < 0 {
+                                send_world(&mut sink, &ServerMessage::Error {
+                                    message: format!("trade offer quantity for {item_type:?} can't be negative"),
+                                }).await?;
+                                continue;
+                            }
+                            let Some(session) = deps.active_trades.lock().unwrap().get(&entity_id).cloned() else {
+                                send_world(&mut sink, &ServerMessage::Error {
+                                    message: "you have no active trade".to_string(),
+                                }).await?;
+                                continue;
+                            };
+                            let mut session = session.lock().unwrap();
+                            if let Some(offer) = session.offer_mut(entity_id) {
+                                if quantity == 0 {
+                                    offer.items.remove(&item_type);
+                                } else {
+                                    offer.items.insert(item_type, quantity);
+                                }
+                            }
+                            session.offer_a.confirmed = false;
+                            session.offer_b.confirmed = false;
+                            push_trade_state_both(&deps, &session);
+                        }
+                        Ok(ClientMessage::TradeOfferCurrency { currency_key, amount }) => {
+                            if amount < 0 {
+                                send_world(&mut sink, &ServerMessage::Error {
+                                    message: format!("trade offer amount for {currency_key:?} can't be negative"),
+                                }).await?;
+                                continue;
+                            }
+                            let Some(session) = deps.active_trades.lock().unwrap().get(&entity_id).cloned() else {
+                                send_world(&mut sink, &ServerMessage::Error {
+                                    message: "you have no active trade".to_string(),
+                                }).await?;
+                                continue;
+                            };
+                            let mut session = session.lock().unwrap();
+                            if let Some(offer) = session.offer_mut(entity_id) {
+                                if amount == 0 {
+                                    offer.currency.remove(&currency_key);
+                                } else {
+                                    offer.currency.insert(currency_key, amount);
+                                }
+                            }
+                            session.offer_a.confirmed = false;
+                            session.offer_b.confirmed = false;
+                            push_trade_state_both(&deps, &session);
+                        }
+                        Ok(ClientMessage::TradeConfirm {}) => {
+                            let Some(session_arc) = deps.active_trades.lock().unwrap().get(&entity_id).cloned() else {
+                                send_world(&mut sink, &ServerMessage::Error {
+                                    message: "you have no active trade".to_string(),
+                                }).await?;
+                                continue;
+                            };
+                            let both_confirmed = {
+                                let mut session = session_arc.lock().unwrap();
+                                if let Some(offer) = session.offer_mut(entity_id) {
+                                    offer.confirmed = true;
+                                }
+                                session.offer_a.confirmed && session.offer_b.confirmed
+                            };
+                            if !both_confirmed {
+                                push_trade_state_both(&deps, &session_arc.lock().unwrap());
+                                continue;
+                            }
+                            let (entity_a, entity_b, offer_a_input, offer_b_input) = {
+                                let session = session_arc.lock().unwrap();
+                                (
+                                    session.entity_a,
+                                    session.entity_b,
+                                    trade_offer_input(&session.offer_a),
+                                    trade_offer_input(&session.offer_b),
+                                )
+                            };
+                            let character_ids = {
+                                let entity_characters = deps.entity_characters.lock().unwrap();
+                                entity_characters.get(&entity_a).copied().zip(entity_characters.get(&entity_b).copied())
+                            };
+                            let Some((character_a, character_b)) = character_ids else {
+                                let session_snapshot = {
+                                    let mut session = session_arc.lock().unwrap();
+                                    session.offer_a.confirmed = false;
+                                    session.offer_b.confirmed = false;
+                                    session.clone()
+                                };
+                                send_world(&mut sink, &ServerMessage::Error {
+                                    message: "the other player is no longer connected".to_string(),
+                                }).await?;
+                                push_trade_state_both(&deps, &session_snapshot);
+                                continue;
+                            };
+                            match deps.character_store.execute_trade(character_a, &offer_a_input, character_b, &offer_b_input).await {
+                                Ok(result) => {
+                                    deps.active_trades.lock().unwrap().remove(&entity_a);
+                                    deps.active_trades.lock().unwrap().remove(&entity_b);
+                                    for (item_type, quantity) in result.a.item_changes {
+                                        send_to(&deps.global_sessions, entity_a, ServerMessage::ItemChanged { item_type, quantity });
+                                    }
+                                    for (currency_key, balance) in result.a.currency_changes {
+                                        send_to(&deps.global_sessions, entity_a, ServerMessage::CurrencyChanged { currency_key, balance });
+                                    }
+                                    send_to(&deps.global_sessions, entity_a, ServerMessage::TradeCompleted {});
+                                    for (item_type, quantity) in result.b.item_changes {
+                                        send_to(&deps.global_sessions, entity_b, ServerMessage::ItemChanged { item_type, quantity });
+                                    }
+                                    for (currency_key, balance) in result.b.currency_changes {
+                                        send_to(&deps.global_sessions, entity_b, ServerMessage::CurrencyChanged { currency_key, balance });
+                                    }
+                                    send_to(&deps.global_sessions, entity_b, ServerMessage::TradeCompleted {});
+                                }
+                                Err(e) => {
+                                    let session_snapshot = {
+                                        let mut session = session_arc.lock().unwrap();
+                                        session.offer_a.confirmed = false;
+                                        session.offer_b.confirmed = false;
+                                        session.clone()
+                                    };
+                                    send_world(&mut sink, &ServerMessage::Error { message: e.to_string() }).await?;
+                                    push_trade_state_both(&deps, &session_snapshot);
+                                }
+                            }
+                        }
+                        Ok(ClientMessage::TradeCancel {}) => {
+                            // A plain `let` first, not `if let` directly on
+                            // the locking expression — `if let`'s scrutinee
+                            // temporary (the MutexGuard from `.lock()`)
+                            // would otherwise live for the whole block
+                            // below, which re-locks the same mutex and
+                            // deadlocks.
+                            let session = deps.active_trades.lock().unwrap().remove(&entity_id);
+                            if let Some(session) = session {
+                                let other_entity_id = session.lock().unwrap().other(entity_id);
+                                if let Some(other_entity_id) = other_entity_id {
+                                    deps.active_trades.lock().unwrap().remove(&other_entity_id);
+                                    send_to(&deps.global_sessions, other_entity_id, ServerMessage::TradeCancelled {
+                                        by_entity_id: entity_id.to_string(),
+                                    });
+                                }
+                                send_to(&deps.global_sessions, entity_id, ServerMessage::TradeCancelled {
+                                    by_entity_id: entity_id.to_string(),
+                                });
+                            }
+                        }
                         Ok(ClientMessage::CraftItem { recipe_key }) => {
                             let recipe = deps.crafting_schema.resolve(&recipe_key).cloned();
                             match recipe {
@@ -1574,6 +1863,31 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
         .lock()
         .unwrap()
         .remove(&entity_id);
+    deps.pending_trade_requests
+        .lock()
+        .unwrap()
+        .remove(&entity_id);
+    // #278: a disconnect mid-negotiation drops the trade session outright
+    // (same "nothing durable until it actually executes" stance
+    // `TradeSession`'s own doc comment takes) — the still-connected side
+    // is told via `TradeCancelled` rather than being left to discover it
+    // only when its next offer/confirm/cancel finds no session.
+    // A plain `let` first, not `if let` directly on the locking
+    // expression — see the `TradeCancel` handler's own comment on why.
+    let disconnecting_trade_session = deps.active_trades.lock().unwrap().remove(&entity_id);
+    if let Some(session) = disconnecting_trade_session {
+        let other_entity_id = session.lock().unwrap().other(entity_id);
+        if let Some(other_entity_id) = other_entity_id {
+            deps.active_trades.lock().unwrap().remove(&other_entity_id);
+            send_to(
+                &deps.global_sessions,
+                other_entity_id,
+                ServerMessage::TradeCancelled {
+                    by_entity_id: entity_id.to_string(),
+                },
+            );
+        }
+    }
     // #21's clean-disconnect release — a harmless no-op for a bound-realm
     // character (never took a lease to begin with), so this runs
     // unconditionally rather than branching on `realm_open_or_bound`.
@@ -1738,6 +2052,69 @@ async fn perform_group_layer_move(
         _ => {}
     }
     Ok(())
+}
+
+/// Converts an in-memory `TradeOffer`'s negotiation state into the
+/// `character::TradeOfferInput` shape `execute_trade` actually consumes
+/// (#278) — a plain `HashMap` → `Vec` shape change, no filtering needed
+/// since `0`-quantity/amount entries are never stored in a `TradeOffer`
+/// to begin with (`TradeOfferItem`/`TradeOfferCurrency`'s handlers remove
+/// the key outright instead).
+fn trade_offer_input(offer: &TradeOffer) -> character::TradeOfferInput {
+    character::TradeOfferInput {
+        items: offer.items.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+        currency: offer
+            .currency
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect(),
+    }
+}
+
+/// Builds `viewer`'s own `TradeStateChanged` for `session` — `None` if
+/// `viewer` isn't actually a participant (shouldn't happen given how
+/// `ActiveTrades` is populated, but defensive rather than panicking).
+fn build_trade_state(session: &TradeSession, viewer: EntityId) -> Option<ServerMessage> {
+    let other_entity_id = session.other(viewer)?;
+    let your_offer = session.offer(viewer)?;
+    let their_offer = session.offer(other_entity_id)?;
+    Some(ServerMessage::TradeStateChanged {
+        other_entity_id: other_entity_id.to_string(),
+        your_items: your_offer
+            .items
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect(),
+        your_currency: your_offer
+            .currency
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect(),
+        your_confirmed: your_offer.confirmed,
+        their_items: their_offer
+            .items
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect(),
+        their_currency: their_offer
+            .currency
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect(),
+        their_confirmed: their_offer.confirmed,
+    })
+}
+
+/// Pushes both participants' own `TradeStateChanged` after any offer/
+/// confirm change to `session` (#278) — each side always sees its own
+/// point of view (`build_trade_state`), never a shared/mirrored payload.
+fn push_trade_state_both(deps: &SessionDeps, session: &TradeSession) {
+    if let Some(message) = build_trade_state(session, session.entity_a) {
+        send_to(&deps.global_sessions, session.entity_a, message);
+    }
+    if let Some(message) = build_trade_state(session, session.entity_b) {
+        send_to(&deps.global_sessions, session.entity_b, message);
+    }
 }
 
 /// Sends every currently-online character in `interested` a fresh

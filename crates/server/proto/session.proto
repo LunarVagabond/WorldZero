@@ -101,6 +101,12 @@ message ClientMessage {
     MoveItemToSlot move_item_to_slot = 22;
     EquipItem equip_item = 23;
     UnequipItem unequip_item = 24;
+    TradeRequest trade_request = 25;
+    TradeRequestResponse trade_request_response = 26;
+    TradeOfferItem trade_offer_item = 27;
+    TradeOfferCurrency trade_offer_currency = 28;
+    TradeConfirm trade_confirm = 29;
+    TradeCancel trade_cancel = 30;
   }
 }
 
@@ -345,6 +351,68 @@ message UnequipItem {
   string slot = 1;
 }
 
+// Player-to-player trade (#278, split out of #244 — see that closed
+// issue's decision comment). Same session lifecycle shape as
+// PartyInvite: TradeRequest/TradeRequestResponse open an in-memory
+// negotiation session (ephemeral, not durable — a disconnect mid-
+// negotiation just drops it, same as a pending party invite), then
+// TradeOfferItem/TradeOfferCurrency/TradeConfirm/TradeCancel drive it.
+// Requests opening a trade negotiation with target_entity_id (#278) —
+// the target gets TradeRequestReceived. At most one pending request per
+// target — a second request before the first is answered simply
+// replaces it, same "last request wins" convention PartyInvite uses.
+message TradeRequest {
+  string target_entity_id = 1;
+}
+
+// Answers this connection's own most recently received trade request, if
+// any (#278) — Error if there is none pending. Accepting opens a real
+// TradeSession; declining just notifies the requester
+// (TradeRequestDeclined).
+message TradeRequestResponse {
+  bool accept = 1;
+}
+
+// Sets (not adds to) this connection's own offer of item_type within its
+// active trade session to quantity — 0 removes it from the offer (#278).
+// Error if there's no active trade session. Any change resets BOTH
+// sides' confirmed flag to false — the anti-scam mechanism: neither side
+// can commit, then have the other silently change their offer.
+// Ownership of item_type isn't validated at offer time, only at
+// TradeConfirm/execution — see TradeConfirm's own comment.
+message TradeOfferItem {
+  string item_type = 1;
+  int64 quantity = 2;
+}
+
+// Same shape as TradeOfferItem, for a currency_key/amount pair instead
+// (#278) — 0 removes it from the offer.
+message TradeOfferCurrency {
+  string currency_key = 1;
+  int64 amount = 2;
+}
+
+// Marks this connection's own side of its active trade session as
+// confirmed (#278) — Error if there's no active session. Once both sides
+// are confirmed simultaneously, the server re-validates that each side
+// still actually holds everything it offered (closing the race where
+// something was spent/lost mid-negotiation) and, if so, executes the
+// whole exchange atomically (character::CharacterStore::execute_trade).
+// A failed re-validation resets both sides' confirmed flag back to false
+// rather than closing the session — either side can adjust their offer
+// and try again. Success is reported via ordinary ItemChanged/
+// CurrencyChanged for everything that actually changed (#211's
+// convention) on both connections, followed by TradeCompleted.
+message TradeConfirm {
+}
+
+// Cancels this connection's own active trade session, if any, at any
+// point before execution (#278) — either side may do this. The other
+// side is notified via TradeCancelled. A no-op (no Error) if there's no
+// active session — canceling is always safe to call speculatively.
+message TradeCancel {
+}
+
 message RosterEntry {
   string entity_id = 1;
   string entity_type = 2;
@@ -376,6 +444,11 @@ message ServerMessage {
     CurrencyChanged currency_changed = 19;
     ItemMoved item_moved = 20;
     EquipmentChanged equipment_changed = 21;
+    TradeRequestReceived trade_request_received = 22;
+    TradeRequestDeclined trade_request_declined = 23;
+    TradeStateChanged trade_state_changed = 24;
+    TradeCancelled trade_cancelled = 25;
+    TradeCompleted trade_completed = 26;
   }
 }
 
@@ -574,4 +647,55 @@ message CurrencyChanged {
 message EquipmentChanged {
   string slot = 1;
   string item_type = 2;
+}
+
+// A trade request arrived for this connection's own entity (#278) —
+// from_entity_id names the requester. Answer with TradeRequestResponse.
+message TradeRequestReceived {
+  string from_entity_id = 1;
+}
+
+// The trade request this connection sent was declined (#278).
+message TradeRequestDeclined {
+  string by_entity_id = 1;
+}
+
+message TradeItemOffer {
+  string item_type = 1;
+  int64 quantity = 2;
+}
+
+message TradeCurrencyOffer {
+  string currency_key = 1;
+  int64 amount = 2;
+}
+
+// Pushed to both sides of an active trade session after every offer/
+// confirm change (#278) — other_entity_id names who's on the other side,
+// so a client with more than one thing going on can tell which trade
+// this refers to. "your_*"/"their_*" are always from the receiving
+// connection's own point of view — the other side's own client gets its
+// own TradeStateChanged with the two swapped, never a shared/mirrored
+// payload.
+message TradeStateChanged {
+  string other_entity_id = 1;
+  repeated TradeItemOffer your_items = 2;
+  repeated TradeCurrencyOffer your_currency = 3;
+  bool your_confirmed = 4;
+  repeated TradeItemOffer their_items = 5;
+  repeated TradeCurrencyOffer their_currency = 6;
+  bool their_confirmed = 7;
+}
+
+// This connection's active trade session was cancelled (#278) —
+// by_entity_id names who cancelled it (either side, including this
+// connection's own TradeCancel echoed back for UI-state simplicity).
+message TradeCancelled {
+  string by_entity_id = 1;
+}
+
+// This connection's active trade session executed successfully (#278) —
+// preceded by ordinary ItemChanged/CurrencyChanged pushes for everything
+// that actually changed on this connection's own character.
+message TradeCompleted {
 }

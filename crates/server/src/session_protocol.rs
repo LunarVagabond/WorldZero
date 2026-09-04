@@ -177,6 +177,29 @@ pub enum ClientMessage {
     /// back to inventory. Success arrives the same way as `EquipItem`,
     /// with `EquipmentChanged`'s `item_type` empty.
     UnequipItem { slot: String },
+    /// Requests opening a trade negotiation with `target_entity_id`
+    /// (#278) — the target gets `TradeRequestReceived`. At most one
+    /// pending request per target; a later request before the first is
+    /// answered simply replaces it.
+    TradeRequest { target_entity_id: String },
+    /// Answers this connection's own most recently received trade
+    /// request, if any (#278) — `Error` if there is none pending.
+    TradeRequestResponse { accept: bool },
+    /// Sets (not adds to) this connection's own offer of `item_type`
+    /// within its active trade session to `quantity` — `0` removes it
+    /// (#278). `Error` if there's no active session. Resets both sides'
+    /// `confirmed` flag.
+    TradeOfferItem { item_type: String, quantity: i64 },
+    /// Same shape as `TradeOfferItem`, for a `currency_key`/`amount`
+    /// pair instead (#278).
+    TradeOfferCurrency { currency_key: String, amount: i64 },
+    /// Marks this connection's own side of its active trade session as
+    /// confirmed (#278) — `Error` if there's no active session.
+    /// Execution fires once both sides are confirmed simultaneously.
+    TradeConfirm {},
+    /// Cancels this connection's own active trade session, if any, at
+    /// any point before execution (#278). A no-op if there's none.
+    TradeCancel {},
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -388,6 +411,37 @@ pub enum ServerMessage {
         slot: String,
         item_type: String,
     },
+    /// A trade request arrived for this connection's own entity (#278) —
+    /// `from_entity_id` names the requester. Answer with
+    /// `TradeRequestResponse`.
+    TradeRequestReceived {
+        from_entity_id: String,
+    },
+    /// The trade request this connection sent was declined (#278).
+    TradeRequestDeclined {
+        by_entity_id: String,
+    },
+    /// Pushed to both sides of an active trade session after every
+    /// offer/confirm change (#278) — `your_*`/`their_*` are always from
+    /// the receiving connection's own point of view.
+    TradeStateChanged {
+        other_entity_id: String,
+        your_items: Vec<(String, i64)>,
+        your_currency: Vec<(String, i64)>,
+        your_confirmed: bool,
+        their_items: Vec<(String, i64)>,
+        their_currency: Vec<(String, i64)>,
+        their_confirmed: bool,
+    },
+    /// This connection's active trade session was cancelled (#278) —
+    /// `by_entity_id` names who cancelled it.
+    TradeCancelled {
+        by_entity_id: String,
+    },
+    /// This connection's active trade session executed successfully
+    /// (#278) — preceded by ordinary `ItemChanged`/`CurrencyChanged`
+    /// pushes for everything that actually changed.
+    TradeCompleted {},
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -571,6 +625,30 @@ impl From<&ClientMessage> for proto::ClientMessage {
             ClientMessage::UnequipItem { slot } => {
                 Kind::UnequipItem(proto::UnequipItem { slot: slot.clone() })
             }
+            ClientMessage::TradeRequest { target_entity_id } => {
+                Kind::TradeRequest(proto::TradeRequest {
+                    target_entity_id: target_entity_id.clone(),
+                })
+            }
+            ClientMessage::TradeRequestResponse { accept } => {
+                Kind::TradeRequestResponse(proto::TradeRequestResponse { accept: *accept })
+            }
+            ClientMessage::TradeOfferItem {
+                item_type,
+                quantity,
+            } => Kind::TradeOfferItem(proto::TradeOfferItem {
+                item_type: item_type.clone(),
+                quantity: *quantity,
+            }),
+            ClientMessage::TradeOfferCurrency {
+                currency_key,
+                amount,
+            } => Kind::TradeOfferCurrency(proto::TradeOfferCurrency {
+                currency_key: currency_key.clone(),
+                amount: *amount,
+            }),
+            ClientMessage::TradeConfirm {} => Kind::TradeConfirm(proto::TradeConfirm {}),
+            ClientMessage::TradeCancel {} => Kind::TradeCancel(proto::TradeCancel {}),
         };
         proto::ClientMessage { kind: Some(kind) }
     }
@@ -672,6 +750,28 @@ impl TryFrom<proto::ClientMessage> for ClientMessage {
             Some(Kind::UnequipItem(proto::UnequipItem { slot })) => {
                 Ok(ClientMessage::UnequipItem { slot })
             }
+            Some(Kind::TradeRequest(proto::TradeRequest { target_entity_id })) => {
+                Ok(ClientMessage::TradeRequest { target_entity_id })
+            }
+            Some(Kind::TradeRequestResponse(proto::TradeRequestResponse { accept })) => {
+                Ok(ClientMessage::TradeRequestResponse { accept })
+            }
+            Some(Kind::TradeOfferItem(proto::TradeOfferItem {
+                item_type,
+                quantity,
+            })) => Ok(ClientMessage::TradeOfferItem {
+                item_type,
+                quantity,
+            }),
+            Some(Kind::TradeOfferCurrency(proto::TradeOfferCurrency {
+                currency_key,
+                amount,
+            })) => Ok(ClientMessage::TradeOfferCurrency {
+                currency_key,
+                amount,
+            }),
+            Some(Kind::TradeConfirm(proto::TradeConfirm {})) => Ok(ClientMessage::TradeConfirm {}),
+            Some(Kind::TradeCancel(proto::TradeCancel {})) => Ok(ClientMessage::TradeCancel {}),
             None => Err(Error::new(
                 "server",
                 "gateway world message has no kind set",
@@ -839,9 +939,76 @@ impl From<&ServerMessage> for proto::ServerMessage {
                     item_type: item_type.clone(),
                 })
             }
+            ServerMessage::TradeRequestReceived { from_entity_id } => {
+                Kind::TradeRequestReceived(proto::TradeRequestReceived {
+                    from_entity_id: from_entity_id.clone(),
+                })
+            }
+            ServerMessage::TradeRequestDeclined { by_entity_id } => {
+                Kind::TradeRequestDeclined(proto::TradeRequestDeclined {
+                    by_entity_id: by_entity_id.clone(),
+                })
+            }
+            ServerMessage::TradeStateChanged {
+                other_entity_id,
+                your_items,
+                your_currency,
+                your_confirmed,
+                their_items,
+                their_currency,
+                their_confirmed,
+            } => Kind::TradeStateChanged(proto::TradeStateChanged {
+                other_entity_id: other_entity_id.clone(),
+                your_items: trade_item_offers(your_items),
+                your_currency: trade_currency_offers(your_currency),
+                your_confirmed: *your_confirmed,
+                their_items: trade_item_offers(their_items),
+                their_currency: trade_currency_offers(their_currency),
+                their_confirmed: *their_confirmed,
+            }),
+            ServerMessage::TradeCancelled { by_entity_id } => {
+                Kind::TradeCancelled(proto::TradeCancelled {
+                    by_entity_id: by_entity_id.clone(),
+                })
+            }
+            ServerMessage::TradeCompleted {} => Kind::TradeCompleted(proto::TradeCompleted {}),
         };
         proto::ServerMessage { kind: Some(kind) }
     }
+}
+
+fn trade_item_offers(items: &[(String, i64)]) -> Vec<proto::TradeItemOffer> {
+    items
+        .iter()
+        .map(|(item_type, quantity)| proto::TradeItemOffer {
+            item_type: item_type.clone(),
+            quantity: *quantity,
+        })
+        .collect()
+}
+
+fn trade_currency_offers(currency: &[(String, i64)]) -> Vec<proto::TradeCurrencyOffer> {
+    currency
+        .iter()
+        .map(|(currency_key, amount)| proto::TradeCurrencyOffer {
+            currency_key: currency_key.clone(),
+            amount: *amount,
+        })
+        .collect()
+}
+
+fn from_trade_item_offers(items: Vec<proto::TradeItemOffer>) -> Vec<(String, i64)> {
+    items
+        .into_iter()
+        .map(|offer| (offer.item_type, offer.quantity))
+        .collect()
+}
+
+fn from_trade_currency_offers(currency: Vec<proto::TradeCurrencyOffer>) -> Vec<(String, i64)> {
+    currency
+        .into_iter()
+        .map(|offer| (offer.currency_key, offer.amount))
+        .collect()
 }
 
 impl TryFrom<proto::ServerMessage> for ServerMessage {
@@ -986,6 +1153,35 @@ impl TryFrom<proto::ServerMessage> for ServerMessage {
             }),
             Some(Kind::EquipmentChanged(proto::EquipmentChanged { slot, item_type })) => {
                 Ok(ServerMessage::EquipmentChanged { slot, item_type })
+            }
+            Some(Kind::TradeRequestReceived(proto::TradeRequestReceived { from_entity_id })) => {
+                Ok(ServerMessage::TradeRequestReceived { from_entity_id })
+            }
+            Some(Kind::TradeRequestDeclined(proto::TradeRequestDeclined { by_entity_id })) => {
+                Ok(ServerMessage::TradeRequestDeclined { by_entity_id })
+            }
+            Some(Kind::TradeStateChanged(proto::TradeStateChanged {
+                other_entity_id,
+                your_items,
+                your_currency,
+                your_confirmed,
+                their_items,
+                their_currency,
+                their_confirmed,
+            })) => Ok(ServerMessage::TradeStateChanged {
+                other_entity_id,
+                your_items: from_trade_item_offers(your_items),
+                your_currency: from_trade_currency_offers(your_currency),
+                your_confirmed,
+                their_items: from_trade_item_offers(their_items),
+                their_currency: from_trade_currency_offers(their_currency),
+                their_confirmed,
+            }),
+            Some(Kind::TradeCancelled(proto::TradeCancelled { by_entity_id })) => {
+                Ok(ServerMessage::TradeCancelled { by_entity_id })
+            }
+            Some(Kind::TradeCompleted(proto::TradeCompleted {})) => {
+                Ok(ServerMessage::TradeCompleted {})
             }
             None => Err(Error::new(
                 "server",
@@ -1156,6 +1352,110 @@ mod tests {
             decoded,
             ServerMessage::EquipmentChanged { slot, item_type }
                 if slot == "head" && item_type == "iron-helmet"
+        ));
+    }
+
+    #[test]
+    fn trade_request_round_trips_through_an_envelope() {
+        let message = ClientMessage::TradeRequest {
+            target_entity_id: "some-entity-id".to_string(),
+        };
+        let envelope = message.into_envelope().unwrap();
+        let decoded = ClientMessage::from_envelope(&envelope).unwrap();
+        assert!(matches!(
+            decoded,
+            ClientMessage::TradeRequest { target_entity_id } if target_entity_id == "some-entity-id"
+        ));
+    }
+
+    #[test]
+    fn trade_offer_item_round_trips_through_an_envelope() {
+        let message = ClientMessage::TradeOfferItem {
+            item_type: "torch".to_string(),
+            quantity: 3,
+        };
+        let envelope = message.into_envelope().unwrap();
+        let decoded = ClientMessage::from_envelope(&envelope).unwrap();
+        assert!(matches!(
+            decoded,
+            ClientMessage::TradeOfferItem { item_type, quantity }
+                if item_type == "torch" && quantity == 3
+        ));
+    }
+
+    #[test]
+    fn trade_offer_currency_round_trips_through_an_envelope() {
+        let message = ClientMessage::TradeOfferCurrency {
+            currency_key: "gold".to_string(),
+            amount: 100,
+        };
+        let envelope = message.into_envelope().unwrap();
+        let decoded = ClientMessage::from_envelope(&envelope).unwrap();
+        assert!(matches!(
+            decoded,
+            ClientMessage::TradeOfferCurrency { currency_key, amount }
+                if currency_key == "gold" && amount == 100
+        ));
+    }
+
+    #[test]
+    fn trade_confirm_and_cancel_round_trip_through_an_envelope() {
+        let envelope = ClientMessage::TradeConfirm {}.into_envelope().unwrap();
+        assert!(matches!(
+            ClientMessage::from_envelope(&envelope).unwrap(),
+            ClientMessage::TradeConfirm {}
+        ));
+
+        let envelope = ClientMessage::TradeCancel {}.into_envelope().unwrap();
+        assert!(matches!(
+            ClientMessage::from_envelope(&envelope).unwrap(),
+            ClientMessage::TradeCancel {}
+        ));
+    }
+
+    #[test]
+    fn trade_state_changed_round_trips_through_an_envelope() {
+        let message = ServerMessage::TradeStateChanged {
+            other_entity_id: "other-entity".to_string(),
+            your_items: vec![("torch".to_string(), 2)],
+            your_currency: vec![("gold".to_string(), 50)],
+            your_confirmed: true,
+            their_items: vec![],
+            their_currency: vec![("gold".to_string(), 100)],
+            their_confirmed: false,
+        };
+        let envelope = message.into_envelope().unwrap();
+        let decoded = ServerMessage::from_envelope(&envelope).unwrap();
+        assert!(matches!(
+            decoded,
+            ServerMessage::TradeStateChanged {
+                ref other_entity_id,
+                ref your_items,
+                your_confirmed,
+                their_confirmed,
+                ..
+            } if other_entity_id == "other-entity"
+                && your_items == &[("torch".to_string(), 2)]
+                && your_confirmed
+                && !their_confirmed
+        ));
+    }
+
+    #[test]
+    fn trade_cancelled_and_completed_round_trip_through_an_envelope() {
+        let message = ServerMessage::TradeCancelled {
+            by_entity_id: "some-entity".to_string(),
+        };
+        let envelope = message.into_envelope().unwrap();
+        assert!(matches!(
+            ServerMessage::from_envelope(&envelope).unwrap(),
+            ServerMessage::TradeCancelled { by_entity_id } if by_entity_id == "some-entity"
+        ));
+
+        let envelope = ServerMessage::TradeCompleted {}.into_envelope().unwrap();
+        assert!(matches!(
+            ServerMessage::from_envelope(&envelope).unwrap(),
+            ServerMessage::TradeCompleted {}
         ));
     }
 
