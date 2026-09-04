@@ -80,6 +80,10 @@ const MOVE_ITEM_TO_SLOT_SWAP_ADDR: &str = "127.0.0.1:7960";
 const EQUIP_ITEM_ADDR: &str = "127.0.0.1:7961";
 const EQUIP_ITEM_SWAP_ADDR: &str = "127.0.0.1:7962";
 const UNEQUIP_ITEM_ADDR: &str = "127.0.0.1:7963";
+const TRADE_SUCCESS_ADDR: &str = "127.0.0.1:7964";
+const TRADE_DECLINE_ADDR: &str = "127.0.0.1:7965";
+const TRADE_CANCEL_ADDR: &str = "127.0.0.1:7966";
+const TRADE_REVALIDATION_ADDR: &str = "127.0.0.1:7967";
 const SESSION_RESUME_INVALID_ADDR: &str = "127.0.0.1:7931";
 const MOVE_CORRELATION_ADDR: &str = "127.0.0.1:7932";
 const PING_PONG_ADDR: &str = "127.0.0.1:7933";
@@ -5095,6 +5099,475 @@ async fn unequip_item_reverses_deltas_and_returns_the_item() {
         "expected the equip's reputation.ironclad_guild delta to be reversed"
     );
     assert_eq!(read_item_quantity(&character_id, "iron-helmet").await, 1);
+}
+
+/// #278, end to end through the real `server` binary, two real
+/// connections: a full TradeRequest -> accept -> offer -> confirm cycle
+/// exchanges both sides' offers atomically. A offers a sword it was
+/// granted via `/give`; B offers gold it earned via `UseItem`'s
+/// `on-item-use` payout (`test-plugin`'s own behavior) — both real,
+/// independently-verifiable inventory/currency paths, not test-only
+/// shortcuts.
+#[tokio::test]
+#[ignore]
+async fn trade_request_accept_offer_confirm_executes_the_exchange() {
+    let config_dir = setup_config_dir("trade-success");
+    let _server = start_server(&config_dir, TRADE_SUCCESS_ADDR).await;
+    wait_for_port(TRADE_SUCCESS_ADDR).await;
+
+    let mut a = connect(&config_dir, TRADE_SUCCESS_ADDR).await;
+    register_and_authenticate(
+        &mut a,
+        &format!("trade-a-{}", uuid::Uuid::now_v7()),
+        "hunter2",
+        _server.realm_id,
+    )
+    .await;
+    let a_entity_id = loop {
+        if let ServerMessage::Joined { entity_id, .. } = recv_world(&mut a).await {
+            break entity_id;
+        }
+    };
+    loop {
+        if let ServerMessage::PluginMessage { .. } = recv_world(&mut a).await {
+            break;
+        }
+    }
+
+    let mut b = connect(&config_dir, TRADE_SUCCESS_ADDR).await;
+    register_and_authenticate(
+        &mut b,
+        &format!("trade-b-{}", uuid::Uuid::now_v7()),
+        "hunter2",
+        _server.realm_id,
+    )
+    .await;
+    let b_entity_id = loop {
+        if let ServerMessage::Joined { entity_id, .. } = recv_world(&mut b).await {
+            break entity_id;
+        }
+    };
+    loop {
+        if let ServerMessage::PluginMessage { .. } = recv_world(&mut b).await {
+            break;
+        }
+    }
+
+    give_item(&mut a, "sword").await;
+    give_item(&mut b, "torch").await;
+    send_world(
+        &mut b,
+        &ClientMessage::UseItem {
+            item_type: "torch".to_string(),
+        },
+    )
+    .await;
+    loop {
+        match recv_world(&mut b).await {
+            ServerMessage::CurrencyChanged {
+                currency_key,
+                balance,
+            } if currency_key == "gold" => {
+                assert_eq!(balance, 5);
+                break;
+            }
+            ServerMessage::ItemChanged { .. }
+            | ServerMessage::PluginMessage { .. }
+            | ServerMessage::Moved { .. }
+            | ServerMessage::EntitySpawned { .. } => {}
+            other => panic!("expected gold from UseItem, got {other:?}"),
+        }
+    }
+
+    send_world(
+        &mut a,
+        &ClientMessage::TradeRequest {
+            target_entity_id: b_entity_id.clone(),
+        },
+    )
+    .await;
+    loop {
+        match recv_world(&mut b).await {
+            ServerMessage::TradeRequestReceived { from_entity_id } => {
+                assert_eq!(from_entity_id, a_entity_id);
+                break;
+            }
+            ServerMessage::Moved { .. } | ServerMessage::EntitySpawned { .. } => {}
+            other => panic!("expected TradeRequestReceived, got {other:?}"),
+        }
+    }
+    send_world(
+        &mut b,
+        &ClientMessage::TradeRequestResponse { accept: true },
+    )
+    .await;
+
+    send_world(
+        &mut a,
+        &ClientMessage::TradeOfferItem {
+            item_type: "sword".to_string(),
+            quantity: 1,
+        },
+    )
+    .await;
+    send_world(
+        &mut b,
+        &ClientMessage::TradeOfferCurrency {
+            currency_key: "gold".to_string(),
+            amount: 5,
+        },
+    )
+    .await;
+    send_world(&mut a, &ClientMessage::TradeConfirm {}).await;
+    send_world(&mut b, &ClientMessage::TradeConfirm {}).await;
+
+    let mut a_saw_gold = false;
+    let mut a_saw_completed = false;
+    while !(a_saw_gold && a_saw_completed) {
+        match recv_world(&mut a).await {
+            ServerMessage::CurrencyChanged {
+                currency_key,
+                balance,
+            } if currency_key == "gold" => {
+                assert_eq!(balance, 5);
+                a_saw_gold = true;
+            }
+            ServerMessage::TradeCompleted {} => a_saw_completed = true,
+            ServerMessage::ItemChanged { .. }
+            | ServerMessage::TradeStateChanged { .. }
+            | ServerMessage::Moved { .. }
+            | ServerMessage::EntitySpawned { .. } => {}
+            other => panic!("expected a's trade completion, got {other:?}"),
+        }
+    }
+
+    let mut b_saw_sword = false;
+    let mut b_saw_completed = false;
+    while !(b_saw_sword && b_saw_completed) {
+        match recv_world(&mut b).await {
+            ServerMessage::ItemChanged {
+                item_type,
+                quantity,
+            } if item_type == "sword" => {
+                assert_eq!(quantity, 1);
+                b_saw_sword = true;
+            }
+            ServerMessage::TradeCompleted {} => b_saw_completed = true,
+            ServerMessage::CurrencyChanged { .. }
+            | ServerMessage::TradeStateChanged { .. }
+            | ServerMessage::Moved { .. }
+            | ServerMessage::EntitySpawned { .. } => {}
+            other => panic!("expected b's trade completion, got {other:?}"),
+        }
+    }
+}
+
+/// #278: declining a trade request notifies the requester and opens no
+/// session — proven by a subsequent `TradeOfferItem` from either side
+/// being rejected as "no active trade."
+#[tokio::test]
+#[ignore]
+async fn declining_a_trade_request_notifies_the_requester_and_opens_no_session() {
+    let config_dir = setup_config_dir("trade-decline");
+    let _server = start_server(&config_dir, TRADE_DECLINE_ADDR).await;
+    wait_for_port(TRADE_DECLINE_ADDR).await;
+
+    let mut a = connect(&config_dir, TRADE_DECLINE_ADDR).await;
+    register_and_authenticate(
+        &mut a,
+        &format!("trade-decline-a-{}", uuid::Uuid::now_v7()),
+        "hunter2",
+        _server.realm_id,
+    )
+    .await;
+    loop {
+        if let ServerMessage::Joined { .. } = recv_world(&mut a).await {
+            break;
+        }
+    }
+
+    let mut b = connect(&config_dir, TRADE_DECLINE_ADDR).await;
+    register_and_authenticate(
+        &mut b,
+        &format!("trade-decline-b-{}", uuid::Uuid::now_v7()),
+        "hunter2",
+        _server.realm_id,
+    )
+    .await;
+    let b_entity_id = loop {
+        if let ServerMessage::Joined { entity_id, .. } = recv_world(&mut b).await {
+            break entity_id;
+        }
+    };
+
+    send_world(
+        &mut a,
+        &ClientMessage::TradeRequest {
+            target_entity_id: b_entity_id.clone(),
+        },
+    )
+    .await;
+    loop {
+        if let ServerMessage::TradeRequestReceived { .. } = recv_world(&mut b).await {
+            break;
+        }
+    }
+    send_world(
+        &mut b,
+        &ClientMessage::TradeRequestResponse { accept: false },
+    )
+    .await;
+
+    loop {
+        match recv_world(&mut a).await {
+            ServerMessage::TradeRequestDeclined { by_entity_id } => {
+                assert_eq!(by_entity_id, b_entity_id);
+                break;
+            }
+            ServerMessage::Moved { .. } | ServerMessage::EntitySpawned { .. } => {}
+            other => panic!("expected TradeRequestDeclined, got {other:?}"),
+        }
+    }
+
+    send_world(
+        &mut a,
+        &ClientMessage::TradeOfferItem {
+            item_type: "sword".to_string(),
+            quantity: 1,
+        },
+    )
+    .await;
+    loop {
+        match recv_world(&mut a).await {
+            ServerMessage::Error { message } => {
+                assert!(message.contains("no active trade"), "{message}");
+                break;
+            }
+            ServerMessage::Moved { .. } | ServerMessage::EntitySpawned { .. } => {}
+            other => panic!("expected an Error for no active trade, got {other:?}"),
+        }
+    }
+}
+
+/// #278: cancelling an active trade notifies the other side via
+/// `TradeCancelled` and leaves neither side with an active session
+/// (proven the same way the decline test does — a subsequent
+/// `TradeOfferItem` from the canceller is rejected as "no active trade").
+#[tokio::test]
+#[ignore]
+async fn cancelling_an_active_trade_notifies_the_other_side() {
+    let config_dir = setup_config_dir("trade-cancel");
+    let _server = start_server(&config_dir, TRADE_CANCEL_ADDR).await;
+    wait_for_port(TRADE_CANCEL_ADDR).await;
+
+    let mut a = connect(&config_dir, TRADE_CANCEL_ADDR).await;
+    register_and_authenticate(
+        &mut a,
+        &format!("trade-cancel-a-{}", uuid::Uuid::now_v7()),
+        "hunter2",
+        _server.realm_id,
+    )
+    .await;
+    loop {
+        if let ServerMessage::Joined { .. } = recv_world(&mut a).await {
+            break;
+        }
+    }
+
+    let mut b = connect(&config_dir, TRADE_CANCEL_ADDR).await;
+    register_and_authenticate(
+        &mut b,
+        &format!("trade-cancel-b-{}", uuid::Uuid::now_v7()),
+        "hunter2",
+        _server.realm_id,
+    )
+    .await;
+    let b_entity_id = loop {
+        if let ServerMessage::Joined { entity_id, .. } = recv_world(&mut b).await {
+            break entity_id;
+        }
+    };
+
+    send_world(
+        &mut a,
+        &ClientMessage::TradeRequest {
+            target_entity_id: b_entity_id,
+        },
+    )
+    .await;
+    loop {
+        if let ServerMessage::TradeRequestReceived { .. } = recv_world(&mut b).await {
+            break;
+        }
+    }
+    send_world(
+        &mut b,
+        &ClientMessage::TradeRequestResponse { accept: true },
+    )
+    .await;
+    loop {
+        if let ServerMessage::TradeStateChanged { .. } = recv_world(&mut a).await {
+            break;
+        }
+    }
+
+    send_world(&mut a, &ClientMessage::TradeCancel {}).await;
+
+    loop {
+        match recv_world(&mut b).await {
+            ServerMessage::TradeCancelled { .. } => break,
+            ServerMessage::TradeStateChanged { .. }
+            | ServerMessage::Moved { .. }
+            | ServerMessage::EntitySpawned { .. } => {}
+            other => panic!("expected TradeCancelled, got {other:?}"),
+        }
+    }
+
+    send_world(
+        &mut a,
+        &ClientMessage::TradeOfferItem {
+            item_type: "sword".to_string(),
+            quantity: 1,
+        },
+    )
+    .await;
+    loop {
+        match recv_world(&mut a).await {
+            ServerMessage::Error { message } => {
+                assert!(message.contains("no active trade"), "{message}");
+                break;
+            }
+            ServerMessage::Moved { .. } | ServerMessage::EntitySpawned { .. } => {}
+            other => panic!("expected an Error for no active trade, got {other:?}"),
+        }
+    }
+}
+
+/// #278: the anti-scam mechanism — confirming a trade where one side no
+/// longer actually holds what it offered (spent it via an unrelated,
+/// legitimate action mid-negotiation) is rejected atomically and resets
+/// both sides' confirmation, rather than executing a partial or
+/// impossible exchange.
+#[tokio::test]
+#[ignore]
+async fn confirming_a_trade_after_the_offer_is_no_longer_held_is_rejected_and_resets_confirmation()
+{
+    let config_dir = setup_config_dir("trade-revalidation");
+    let _server = start_server(&config_dir, TRADE_REVALIDATION_ADDR).await;
+    wait_for_port(TRADE_REVALIDATION_ADDR).await;
+
+    let mut a = connect(&config_dir, TRADE_REVALIDATION_ADDR).await;
+    register_and_authenticate(
+        &mut a,
+        &format!("trade-reval-a-{}", uuid::Uuid::now_v7()),
+        "hunter2",
+        _server.realm_id,
+    )
+    .await;
+    loop {
+        if let ServerMessage::Joined { .. } = recv_world(&mut a).await {
+            break;
+        }
+    }
+    loop {
+        if let ServerMessage::PluginMessage { .. } = recv_world(&mut a).await {
+            break;
+        }
+    }
+
+    let mut b = connect(&config_dir, TRADE_REVALIDATION_ADDR).await;
+    register_and_authenticate(
+        &mut b,
+        &format!("trade-reval-b-{}", uuid::Uuid::now_v7()),
+        "hunter2",
+        _server.realm_id,
+    )
+    .await;
+    let b_entity_id = loop {
+        if let ServerMessage::Joined { entity_id, .. } = recv_world(&mut b).await {
+            break entity_id;
+        }
+    };
+
+    give_item(&mut a, "sword").await;
+
+    send_world(
+        &mut a,
+        &ClientMessage::TradeRequest {
+            target_entity_id: b_entity_id,
+        },
+    )
+    .await;
+    loop {
+        if let ServerMessage::TradeRequestReceived { .. } = recv_world(&mut b).await {
+            break;
+        }
+    }
+    send_world(
+        &mut b,
+        &ClientMessage::TradeRequestResponse { accept: true },
+    )
+    .await;
+    loop {
+        if let ServerMessage::TradeStateChanged { .. } = recv_world(&mut a).await {
+            break;
+        }
+    }
+
+    send_world(
+        &mut a,
+        &ClientMessage::TradeOfferItem {
+            item_type: "sword".to_string(),
+            quantity: 1,
+        },
+    )
+    .await;
+    loop {
+        if let ServerMessage::TradeStateChanged { .. } = recv_world(&mut b).await {
+            break;
+        }
+    }
+
+    // a drops the sword outside the trade entirely — a real, legitimate
+    // action the negotiation's cached offer state doesn't know about.
+    send_world(
+        &mut a,
+        &ClientMessage::DropItem {
+            item_type: "sword".to_string(),
+            quantity: 1,
+        },
+    )
+    .await;
+    loop {
+        if let ServerMessage::ItemChanged { .. } = recv_world(&mut a).await {
+            break;
+        }
+    }
+
+    send_world(&mut b, &ClientMessage::TradeConfirm {}).await;
+    loop {
+        if let ServerMessage::TradeStateChanged { .. } = recv_world(&mut a).await {
+            break;
+        }
+    }
+    send_world(&mut a, &ClientMessage::TradeConfirm {}).await;
+
+    let mut saw_error = false;
+    let mut saw_reset_state = false;
+    while !(saw_error && saw_reset_state) {
+        match recv_world(&mut a).await {
+            ServerMessage::Error { message } => {
+                assert!(message.contains("only holds"), "{message}");
+                saw_error = true;
+            }
+            ServerMessage::TradeStateChanged { your_confirmed, .. } => {
+                assert!(!your_confirmed, "confirmation should have been reset");
+                saw_reset_state = true;
+            }
+            ServerMessage::Moved { .. } | ServerMessage::EntitySpawned { .. } => {}
+            other => panic!("expected the revalidation failure sequence, got {other:?}"),
+        }
+    }
 }
 
 /// #214: `spawn-npc`'s host callback can't synchronously return a real

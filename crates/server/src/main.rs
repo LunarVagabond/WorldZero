@@ -117,8 +117,9 @@ use content::content_pack::ContentPack;
 use content::manifest::ZoneManifest;
 use futures_util::StreamExt;
 use session::{
-    AccountEntities, BlockedZoneChannels, CharacterEntities, EntityAccounts, EntityCharacters,
-    EntityRoles, NpcStats, PendingGuildInvites, PendingPartyInvites, SessionDeps, Sessions,
+    AccountEntities, ActiveTrades, BlockedZoneChannels, CharacterEntities, EntityAccounts,
+    EntityCharacters, EntityRoles, NpcStats, PendingGuildInvites, PendingPartyInvites,
+    PendingTradeRequests, SessionDeps, Sessions,
 };
 use session_protocol::{RosterEntry, ServerMessage};
 use tokio::sync::mpsc;
@@ -484,6 +485,8 @@ async fn main() {
     let npc_stats: NpcStats = Arc::new(Mutex::new(HashMap::new()));
     let pending_party_invites: PendingPartyInvites = Arc::new(Mutex::new(HashMap::new()));
     let pending_guild_invites: PendingGuildInvites = Arc::new(Mutex::new(HashMap::new()));
+    let pending_trade_requests: PendingTradeRequests = Arc::new(Mutex::new(HashMap::new()));
+    let active_trades: ActiveTrades = Arc::new(Mutex::new(HashMap::new()));
     let entity_accounts: EntityAccounts = Arc::new(Mutex::new(HashMap::new()));
     let account_entities: AccountEntities = Arc::new(Mutex::new(HashMap::new()));
 
@@ -826,6 +829,8 @@ async fn main() {
         pending_party_invites,
         guild_store,
         pending_guild_invites,
+        pending_trade_requests,
+        active_trades,
         entity_accounts,
         account_entities,
         role_store,

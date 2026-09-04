@@ -102,6 +102,16 @@ Deliberately **not** one Postgres transaction, unlike `craft_item` — same "bes
 
 Core has no opinion on set bonuses, durability, or cosmetic-only slots — those are plugin/game-specific concerns outside this table's scope, same "core has no privileged notion of what an item does" discipline as `items` itself.
 
+## Player-to-player trade: the atomic exchange primitive (#278/#244)
+
+No new table — a trade has nothing durable about its *negotiation* (see docs/specs/Networking_Spec.md's "Player-to-player trade" for that in-memory, `server`-owned state), only its *execution*, which is just ordinary writes to `items`/`character_currency` (the same tables `grant_item`/`remove_item`/`modify_currency` already own).
+
+**The atomic exchange.** `character::CharacterStore::execute_trade` is the one write path: given two characters and each one's negotiated `TradeOfferInput` (`items`/`currency` as `(key, positive amount)` pairs), it runs one Postgres transaction that locks every row involved on both sides (`FOR UPDATE`) — every offered item stack, every offered currency balance — verifies each side actually holds at least what it offered, then consumes both sides' offers and grants each side the other's, or, if either side's holdings turn out insufficient, rolls back and changes nothing at all. Same "lock everything before mutating anything" discipline `craft_item` already establishes, extended to two characters instead of one.
+
+This re-validation is the whole point: `server::session`'s in-memory negotiation state (item_type/currency_key → amount, per side) is never trusted as still-accurate by the time both sides confirm — either side's actual holdings can have changed since the last offer update (spent via `UseItem`, dropped via `DropItem`, traded away in a different session, etc.). `execute_trade` re-reads and re-locks the real rows at the moment of execution, not whatever `server::session` last observed — closing exactly the race a naive "trust the last-known offer" implementation would leave open for one side to scam the other.
+
+A receiving side hitting `InventoryConfig::max_distinct_item_types` on a *new* item type it doesn't already own rejects the whole trade too, same capacity rule `grant_item`/`craft_item` enforce elsewhere — a trade is never a way to bypass the configured inventory cap.
+
 ## `realms`/`realm_zones` tables: the realm registry (#47)
 
 ```sql

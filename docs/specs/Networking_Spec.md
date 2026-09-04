@@ -135,3 +135,33 @@ If another of the caller's own stacks already occupies `slot_index`, it swaps to
 **`UnequipItem { slot: string }`** (`session.proto`, `message_type` 200, client) — requests unequipping whatever currently occupies `slot` for this connection's own character. `Error` if the slot isn't currently occupied.
 
 Both succeed the same way (`character::CharacterStore::equip_item`/`unequip_item`): the item's `stat_deltas` are applied/reversed via the existing `apply-stat-delta` primitive (reported as ordinary `StatChanged` pushes, #211's convention — free bounds enforcement against `stats.schema.yaml`'s declared `min`/`max`), the item is removed from/granted back to inventory (`ItemChanged`), then one **`EquipmentChanged { slot: string, item_type: string }`** reports the slot's new occupant — empty `item_type` means "nothing equipped there now" (an unequip, or the slot cleared as a side effect of a displaced-occupant swap that's mid-`EquipItem`). This whole exchange is deliberately **not** one Postgres transaction (same "best-effort, not fully transactional" stance `inventory.rs` and `CraftItem` already take) — the stat delta is applied before inventory is touched, so a delta rejected by a stat's declared bounds leaves the rest of the exchange untouched, but a displaced occupant (already unequipped before the new item's own delta is attempted) isn't rolled back if that delta then fails.
+
+## Player-to-player trade (#278)
+
+Same session-lifecycle shape as party invites (`PartyInvite`/`PartyInviteResponse`), applied to a two-sided negotiation instead of a one-shot accept:
+
+**`TradeRequest { target_entity_id: string }`** (client) — requests opening a trade negotiation with `target_entity_id`. The target gets **`TradeRequestReceived { from_entity_id: string }`**. At most one pending request per target — a second request before the first is answered simply replaces it, same "last request wins" convention `PartyInvite` uses.
+
+**`TradeRequestResponse { accept: bool }`** (client) — answers this connection's own most recently received trade request. `Error` if there is none pending. Declining sends the requester **`TradeRequestDeclined { by_entity_id: string }`** and opens nothing. Accepting opens an in-memory `TradeSession` (`server::session::ActiveTrades`) — ephemeral, not durable, same "nothing worth persisting about a negotiation that never completed" shape as a pending party/guild invite: a disconnect mid-negotiation just drops the session, and the still-connected side is told via `TradeCancelled`.
+
+**`TradeOfferItem { item_type: string, quantity: int64 }`** / **`TradeOfferCurrency { currency_key: string, amount: int64 }`** (client) — **sets** (not adds to) this connection's own offer for that key within its active trade session; `0` removes it. `Error` if there's no active session. Ownership of `item_type`/`currency_key` is **not** validated here — only at execution (see `TradeConfirm` below). Any change resets **both** sides' confirmed flag to `false` — the anti-scam mechanism: neither side can commit, then have the other silently change their offer afterward.
+
+**`TradeConfirm {}`** (client) — marks this connection's own side confirmed. `Error` if there's no active session. Once both sides are confirmed simultaneously, the server re-validates that each side still actually holds everything it offered *at this moment* — closing the race where something was spent, dropped, or traded away elsewhere mid-negotiation, not just trusting the last-observed offer state — and, if so, executes the whole exchange atomically in one transaction (`character::CharacterStore::execute_trade`, mirroring `craft_item`'s atomic-multi-step-exchange precedent). A failed re-validation resets **both** sides' confirmed flag back to `false` rather than closing the session (either side can adjust their offer and retry) and reports the failure via the existing `Error` to the confirming connection. Success is reported via ordinary `ItemChanged`/`CurrencyChanged` for everything that actually changed (#211's convention) on **both** connections, followed by **`TradeCompleted {}`** on each.
+
+**`TradeCancel {}`** (client) — cancels this connection's own active trade session, if any, at any point before execution. Either side may do this; a no-op (no `Error`) if there's no active session. The other side is notified via **`TradeCancelled { by_entity_id: string }`**.
+
+**`TradeStateChanged`** (server) — pushed to both sides after every offer/confirm change:
+
+```proto
+message TradeStateChanged {
+  string other_entity_id = 1;
+  repeated TradeItemOffer your_items = 2;
+  repeated TradeCurrencyOffer your_currency = 3;
+  bool your_confirmed = 4;
+  repeated TradeItemOffer their_items = 5;
+  repeated TradeCurrencyOffer their_currency = 6;
+  bool their_confirmed = 7;
+}
+```
+
+`your_*`/`their_*` are always from the *receiving* connection's own point of view — the other side's own client gets its own `TradeStateChanged` with the two swapped, never a shared/mirrored payload.

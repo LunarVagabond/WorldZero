@@ -17,6 +17,7 @@ pub mod schema;
 pub mod session_lease;
 pub mod slots;
 pub mod store;
+pub mod trade;
 
 pub use archetype_schema::{ArchetypeSchema, CharacterArchetype};
 pub use bound_liveness::BoundRealmLiveness;
@@ -29,6 +30,7 @@ pub use party_schema::{PartySchema, PartyType};
 pub use schema::{AttributeSchema, StatDeclaration, StatType};
 pub use session_lease::{CharacterSessionLease, LeaseOutcome};
 pub use store::{CharacterStore, CharacterSummary};
+pub use trade::{TradeOfferInput, TradeResult, TradeSideResult};
 
 pub fn postgres_config() -> common::Result<common::config::PostgresConfig> {
     common::config::PostgresConfig::from_env()
