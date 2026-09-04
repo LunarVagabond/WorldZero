@@ -367,7 +367,7 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
         };
         match realm_message {
             realm_protocol::ClientMessage::ListRealms => {
-                let realm = build_realm_summary(&deps).await?;
+                let realm = build_realm_summary(&deps, account_id).await?;
                 send_realm(
                     &mut sink,
                     &realm_protocol::ServerMessage::RealmList {
@@ -2051,11 +2051,24 @@ async fn send_character_error(sink: &mut ServerSink, message: String) -> Result<
 /// serves — `character_count`/`live_connection_count` are read fresh
 /// from `realm_presence::population` on every call (not cached), so a
 /// client polling `ListRealms` sees current numbers.
-async fn build_realm_summary(deps: &SessionDeps) -> Result<realm_protocol::RealmSummary> {
+/// `selectable_character_count` (#261) runs the exact same
+/// `LoginPolicy::list_characters` call `ListCharacters` itself makes —
+/// same policy-aware branch, same open-realm-group span — so it always
+/// matches what selecting this realm would actually show, unlike
+/// `character_count`'s realm-wide population census.
+async fn build_realm_summary(
+    deps: &SessionDeps,
+    account_id: common::id::AccountId,
+) -> Result<realm_protocol::RealmSummary> {
     let population = deps
         .realm_presence
         .population(&deps.character_store, deps.realm_id)
         .await?;
+    let selectable_character_count = deps
+        .login_policy
+        .list_characters(&deps.character_store, account_id, deps.realm_id)
+        .await?
+        .len() as i64;
     let open_or_bound = match deps.realm_open_or_bound {
         realm_directory::OpenOrBound::Open => "open",
         realm_directory::OpenOrBound::Bound => "bound",
@@ -2065,6 +2078,7 @@ async fn build_realm_summary(deps: &SessionDeps) -> Result<realm_protocol::Realm
         name: deps.realm_name.clone(),
         open_or_bound: open_or_bound.to_string(),
         character_count: population.character_count,
+        selectable_character_count,
         live_connection_count: population.live_connections,
     })
 }

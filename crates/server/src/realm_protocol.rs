@@ -53,11 +53,20 @@ pub struct RealmSummary {
     /// `realm_directory::login_policy::list_characters` →
     /// `CharacterStore::list_by_account_in_open_realms`) spans every open
     /// realm's characters for that account, not just this one, by design
-    /// (open realms share one character pool). A realm-select picker
-    /// showing `character_count: 0` for an open realm does not mean the
-    /// connecting account has no characters selectable there.
+    /// (open realms share one character pool). See
+    /// `selectable_character_count` below for the number that actually
+    /// matches what `ListCharacters` would return.
     pub character_count: i64,
     pub live_connection_count: u64,
+    /// The number of characters `ListCharacters` would actually return
+    /// if this connection selected this realm right now (#261) — what a
+    /// realm-select picker should show, since it's the number that
+    /// matches Character Select's own list. Equals `character_count`
+    /// for a `bound` realm; can exceed it for an `open` realm, whose
+    /// list spans every sibling open realm's characters for this
+    /// account (`realm_directory::LoginPolicy::list_characters`, the
+    /// same call `ListCharacters` itself makes).
+    pub selectable_character_count: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -98,6 +107,7 @@ impl From<&RealmSummary> for proto::RealmSummary {
             open_or_bound: summary.open_or_bound.clone(),
             character_count: summary.character_count,
             live_connection_count: summary.live_connection_count,
+            selectable_character_count: summary.selectable_character_count,
         }
     }
 }
@@ -109,6 +119,7 @@ impl From<proto::RealmSummary> for RealmSummary {
             name: summary.name,
             open_or_bound: summary.open_or_bound,
             character_count: summary.character_count,
+            selectable_character_count: summary.selectable_character_count,
             live_connection_count: summary.live_connection_count,
         }
     }
@@ -256,6 +267,7 @@ mod tests {
                 name: "Test Realm".to_string(),
                 open_or_bound: "open".to_string(),
                 character_count: 3,
+                selectable_character_count: 2,
                 live_connection_count: 1,
             }],
         };

@@ -2399,6 +2399,13 @@ async fn list_realms_reports_the_one_served_realm_with_live_numbers() {
             assert_eq!(realm.realm_id, _server.realm_id.to_string());
             assert_eq!(realm.open_or_bound, "open");
             assert_eq!(realm.character_count, 1, "{realm:?}");
+            // The observer is a brand-new account with no characters of
+            // its own yet — #261's selectable_character_count must stay
+            // 0 for it even though the realm's population census above
+            // is 1 (the *other* connection's character), proving this
+            // field is actually account-scoped and not just an alias
+            // for character_count.
+            assert_eq!(realm.selectable_character_count, 0, "{realm:?}");
             assert_eq!(realm.live_connection_count, 1, "{realm:?}");
         }
         other => panic!("expected a RealmList, got {other:?}"),
