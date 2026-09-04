@@ -132,6 +132,22 @@ recipes:
 
 **Guild ranks (`guild.schema.yaml`, #179) — the `guild` crate, not `character`.** Declares rank names and permissions (drawn from a fixed core set: `invite`, `kick`, `promote`, `demote`, `edit_motd`, `edit_tag`, `rename`) — start from [`config/guild.schema.example.yaml`](../../config/guild.schema.example.yaml). The first declared rank is always the founder/leader rank (enforced by `guild::GuildStore`, not configurable); the last is what a fresh invite's accepter joins at. Required by `make quickstart`. See [`docs/specs/Chat_Spec.md`](../specs/Chat_Spec.md), "Guild system" section.
 
+**Equipment (`equipment.schema.yaml`, #245/#277).** Declares equipment `slots` and, per equippable `item_type`, which slot it occupies and a `stat_deltas` map applied while worn. Start from [`config/equipment.schema.example.yaml`](../../config/equipment.schema.example.yaml):
+
+```yaml
+schema_version: 1
+slots:
+  - head
+  - weapon
+items:
+  - item_type: iron-helmet
+    slot: head
+    stat_deltas:
+      defense: 10
+```
+
+`stat_deltas` keys are validated against `stats.schema.yaml` at load time (must be a declared stat — the bounds check itself happens when the delta is actually applied). Make sure any stat you grant gear bonuses against actually has headroom below its declared `max` — a stat whose `default` already sits at `max` (the shipped `stats.schema.example.yaml`'s `hp`/`mana` both do) rejects any positive gear delta the moment it's equipped, since the resulting value would exceed the bound; `config/equipment.schema.example.yaml`'s own helmets use `reputation.ironclad_guild` (no declared bound) rather than `hp` for exactly this reason. An `item_type` not listed here can't be equipped at all. If the target slot is already occupied, `EquipItem` unequips the occupant first (deltas reversed, granted back to inventory) rather than rejecting the request. Required by `make quickstart`.
+
 ---
 
 ## Step 2 — Your world (`content` + `world`)
@@ -312,7 +328,7 @@ See [`docs/specs/Realm_Character_Policy_Spec.md`](../specs/Realm_Character_Polic
 | Crate | Env vars | Config file | Key types |
 |---|---|---|---|
 | `common` | `WZ_CONFIG_DIR`, `WZ_POSTGRES_*`, `WZ_REDIS_*`, `WZ_SERVICE_{CHAT,METRICS}_ENABLED`, `WZ_OTEL_*` | — | `PostgresConfig`, `RedisConfig`, `ServicesConfig` |
-| `character` | `WZ_INVENTORY_MAX_ITEM_TYPES` | `stats.schema.yaml`, `character.archetypes.yaml`, `crafting.schema.yaml`, `currency.schema.yaml`, `party.schema.yaml` | `AttributeSchema`, `InventoryConfig`, `CharacterStore`, `ArchetypeSchema`, `CraftingSchema`, `CurrencySchema`, `PartySchema` |
+| `character` | `WZ_INVENTORY_MAX_ITEM_TYPES`, `WZ_INVENTORY_SLOT_COUNT` | `stats.schema.yaml`, `character.archetypes.yaml`, `crafting.schema.yaml`, `currency.schema.yaml`, `equipment.schema.yaml`, `party.schema.yaml` | `AttributeSchema`, `InventoryConfig`, `CharacterStore`, `ArchetypeSchema`, `CraftingSchema`, `CurrencySchema`, `EquipmentSchema`, `PartySchema` |
 | `guild` | — | `guild.schema.yaml` | `GuildSchema`, `GuildStore` |
 | `content` | — | `zone.manifest.yaml` or `content-pack.yaml` | `ZoneManifest`, `ContentPack` |
 | `world` | `WZ_WORLD_TICK_RATE_HZ`, `WZ_WORLD_GRID_CELL_SIZE_METERS`, `WZ_WORLD_MAX_SPEED_MPS` | — | `WorldConfig` |

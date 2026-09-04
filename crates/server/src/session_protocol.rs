@@ -162,6 +162,21 @@ pub enum ClientMessage {
     /// being rejected. Success arrives as `ItemMoved`, once for the mover
     /// and, on a swap, once more for the displaced stack.
     MoveItemToSlot { item_type: String, slot_index: i32 },
+    /// Requests equipping `item_type` from this connection's own
+    /// inventory (#277) — its slot is resolved from `equipment.schema.yaml`
+    /// (`character::EquipmentSchema`). `Error` if `item_type` isn't
+    /// declared as equippable, or the caller doesn't hold it. If the
+    /// target slot is already occupied, that item is unequipped first
+    /// (deltas reversed, granted back to inventory) rather than the
+    /// request being rejected. Success arrives as `StatChanged`/
+    /// `ItemChanged` for every changed value, then one `EquipmentChanged`.
+    EquipItem { item_type: String },
+    /// Requests unequipping whatever currently occupies `slot` for this
+    /// connection's own character (#277) — `Error` if the slot isn't
+    /// currently occupied. Reverses the worn item's deltas and grants it
+    /// back to inventory. Success arrives the same way as `EquipItem`,
+    /// with `EquipmentChanged`'s `item_type` empty.
+    UnequipItem { slot: String },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -365,6 +380,14 @@ pub enum ServerMessage {
         item_type: String,
         slot_index: Option<i32>,
     },
+    /// Reports a slot's new occupant after `EquipItem`/`UnequipItem`
+    /// (#277) — `item_type` is empty to mean "nothing equipped there
+    /// now." Always preceded by whatever `StatChanged`/`ItemChanged`
+    /// pushes the underlying exchange actually produced.
+    EquipmentChanged {
+        slot: String,
+        item_type: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -542,6 +565,12 @@ impl From<&ClientMessage> for proto::ClientMessage {
                 item_type: item_type.clone(),
                 slot_index: *slot_index,
             }),
+            ClientMessage::EquipItem { item_type } => Kind::EquipItem(proto::EquipItem {
+                item_type: item_type.clone(),
+            }),
+            ClientMessage::UnequipItem { slot } => {
+                Kind::UnequipItem(proto::UnequipItem { slot: slot.clone() })
+            }
         };
         proto::ClientMessage { kind: Some(kind) }
     }
@@ -637,6 +666,12 @@ impl TryFrom<proto::ClientMessage> for ClientMessage {
                 item_type,
                 slot_index,
             }),
+            Some(Kind::EquipItem(proto::EquipItem { item_type })) => {
+                Ok(ClientMessage::EquipItem { item_type })
+            }
+            Some(Kind::UnequipItem(proto::UnequipItem { slot })) => {
+                Ok(ClientMessage::UnequipItem { slot })
+            }
             None => Err(Error::new(
                 "server",
                 "gateway world message has no kind set",
@@ -798,6 +833,12 @@ impl From<&ServerMessage> for proto::ServerMessage {
                 item_type: item_type.clone(),
                 slot_index: *slot_index,
             }),
+            ServerMessage::EquipmentChanged { slot, item_type } => {
+                Kind::EquipmentChanged(proto::EquipmentChanged {
+                    slot: slot.clone(),
+                    item_type: item_type.clone(),
+                })
+            }
         };
         proto::ServerMessage { kind: Some(kind) }
     }
@@ -943,6 +984,9 @@ impl TryFrom<proto::ServerMessage> for ServerMessage {
                 item_type,
                 slot_index,
             }),
+            Some(Kind::EquipmentChanged(proto::EquipmentChanged { slot, item_type })) => {
+                Ok(ServerMessage::EquipmentChanged { slot, item_type })
+            }
             None => Err(Error::new(
                 "server",
                 "gateway world message has no kind set",
@@ -1075,6 +1119,43 @@ mod tests {
             decoded,
             ServerMessage::ItemMoved { item_type, slot_index }
                 if item_type == "shield" && slot_index.is_none()
+        ));
+    }
+
+    #[test]
+    fn equip_item_round_trips_through_an_envelope() {
+        let message = ClientMessage::EquipItem {
+            item_type: "iron-helmet".to_string(),
+        };
+        let envelope = message.into_envelope().unwrap();
+        let decoded = ClientMessage::from_envelope(&envelope).unwrap();
+        assert!(
+            matches!(decoded, ClientMessage::EquipItem { item_type } if item_type == "iron-helmet")
+        );
+    }
+
+    #[test]
+    fn unequip_item_round_trips_through_an_envelope() {
+        let message = ClientMessage::UnequipItem {
+            slot: "head".to_string(),
+        };
+        let envelope = message.into_envelope().unwrap();
+        let decoded = ClientMessage::from_envelope(&envelope).unwrap();
+        assert!(matches!(decoded, ClientMessage::UnequipItem { slot } if slot == "head"));
+    }
+
+    #[test]
+    fn equipment_changed_round_trips_through_an_envelope() {
+        let message = ServerMessage::EquipmentChanged {
+            slot: "head".to_string(),
+            item_type: "iron-helmet".to_string(),
+        };
+        let envelope = message.into_envelope().unwrap();
+        let decoded = ServerMessage::from_envelope(&envelope).unwrap();
+        assert!(matches!(
+            decoded,
+            ServerMessage::EquipmentChanged { slot, item_type }
+                if slot == "head" && item_type == "iron-helmet"
         ));
     }
 

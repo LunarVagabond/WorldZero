@@ -55,6 +55,15 @@ impl AttributeSchema {
             .ok_or_else(|| Error::new("character", format!("unknown stat key: {key}")))
     }
 
+    /// Whether `key` is a declared stat at all — for a caller (like
+    /// `equipment_schema::EquipmentSchema`) that needs to validate a
+    /// *delta* against a stat's existence without validating it as an
+    /// absolute value (`validate_write`'s bounds check doesn't apply to a
+    /// delta, only to a resulting value).
+    pub fn declares(&self, key: &str) -> bool {
+        self.declaration(key).is_ok()
+    }
+
     /// Validates a write against the declared schema — unknown key or an
     /// out-of-bounds value are both rejected here, before the value ever
     /// reaches storage.
