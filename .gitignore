@@ -20,6 +20,11 @@ target/
 # doesn't belong in git the way a dev's own config/*.yaml does
 config/certs/
 
+# The local content-addressed asset store (#279,
+# docs/specs/Content_Manifest_Spec.md, "Content-addressing") — real
+# binary asset files a self-hoster drops in by hand, not source.
+config/assets/
+
 # A dev's own real config, copied/customized from the tracked
 # config/*.example.* templates (by hand, or by `make quickstart`, #43) —
 # never the templates themselves.
