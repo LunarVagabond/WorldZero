@@ -511,7 +511,7 @@ pub fn load_plugin(
         .filter(|known| !hooks.iter().any(|h| h == known))
         .collect();
     if !undeclared_hooks.is_empty() {
-        tracing::debug!(
+        tracing::warn!(
             plugin = %name,
             ?undeclared_hooks,
             "hooks not declared in plugin.toml's `hooks` list — even if implemented, these will never be called"
