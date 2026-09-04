@@ -5154,9 +5154,7 @@ async fn trade_request_accept_offer_confirm_executes_the_exchange() {
     }
 
     give_item(&mut a, "sword").await;
-    eprintln!("DEBUG: a given sword");
     give_item(&mut b, "torch").await;
-    eprintln!("DEBUG: b given torch");
     send_world(
         &mut b,
         &ClientMessage::UseItem {
@@ -5165,9 +5163,7 @@ async fn trade_request_accept_offer_confirm_executes_the_exchange() {
     )
     .await;
     loop {
-        let msg = recv_world(&mut b).await;
-        eprintln!("DEBUG: b got {msg:?}");
-        match msg {
+        match recv_world(&mut b).await {
             ServerMessage::CurrencyChanged {
                 currency_key,
                 balance,
@@ -5182,7 +5178,6 @@ async fn trade_request_accept_offer_confirm_executes_the_exchange() {
             other => panic!("expected gold from UseItem, got {other:?}"),
         }
     }
-    eprintln!("DEBUG: b used torch for gold");
 
     send_world(
         &mut a,
@@ -5191,11 +5186,8 @@ async fn trade_request_accept_offer_confirm_executes_the_exchange() {
         },
     )
     .await;
-    eprintln!("DEBUG: a sent TradeRequest");
     loop {
-        let msg = recv_world(&mut b).await;
-        eprintln!("DEBUG: b got {msg:?}");
-        match msg {
+        match recv_world(&mut b).await {
             ServerMessage::TradeRequestReceived { from_entity_id } => {
                 assert_eq!(from_entity_id, a_entity_id);
                 break;
@@ -5211,7 +5203,6 @@ async fn trade_request_accept_offer_confirm_executes_the_exchange() {
         &ClientMessage::TradeRequestResponse { accept: true },
     )
     .await;
-    eprintln!("DEBUG: b sent TradeRequestResponse accept");
     // The session is created by b's TradeRequestResponse landing on a
     // completely separate connection/task from a's — wait for a's own
     // TradeStateChanged proving the session actually exists server-side
@@ -5219,13 +5210,10 @@ async fn trade_request_accept_offer_confirm_executes_the_exchange() {
     // race ahead of session creation and be rejected as "no active
     // trade."
     loop {
-        let msg = recv_world(&mut a).await;
-        eprintln!("DEBUG: a got {msg:?}");
-        if let ServerMessage::TradeStateChanged { .. } = msg {
+        if let ServerMessage::TradeStateChanged { .. } = recv_world(&mut a).await {
             break;
         }
     }
-    eprintln!("DEBUG: a confirmed session exists");
 
     send_world(
         &mut a,
@@ -5235,7 +5223,6 @@ async fn trade_request_accept_offer_confirm_executes_the_exchange() {
         },
     )
     .await;
-    eprintln!("DEBUG: a sent TradeOfferItem");
     send_world(
         &mut b,
         &ClientMessage::TradeOfferCurrency {
@@ -5244,18 +5231,35 @@ async fn trade_request_accept_offer_confirm_executes_the_exchange() {
         },
     )
     .await;
-    eprintln!("DEBUG: b sent TradeOfferCurrency");
+    // Both offers land on independent connections/tasks with no
+    // cross-connection ordering guarantee — and every offer change
+    // resets *both* sides' confirmed flag (the anti-scam mechanism).
+    // Sending TradeConfirm before each side has actually observed the
+    // *other* side's offer land risks the late-arriving offer resetting
+    // a confirm that already went out, so neither side ever sees both
+    // flags true at once. Wait for each side to see the other's offer
+    // reflected before confirming.
+    loop {
+        if let ServerMessage::TradeStateChanged { their_currency, .. } = recv_world(&mut a).await
+            && their_currency == [("gold".to_string(), 5)]
+        {
+            break;
+        }
+    }
+    loop {
+        if let ServerMessage::TradeStateChanged { their_items, .. } = recv_world(&mut b).await
+            && their_items == [("sword".to_string(), 1)]
+        {
+            break;
+        }
+    }
     send_world(&mut a, &ClientMessage::TradeConfirm {}).await;
-    eprintln!("DEBUG: a sent TradeConfirm");
     send_world(&mut b, &ClientMessage::TradeConfirm {}).await;
-    eprintln!("DEBUG: b sent TradeConfirm");
 
     let mut a_saw_gold = false;
     let mut a_saw_completed = false;
     while !(a_saw_gold && a_saw_completed) {
-        let msg = recv_world(&mut a).await;
-        eprintln!("DEBUG: a got {msg:?}");
-        match msg {
+        match recv_world(&mut a).await {
             ServerMessage::CurrencyChanged {
                 currency_key,
                 balance,
@@ -5272,13 +5276,10 @@ async fn trade_request_accept_offer_confirm_executes_the_exchange() {
         }
     }
 
-    eprintln!("DEBUG: a's completion loop finished");
     let mut b_saw_sword = false;
     let mut b_saw_completed = false;
     while !(b_saw_sword && b_saw_completed) {
-        let msg = recv_world(&mut b).await;
-        eprintln!("DEBUG: b got {msg:?}");
-        match msg {
+        match recv_world(&mut b).await {
             ServerMessage::ItemChanged {
                 item_type,
                 quantity,
