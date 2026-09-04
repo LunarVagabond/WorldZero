@@ -95,3 +95,6 @@ criterion/
 tmp/
 temp/
 scratch/
+
+# Built plugin wasm artifacts (build from examples/<plugin>, don't commit the binary)
+config/plugins/*/*.wasm

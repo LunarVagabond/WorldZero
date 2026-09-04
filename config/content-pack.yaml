@@ -1,0 +1,18 @@
+# Example content pack — loaded by the `content` crate
+# (crates/content/src/content_pack.rs), see docs/specs/Content_Manifest_Spec.md.
+# Copy/rename this as content-pack.yaml in the config dir your instance
+# actually uses (WZ_CONFIG_DIR, or ./config by default) to run *multiple*
+# zone-service instances in one `server` process (#45) — a player walking
+# through either zone's declared `links[]` edge crosses live, no
+# reconnect. Drop this file entirely (or don't add it) to stay on the
+# original single-zone `zone.manifest.yaml` path instead.
+schema_version: 1
+id: example-game
+display_name: "Example Game"
+version: "0.1.0"
+
+zones:
+  - id: greenwood-forest
+    path: example-zones/greenwood-forest.yaml
+  - id: stonebridge-village
+    path: example-zones/stonebridge-village.yaml
