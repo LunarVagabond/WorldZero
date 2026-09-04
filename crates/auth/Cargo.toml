@@ -7,7 +7,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-argon2 = "0.5.3"
+argon2 = "0.6.0"
 async-trait = "0.1.92"
 base64 = "0.23.1"
 common = { version = "0.1.0", path = "../common" }
