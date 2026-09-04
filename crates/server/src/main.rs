@@ -75,7 +75,11 @@
 //! comment), `WZ_REALM_LEASE_TTL_SECS` (default `60` — #21's open-realm
 //! session lease TTL; only consulted when `WZ_REALM_ID` names an `open`
 //! realm), `WZ_CHARACTER_MAX_PER_ACCOUNT` (default `5` — #193's
-//! character-creation cap, per account per realm).
+//! character-creation cap, per account per realm), `WZ_ZONE_IDS`
+//! (unset by default — every loaded zone runs; #269's comma-separated
+//! allow-list letting this process instance host only a slice of the
+//! realm's declared zones, the concrete first step toward real
+//! horizontal shard scaling across processes/machines, #130/#190).
 //!
 //! A connected client speaks `auth::gateway_protocol` first (login or
 //! register), then `server::realm_protocol` (realm discovery/selection,
@@ -813,10 +817,16 @@ async fn main() {
 
 /// `<config_dir>/content-pack.yaml` if present (multiple zones, #45);
 /// otherwise falls back to the single `<config_dir>/zone.manifest.yaml`
-/// (original Phase 1 behavior) — see this module's doc comment.
+/// (original Phase 1 behavior) — see this module's doc comment. Then
+/// applies `WZ_ZONE_IDS` (#269), if set, so this specific process
+/// instance can host only a slice of the realm's declared zones — the
+/// concrete first step toward real horizontal shard scaling (#130/#190):
+/// two processes, same `WZ_REALM_ID`, disjoint `WZ_ZONE_IDS`, sharing one
+/// Postgres/Redis, is a real multi-machine deployment today with no new
+/// subsystem. Unset means every zone, today's behavior, unchanged.
 fn load_zone_manifests(config_dir: &std::path::Path) -> Vec<ZoneManifest> {
     let pack_path = config_dir.join("content-pack.yaml");
-    if pack_path.exists() {
+    let manifests = if pack_path.exists() {
         let pack = ContentPack::from_file(&pack_path).unwrap_or_else(|e| {
             panic!(
                 "failed to load the content pack at {} (see config/content-pack.example.yaml): {e}",
@@ -828,17 +838,56 @@ fn load_zone_manifests(config_dir: &std::path::Path) -> Vec<ZoneManifest> {
             "content pack at {} declares zero zones",
             pack_path.display()
         );
-        return pack.zones;
+        pack.zones
+    } else {
+        let manifest_path = config_dir.join("zone.manifest.yaml");
+        let manifest = ZoneManifest::from_file(&manifest_path).unwrap_or_else(|e| {
+            panic!(
+                "failed to load the zone manifest at {} (see config/zone.manifest.example.yaml): {e}",
+                manifest_path.display()
+            )
+        });
+        vec![manifest]
+    };
+
+    apply_zone_ids_filter(manifests)
+}
+
+/// `WZ_ZONE_IDS` (#269): an optional comma-separated allow-list, unset by
+/// default (every loaded zone runs, unchanged from before this existed).
+/// A named id that doesn't match any loaded zone, or a filter that would
+/// leave zero zones running, is a startup-time panic with the actual
+/// available ids listed — same "clear, actionable config error" standard
+/// as every other manifest-loading failure in this function, not a
+/// silent no-op that would otherwise be very confusing to debug.
+fn apply_zone_ids_filter(manifests: Vec<ZoneManifest>) -> Vec<ZoneManifest> {
+    let Ok(raw) = std::env::var("WZ_ZONE_IDS") else {
+        return manifests;
+    };
+    let wanted: Vec<&str> = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    assert!(
+        !wanted.is_empty(),
+        "WZ_ZONE_IDS is set but names no zones — unset it entirely to run every zone"
+    );
+
+    let available: Vec<&str> = manifests.iter().map(|m| m.id.as_str()).collect();
+    for id in &wanted {
+        assert!(
+            available.contains(id),
+            "WZ_ZONE_IDS names {id:?}, which isn't one of this realm's loaded zones ({available:?})"
+        );
     }
 
-    let manifest_path = config_dir.join("zone.manifest.yaml");
-    let manifest = ZoneManifest::from_file(&manifest_path).unwrap_or_else(|e| {
-        panic!(
-            "failed to load the zone manifest at {} (see config/zone.manifest.example.yaml): {e}",
-            manifest_path.display()
-        )
-    });
-    vec![manifest]
+    // Every `wanted` id is already confirmed present in `available` above,
+    // so this can never leave an empty result.
+    manifests
+        .into_iter()
+        .filter(|m| wanted.contains(&m.id.as_str()))
+        .collect()
 }
 
 /// Discovers every plugin under `plugins_dir/<name>/{plugin.toml,*.wasm}`
@@ -1134,5 +1183,106 @@ fn send_to(sessions: &Sessions, entity_id: common::id::EntityId, message: Server
     };
     if let Some(sender) = sessions.lock().unwrap().get(&entity_id) {
         let _ = sender.send(envelope);
+    }
+}
+
+#[cfg(test)]
+mod zone_ids_filter_tests {
+    use std::sync::Mutex;
+
+    use super::apply_zone_ids_filter;
+    use content::manifest::ZoneManifest;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Cleans up `WZ_ZONE_IDS` on drop, not just after a normal return —
+    /// a `#[should_panic]` test below deliberately panics inside `f()`,
+    /// and a plain post-`f()` cleanup line would never run in that case.
+    struct ClearOnDrop;
+    impl Drop for ClearOnDrop {
+        fn drop(&mut self) {
+            unsafe { std::env::remove_var("WZ_ZONE_IDS") };
+        }
+    }
+
+    fn with_clean_env(f: impl FnOnce()) {
+        // `unwrap_or_else(PoisonError::into_inner)`, not `.unwrap()`: the
+        // panicking test above would otherwise poison this lock for
+        // every test that runs after — there's no shared state here
+        // worth protecting from a torn write, only serializing access to
+        // the process-wide `WZ_ZONE_IDS` var itself.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _clear = ClearOnDrop;
+        unsafe { std::env::remove_var("WZ_ZONE_IDS") };
+        f();
+    }
+
+    fn manifest(id: &str) -> ZoneManifest {
+        ZoneManifest::from_yaml(&format!(
+            r#"
+schema_version: 1
+id: {id}
+display_name: "{id}"
+bounds:
+  shape: polygon
+  coordinate_system: {{ units: meters, origin: [0, 0] }}
+  points: [[0,0], [10,0], [10,10], [0,10]]
+collision:
+  asset_ref: "sha256:9f2ac1b3e4d5c6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1"
+  format: navmesh_v1
+"#
+        ))
+        .unwrap()
+    }
+
+    fn ids(manifests: &[ZoneManifest]) -> Vec<&str> {
+        manifests.iter().map(|m| m.id.as_str()).collect()
+    }
+
+    #[test]
+    fn unset_keeps_every_zone() {
+        with_clean_env(|| {
+            let manifests = vec![manifest("a"), manifest("b")];
+            let filtered = apply_zone_ids_filter(manifests);
+            assert_eq!(ids(&filtered), vec!["a", "b"]);
+        });
+    }
+
+    #[test]
+    fn a_set_allowlist_keeps_only_the_named_zones_in_original_order() {
+        with_clean_env(|| {
+            unsafe { std::env::set_var("WZ_ZONE_IDS", "c,a") };
+            let manifests = vec![manifest("a"), manifest("b"), manifest("c")];
+            let filtered = apply_zone_ids_filter(manifests);
+            assert_eq!(ids(&filtered), vec!["a", "c"]);
+        });
+    }
+
+    #[test]
+    fn whitespace_around_ids_is_tolerated() {
+        with_clean_env(|| {
+            unsafe { std::env::set_var("WZ_ZONE_IDS", " a , b ") };
+            let manifests = vec![manifest("a"), manifest("b")];
+            let filtered = apply_zone_ids_filter(manifests);
+            assert_eq!(ids(&filtered), vec!["a", "b"]);
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "WZ_ZONE_IDS names \"z\"")]
+    fn an_unknown_zone_id_panics_with_a_clear_message() {
+        with_clean_env(|| {
+            unsafe { std::env::set_var("WZ_ZONE_IDS", "z") };
+            apply_zone_ids_filter(vec![manifest("a")]);
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "names no zones")]
+    fn an_empty_allowlist_panics_rather_than_silently_running_nothing() {
+        with_clean_env(|| {
+            unsafe { std::env::set_var("WZ_ZONE_IDS", "  ,  ") };
+            apply_zone_ids_filter(vec![manifest("a")]);
+        });
     }
 }
