@@ -131,6 +131,19 @@ enum WorldCommand {
         npc: EntityId,
         actor: EntityId,
     },
+    /// A client's `DropItem` action, fired *after* `session.rs` has
+    /// already removed the item from storage and confirmed it to the
+    /// client via `ItemChanged` (#265) — unlike `UseItem`, the core
+    /// itself owns removal, so this command exists purely to fire
+    /// `on-item-drop` (and drain whatever pending host-function effects
+    /// that hook call produces, the same as every other hook dispatched
+    /// through `fire_hook`) as a notification, not a request for
+    /// permission.
+    ItemDropped {
+        entity_id: EntityId,
+        item_type: String,
+        quantity: i64,
+    },
 }
 
 #[derive(Clone)]
@@ -296,6 +309,16 @@ impl WorldHandle {
     /// Fire-and-forget, same contract as `dispatch_plugin_message` (#154).
     pub fn dispatch_interact_npc(&self, npc: EntityId, actor: EntityId) {
         self.send(WorldCommand::InteractNpc { npc, actor });
+    }
+
+    /// Fire-and-forget, same contract as `dispatch_use_item` (#265) —
+    /// call only after the item has actually been removed from storage.
+    pub fn dispatch_item_dropped(&self, entity_id: EntityId, item_type: String, quantity: i64) {
+        self.send(WorldCommand::ItemDropped {
+            entity_id,
+            item_type,
+            quantity,
+        });
     }
 }
 
@@ -552,6 +575,14 @@ pub fn spawn_world_actor(
                             fire_hook(
                                 &mut plugins, "on-npc-interact", &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &currency_schema, &plugin_state_store, &global_sessions,
                                 |plugin| plugin.on_npc_interact(&zone_id, &npc_str, &actor_str),
+                            ).await;
+                        }
+                        WorldCommand::ItemDropped { entity_id, item_type, quantity } => {
+                            let entity_id_str = entity_id.to_string();
+                            let mut plugins = plugins.lock().await;
+                            fire_hook(
+                                &mut plugins, "on-item-drop", &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &currency_schema, &plugin_state_store, &global_sessions,
+                                |plugin| plugin.on_item_drop(&zone_id, &entity_id_str, &item_type, quantity),
                             ).await;
                         }
                     }

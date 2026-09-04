@@ -111,3 +111,11 @@ A write that fails (a rejected `remove-item` for insufficient quantity, a `modif
 No dedicated reply message. Success arrives as ordinary `ItemChanged` pushes (above) — one per affected stack, every consumed input first (`0` if a stack was fully consumed), then the granted output, in the recipe's own declared order. Failure — an unknown `recipe_key` or an insufficient input — arrives as the existing `Error { message }`, never a panic or a silent no-op.
 
 If the configured plugin declared both `on-craft-complete` in `plugin.toml`'s `hooks` and the `economy` capability, a successful craft also fires that hook (`character-id`, `recipe-key`) — see docs/specs/Plugin_API.md's hooks table. This is a post-craft notification only; core has already committed the exchange by the time it fires, so the hook can't veto it (#215's decision deliberately defaults to post-craft-only for v0).
+
+## Dropping items (#265)
+
+**`DropItem { item_type: string, quantity: int64 }`** (`session.proto`, `message_type` 200, client) — requests dropping `quantity` of `item_type` from this connection's own inventory. Unlike `UseItem`, removal is core-owned and unconditional (`character::CharacterStore::remove_item`, the same storage `remove-item` writes through) — a drop works the same whether or not any plugin is loaded, and there is no capability gate on it. `Error` if the caller doesn't hold at least `quantity`; nothing is removed on a rejected drop.
+
+No dedicated reply message. Success arrives as an ordinary `ItemChanged` push (above), same convention as `CraftItem`.
+
+If the configured plugin declared `on-item-drop` in `plugin.toml`'s `hooks`, a successful drop also fires that hook (`zone-id`, `entity-id`, `item-type`, `quantity`) — see docs/specs/Plugin_API.md's hooks table. Pure notification, no veto: the core has already committed the removal by the time it fires. The core has no "item sitting on the ground" concept of its own — a plugin wanting one (e.g. a pickup entity) builds it itself, typically via `spawn-npc` from inside this hook.

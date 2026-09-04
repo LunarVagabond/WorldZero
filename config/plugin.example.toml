@@ -7,7 +7,7 @@
 # startup, no per-plugin env var needed. Adjust freely.
 [plugin]
 name = "example-plugin"
-host_api_version = "0.13.0"
+host_api_version = "0.14.0"
 # Gates which host functions this plugin may call (docs/specs/Plugin_API.md's
 # "Capability gating") — spawning (spawn-npc), movement (move-entity),
 # combat (apply-stat-delta/report-death/report-respawn), economy

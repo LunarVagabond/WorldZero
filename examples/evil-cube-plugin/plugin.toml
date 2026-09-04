@@ -3,7 +3,7 @@
 # PROMPT.md §7.2) and its admin panel (caller-role-gated chat commands).
 [plugin]
 name = "evil-cube-plugin"
-host_api_version = "0.12.0"
+host_api_version = "0.14.0"
 # report-death/report-respawn gated by combat, spawn-npc by spawning,
 # send-message by messaging, grant-item/modify-currency by economy
 # (docs/specs/Plugin_API.md's "Capability gating"). caller-role is
