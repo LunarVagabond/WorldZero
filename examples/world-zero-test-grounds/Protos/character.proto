@@ -1,0 +1,117 @@
+// Wire schema for `server::character_protocol` — `message_type` 3
+// (docs/specs/Networking_Spec.md's catalog). Character list/create/select
+// (#193), slotted between realm selection (`message_type` 2) and
+// world-join (`message_type` 200) — see `crates/auth/proto/auth.proto`'s
+// header comment for the same note on why `server::character_protocol`'s
+// Rust enum wraps this rather than being generated from it directly.
+
+syntax = "proto3";
+
+package worldzero.character;
+option csharp_namespace = "WorldZeroTestGrounds.Wire.Character";
+
+message ClientMessage {
+  oneof kind {
+    ListCharacters list_characters = 1;
+    CreateCharacter create_character = 2;
+    SelectCharacter select_character = 3;
+    // #213/#212: queries the dev-declared character-archetype list —
+    // reachable anywhere in this pre-join phase, same as ListCharacters.
+    ListCharacterOptions list_character_options = 4;
+    // #225: requests moving one of this account's own characters to a
+    // different bound realm — reachable anywhere in this pre-join phase,
+    // same as ListCharacters/CreateCharacter/SelectCharacter, since a
+    // transfer only ever makes sense for a character that isn't currently
+    // logged in (`transfer::TransferExecutor::transfer`'s active-lease
+    // check).
+    RequestTransfer request_transfer = 5;
+  }
+}
+
+message ListCharacters {}
+
+message ListCharacterOptions {}
+
+message CreateCharacter {
+  string name = 1;
+  // Names one of the dev-declared entries in character.archetypes.yaml
+  // (#213/#212) — empty resolves to the schema's first declared entry.
+  // An unknown non-empty key is rejected with an Error, not a panic or
+  // silent fallback.
+  string archetype_key = 2;
+}
+
+// character_id as a plain string, same "opaque id crossing the wire" as
+// every other id in this protocol suite.
+message SelectCharacter {
+  string character_id = 1;
+}
+
+// #225: character_id must name one of the caller's own characters —
+// checked the same way SelectCharacter's ownership check is — and
+// destination_realm_id must name a real, bound realm; both are rejected
+// with an Error rather than a panic. No admin-initiated transfer path
+// exists here — this is the player-initiated flow only.
+message RequestTransfer {
+  string character_id = 1;
+  string destination_realm_id = 2;
+}
+
+message ServerMessage {
+  oneof kind {
+    CharacterList character_list = 1;
+    CharacterCreated character_created = 2;
+    CharacterSelected character_selected = 3;
+    Error error = 4;
+    // #213/#212: response to ListCharacterOptions.
+    CharacterOptions character_options = 5;
+    // #225: response to a successful RequestTransfer.
+    TransferComplete transfer_complete = 6;
+  }
+}
+
+// One dev-declared entry from character.archetypes.yaml (#213/#212).
+message ArchetypeOption {
+  string key = 1;
+  string name = 2;
+  string description = 3;
+}
+
+message CharacterOptions {
+  repeated ArchetypeOption archetypes = 1;
+}
+
+message CharacterSummary {
+  string character_id = 1;
+  string name = 2;
+  string zone_id = 3;
+}
+
+message CharacterList {
+  repeated CharacterSummary characters = 1;
+}
+
+message CharacterCreated {
+  string character_id = 1;
+}
+
+// Acknowledges a successful SelectCharacter — the world-join messages
+// that follow (`message_type` 200) are the fuller confirmation, but this
+// gives the client an explicit "yes, this one" independent of whether
+// the subsequent world-join itself succeeds.
+message CharacterSelected {
+  string character_id = 1;
+}
+
+message Error {
+  string message = 1;
+}
+
+// Confirms a successful RequestTransfer — the character now belongs to
+// realm_id, effective immediately (a subsequent ListCharacters on this
+// same connection, still scoped to whichever realm this process serves,
+// no longer includes it if that's the source realm).
+message TransferComplete {
+  string character_id = 1;
+  string realm_id = 2;
+}
