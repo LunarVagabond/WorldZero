@@ -4874,8 +4874,10 @@ async fn equip_item_applies_deltas_and_removes_it_from_inventory() {
     loop {
         match recv_world(&mut stream).await {
             ServerMessage::StatChanged { stat_key, value } => {
-                assert_eq!(stat_key, "hp");
-                assert_eq!(value, 110);
+                assert_eq!(stat_key, "reputation.ironclad_guild");
+                // test-plugin's on-character-create hook already set this
+                // to 25 (#194) before the equip's own +10 delta lands.
+                assert_eq!(value, 35);
                 saw_stat_changed = true;
             }
             ServerMessage::ItemChanged {
@@ -4895,7 +4897,10 @@ async fn equip_item_applies_deltas_and_removes_it_from_inventory() {
             other => panic!("expected the equip sequence, got {other:?}"),
         }
     }
-    assert!(saw_stat_changed, "expected a StatChanged for hp");
+    assert!(
+        saw_stat_changed,
+        "expected a StatChanged for reputation.ironclad_guild"
+    );
     assert!(saw_item_changed, "expected an ItemChanged for iron-helmet");
 }
 
@@ -5064,24 +5069,31 @@ async fn unequip_item_reverses_deltas_and_returns_the_item() {
     )
     .await;
 
-    let mut saw_hp_reverted = false;
+    let mut saw_reputation_reverted = false;
     loop {
         match recv_world(&mut stream).await {
             ServerMessage::StatChanged { stat_key, value } => {
-                assert_eq!(stat_key, "hp");
-                assert_eq!(value, 100);
-                saw_hp_reverted = true;
+                assert_eq!(stat_key, "reputation.ironclad_guild");
+                // Back to on-character-create's own +25 (#194) once the
+                // equip's +10 is reversed.
+                assert_eq!(value, 25);
+                saw_reputation_reverted = true;
             }
             ServerMessage::EquipmentChanged { slot, item_type } => {
                 assert_eq!(slot, "head");
                 assert_eq!(item_type, "");
                 break;
             }
-            ServerMessage::Moved { .. } | ServerMessage::EntitySpawned { .. } => {}
+            ServerMessage::ItemChanged { .. }
+            | ServerMessage::Moved { .. }
+            | ServerMessage::EntitySpawned { .. } => {}
             other => panic!("expected the unequip sequence, got {other:?}"),
         }
     }
-    assert!(saw_hp_reverted, "expected hp to revert to its default");
+    assert!(
+        saw_reputation_reverted,
+        "expected the equip's reputation.ironclad_guild delta to be reversed"
+    );
     assert_eq!(read_item_quantity(&character_id, "iron-helmet").await, 1);
 }
 

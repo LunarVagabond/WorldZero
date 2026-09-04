@@ -143,10 +143,10 @@ items:
   - item_type: iron-helmet
     slot: head
     stat_deltas:
-      hp: 10
+      defense: 10
 ```
 
-`stat_deltas` keys are validated against `stats.schema.yaml` at load time (must be a declared stat — the bounds check itself happens when the delta is actually applied). An `item_type` not listed here can't be equipped at all. If the target slot is already occupied, `EquipItem` unequips the occupant first (deltas reversed, granted back to inventory) rather than rejecting the request. Required by `make quickstart`.
+`stat_deltas` keys are validated against `stats.schema.yaml` at load time (must be a declared stat — the bounds check itself happens when the delta is actually applied). Make sure any stat you grant gear bonuses against actually has headroom below its declared `max` — a stat whose `default` already sits at `max` (the shipped `stats.schema.example.yaml`'s `hp`/`mana` both do) rejects any positive gear delta the moment it's equipped, since the resulting value would exceed the bound; `config/equipment.schema.example.yaml`'s own helmets use `reputation.ironclad_guild` (no declared bound) rather than `hp` for exactly this reason. An `item_type` not listed here can't be equipped at all. If the target slot is already occupied, `EquipItem` unequips the occupant first (deltas reversed, granted back to inventory) rather than rejecting the request. Required by `make quickstart`.
 
 ---
 

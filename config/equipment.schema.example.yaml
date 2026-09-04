@@ -14,9 +14,16 @@
 # stats.schema.yaml) applied while worn and reversed on unequip. An
 # item_type not listed here can't be equipped at all —
 # `EquipItem{item_type}` is rejected with an Error. This example's deltas
-# (hp/mana) match stats.schema.example.yaml's own declared keys — a real
-# game would declare its own combat stats (attack/defense/etc.) in both
-# files together.
+# match stats.schema.example.yaml's own declared keys — a real game
+# would declare its own combat stats (attack/defense/etc.) in both files
+# together. The helmets use reputation.ironclad_guild (no declared
+# min/max) rather than hp deliberately: stats.schema.example.yaml's hp
+# starts every character already at its own declared max (100/100), so
+# a positive hp delta from gear would violate that bound the moment it's
+# equipped — a bounded "current value" stat like hp needs real headroom
+# below its max before gear can usefully add to it, which is a choice
+# for your own stats.schema.yaml, not something this example should paper
+# over by picking an unbounded stat to demo the mechanism instead.
 schema_version: 1
 slots:
   - head
@@ -26,11 +33,11 @@ items:
   - item_type: iron-helmet
     slot: head
     stat_deltas:
-      hp: 10
+      reputation.ironclad_guild: 10
   - item_type: cloth-cap
     slot: head
     stat_deltas:
-      hp: 2
+      reputation.ironclad_guild: 2
   - item_type: iron-sword
     slot: weapon
     stat_deltas:
