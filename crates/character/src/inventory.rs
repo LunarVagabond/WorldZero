@@ -29,6 +29,13 @@ use crate::store::CharacterStore;
 /// treat it as load-bearing.
 const DEFAULT_MAX_DISTINCT_ITEM_TYPES: u32 = 40;
 
+/// #276: the valid range for a `MoveItemToSlot.slot_index` is
+/// `[0, slot_count)` — deliberately a separate knob from
+/// `max_distinct_item_types` (a dev may want more visual slots than the
+/// stack cap, e.g. reserved equipment-adjacent slots) even though both
+/// default to the same number today.
+const DEFAULT_SLOT_COUNT: u32 = 40;
+
 /// Per-deployment inventory capacity — enforced by the core (a grant
 /// that would exceed it is rejected, never silently ignored or
 /// truncated), but configurable per game rather than a hardcoded number,
@@ -42,20 +49,27 @@ pub struct InventoryConfig {
     /// the classic "N inventory slots" mental model rather than an
     /// arbitrary sum that would penalize stacking.
     pub max_distinct_item_types: u32,
+    /// The number of positional slots `move_item_to_slot` will place a
+    /// stack into — a valid `slot_index` is `[0, slot_count)`. Separate
+    /// from `max_distinct_item_types` (see `DEFAULT_SLOT_COUNT`'s doc
+    /// comment) even though the defaults happen to match.
+    pub slot_count: u32,
 }
 
 impl Default for InventoryConfig {
     fn default() -> Self {
         Self {
             max_distinct_item_types: DEFAULT_MAX_DISTINCT_ITEM_TYPES,
+            slot_count: DEFAULT_SLOT_COUNT,
         }
     }
 }
 
 impl InventoryConfig {
-    /// Reads `WZ_INVENTORY_MAX_ITEM_TYPES`, optional — an unset var keeps
-    /// the default, but a *set-and-unparsable* one is a config error, not
-    /// a silent fallback (same convention as `world::WorldConfig::from_env`).
+    /// Reads `WZ_INVENTORY_MAX_ITEM_TYPES`/`WZ_INVENTORY_SLOT_COUNT`,
+    /// both optional — an unset var keeps the default, but a
+    /// *set-and-unparsable* one is a config error, not a silent fallback
+    /// (same convention as `world::WorldConfig::from_env`).
     pub fn from_env() -> Result<Self> {
         let mut config = Self::default();
 
@@ -72,6 +86,22 @@ impl InventoryConfig {
             return Err(Error::new(
                 "character",
                 "WZ_INVENTORY_MAX_ITEM_TYPES must be greater than 0",
+            ));
+        }
+
+        if let Ok(value) = std::env::var("WZ_INVENTORY_SLOT_COUNT") {
+            config.slot_count = value.parse().map_err(|_| {
+                Error::new(
+                    "character",
+                    format!("WZ_INVENTORY_SLOT_COUNT is not a valid number: {value:?}"),
+                )
+            })?;
+        }
+
+        if config.slot_count == 0 {
+            return Err(Error::new(
+                "character",
+                "WZ_INVENTORY_SLOT_COUNT must be greater than 0",
             ));
         }
 
@@ -367,6 +397,7 @@ mod tests {
             schema(),
             InventoryConfig {
                 max_distinct_item_types,
+                ..Default::default()
             },
         );
         let character_id = store

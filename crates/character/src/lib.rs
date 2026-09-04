@@ -13,6 +13,7 @@ pub mod party;
 pub mod party_schema;
 pub mod schema;
 pub mod session_lease;
+pub mod slots;
 pub mod store;
 
 pub use archetype_schema::{ArchetypeSchema, CharacterArchetype};

@@ -152,6 +152,16 @@ pub enum ClientMessage {
     /// (#211's convention), same as `CraftItem`; the configured plugin's
     /// `on-item-drop` hook also fires afterward as a pure notification.
     DropItem { item_type: String, quantity: i64 },
+    /// Requests placing `item_type` from this connection's own inventory
+    /// at `slot_index` (#276) — a purely visual/positional rearrangement,
+    /// never a quantity/ownership change. `Error` if the caller doesn't
+    /// hold `item_type`, or if `slot_index` is outside
+    /// `[0, WZ_INVENTORY_SLOT_COUNT)`. If another of the caller's own
+    /// stacks already occupies `slot_index`, it swaps to the mover's
+    /// previous slot (or unsorted, if the mover had none) rather than
+    /// being rejected. Success arrives as `ItemMoved`, once for the mover
+    /// and, on a swap, once more for the displaced stack.
+    MoveItemToSlot { item_type: String, slot_index: i32 },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -347,6 +357,14 @@ pub enum ServerMessage {
         currency_key: String,
         balance: i64,
     },
+    /// Pushed to this connection whenever one of its own character's item
+    /// stacks changes position via `MoveItemToSlot` (#276) — `slot_index`
+    /// is `None` only for a displaced occupant that went back to
+    /// unsorted, never for the stack the client itself asked to move.
+    ItemMoved {
+        item_type: String,
+        slot_index: Option<i32>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -517,6 +535,13 @@ impl From<&ClientMessage> for proto::ClientMessage {
                 item_type: item_type.clone(),
                 quantity: *quantity,
             }),
+            ClientMessage::MoveItemToSlot {
+                item_type,
+                slot_index,
+            } => Kind::MoveItemToSlot(proto::MoveItemToSlot {
+                item_type: item_type.clone(),
+                slot_index: *slot_index,
+            }),
         };
         proto::ClientMessage { kind: Some(kind) }
     }
@@ -604,6 +629,13 @@ impl TryFrom<proto::ClientMessage> for ClientMessage {
             })) => Ok(ClientMessage::DropItem {
                 item_type,
                 quantity,
+            }),
+            Some(Kind::MoveItemToSlot(proto::MoveItemToSlot {
+                item_type,
+                slot_index,
+            })) => Ok(ClientMessage::MoveItemToSlot {
+                item_type,
+                slot_index,
             }),
             None => Err(Error::new(
                 "server",
@@ -759,6 +791,13 @@ impl From<&ServerMessage> for proto::ServerMessage {
                 currency_key: currency_key.clone(),
                 balance: *balance,
             }),
+            ServerMessage::ItemMoved {
+                item_type,
+                slot_index,
+            } => Kind::ItemMoved(proto::ItemMoved {
+                item_type: item_type.clone(),
+                slot_index: *slot_index,
+            }),
         };
         proto::ServerMessage { kind: Some(kind) }
     }
@@ -897,6 +936,13 @@ impl TryFrom<proto::ServerMessage> for ServerMessage {
                 currency_key,
                 balance,
             }),
+            Some(Kind::ItemMoved(proto::ItemMoved {
+                item_type,
+                slot_index,
+            })) => Ok(ServerMessage::ItemMoved {
+                item_type,
+                slot_index,
+            }),
             None => Err(Error::new(
                 "server",
                 "gateway world message has no kind set",
@@ -984,6 +1030,51 @@ mod tests {
             decoded,
             ClientMessage::DropItem { item_type, quantity }
                 if item_type == "torch" && quantity == 3
+        ));
+    }
+
+    #[test]
+    fn move_item_to_slot_round_trips_through_an_envelope() {
+        let message = ClientMessage::MoveItemToSlot {
+            item_type: "torch".to_string(),
+            slot_index: 3,
+        };
+        let envelope = message.into_envelope().unwrap();
+        let decoded = ClientMessage::from_envelope(&envelope).unwrap();
+        assert!(matches!(
+            decoded,
+            ClientMessage::MoveItemToSlot { item_type, slot_index }
+                if item_type == "torch" && slot_index == 3
+        ));
+    }
+
+    #[test]
+    fn item_moved_round_trips_with_a_slot_index() {
+        let message = ServerMessage::ItemMoved {
+            item_type: "torch".to_string(),
+            slot_index: Some(3),
+        };
+        let envelope = message.into_envelope().unwrap();
+        let decoded = ServerMessage::from_envelope(&envelope).unwrap();
+        assert!(matches!(
+            decoded,
+            ServerMessage::ItemMoved { item_type, slot_index }
+                if item_type == "torch" && slot_index == Some(3)
+        ));
+    }
+
+    #[test]
+    fn item_moved_round_trips_with_no_slot_index() {
+        let message = ServerMessage::ItemMoved {
+            item_type: "shield".to_string(),
+            slot_index: None,
+        };
+        let envelope = message.into_envelope().unwrap();
+        let decoded = ServerMessage::from_envelope(&envelope).unwrap();
+        assert!(matches!(
+            decoded,
+            ServerMessage::ItemMoved { item_type, slot_index }
+                if item_type == "shield" && slot_index.is_none()
         ));
     }
 

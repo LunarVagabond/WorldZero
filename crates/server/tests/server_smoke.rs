@@ -75,6 +75,8 @@ const DELETE_CHARACTER_ADDR: &str = "127.0.0.1:7955";
 const Z_MOVEMENT_ADDR: &str = "127.0.0.1:7956";
 const DROP_ITEM_ADDR: &str = "127.0.0.1:7957";
 const DROP_ITEM_INSUFFICIENT_ADDR: &str = "127.0.0.1:7958";
+const MOVE_ITEM_TO_SLOT_ADDR: &str = "127.0.0.1:7959";
+const MOVE_ITEM_TO_SLOT_SWAP_ADDR: &str = "127.0.0.1:7960";
 const SESSION_RESUME_INVALID_ADDR: &str = "127.0.0.1:7931";
 const MOVE_CORRELATION_ADDR: &str = "127.0.0.1:7932";
 const PING_PONG_ADDR: &str = "127.0.0.1:7933";
@@ -4628,6 +4630,172 @@ async fn drop_item_with_insufficient_quantity_is_rejected_and_removes_nothing() 
     }
 
     assert_eq!(read_item_quantity(&character_id, "torch").await, 1);
+}
+
+/// #276, end to end through the real `server` binary: `MoveItemToSlot`
+/// into an empty slot places the stack there and reports it via
+/// `ItemMoved`, without touching the stack's quantity.
+#[tokio::test]
+#[ignore]
+async fn move_item_to_an_empty_slot_succeeds() {
+    let config_dir = setup_config_dir("move-item-empty-slot");
+    let _server = start_server(&config_dir, MOVE_ITEM_TO_SLOT_ADDR).await;
+    wait_for_port(MOVE_ITEM_TO_SLOT_ADDR).await;
+
+    let username = format!("slot-{}", uuid::Uuid::now_v7());
+    let mut stream = connect(&config_dir, MOVE_ITEM_TO_SLOT_ADDR).await;
+    send_auth(
+        &mut stream,
+        &AuthClientMessage::Register {
+            username: username.clone(),
+            password: "hunter2".to_string(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv_auth(&mut stream).await,
+        AuthServerMessage::Authenticated { .. }
+    ));
+    select_realm(&mut stream, _server.realm_id).await;
+    select_or_create_character(&mut stream, &username).await;
+
+    loop {
+        if let ServerMessage::Joined { .. } = recv_world(&mut stream).await {
+            break;
+        }
+    }
+    loop {
+        match recv_world(&mut stream).await {
+            ServerMessage::PluginMessage { .. } => break,
+            ServerMessage::Moved { .. } => {}
+            other => panic!("expected the join greeting, got {other:?}"),
+        }
+    }
+
+    give_item(&mut stream, "torch").await;
+
+    send_world(
+        &mut stream,
+        &ClientMessage::MoveItemToSlot {
+            item_type: "torch".to_string(),
+            slot_index: 3,
+        },
+    )
+    .await;
+
+    loop {
+        match recv_world(&mut stream).await {
+            ServerMessage::ItemMoved {
+                item_type,
+                slot_index,
+            } => {
+                assert_eq!(item_type, "torch");
+                assert_eq!(slot_index, Some(3));
+                break;
+            }
+            ServerMessage::Moved { .. } | ServerMessage::EntitySpawned { .. } => {}
+            other => panic!("expected ItemMoved after MoveItemToSlot, got {other:?}"),
+        }
+    }
+}
+
+/// #276: moving a second stack onto a slot the first already occupies
+/// swaps the occupant to the mover's previous slot, reported as a second
+/// `ItemMoved` — not a rejection.
+#[tokio::test]
+#[ignore]
+async fn move_item_to_an_occupied_slot_swaps_the_occupant() {
+    let config_dir = setup_config_dir("move-item-swap-slot");
+    let _server = start_server(&config_dir, MOVE_ITEM_TO_SLOT_SWAP_ADDR).await;
+    wait_for_port(MOVE_ITEM_TO_SLOT_SWAP_ADDR).await;
+
+    let username = format!("slot-swap-{}", uuid::Uuid::now_v7());
+    let mut stream = connect(&config_dir, MOVE_ITEM_TO_SLOT_SWAP_ADDR).await;
+    send_auth(
+        &mut stream,
+        &AuthClientMessage::Register {
+            username: username.clone(),
+            password: "hunter2".to_string(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv_auth(&mut stream).await,
+        AuthServerMessage::Authenticated { .. }
+    ));
+    select_realm(&mut stream, _server.realm_id).await;
+    select_or_create_character(&mut stream, &username).await;
+
+    loop {
+        if let ServerMessage::Joined { .. } = recv_world(&mut stream).await {
+            break;
+        }
+    }
+    loop {
+        match recv_world(&mut stream).await {
+            ServerMessage::PluginMessage { .. } => break,
+            ServerMessage::Moved { .. } => {}
+            other => panic!("expected the join greeting, got {other:?}"),
+        }
+    }
+
+    give_item(&mut stream, "torch").await;
+    give_item(&mut stream, "shield").await;
+
+    send_world(
+        &mut stream,
+        &ClientMessage::MoveItemToSlot {
+            item_type: "torch".to_string(),
+            slot_index: 2,
+        },
+    )
+    .await;
+    loop {
+        match recv_world(&mut stream).await {
+            ServerMessage::ItemMoved { item_type, .. } if item_type == "torch" => break,
+            ServerMessage::Moved { .. } | ServerMessage::EntitySpawned { .. } => {}
+            other => panic!("expected ItemMoved for torch, got {other:?}"),
+        }
+    }
+
+    send_world(
+        &mut stream,
+        &ClientMessage::MoveItemToSlot {
+            item_type: "shield".to_string(),
+            slot_index: 2,
+        },
+    )
+    .await;
+
+    // shield had never been placed before (unsorted), so displacing torch
+    // (currently at slot 2, from this test's first move) sends it back to
+    // unsorted — not to some other real slot.
+    let mut saw_shield_at_2 = false;
+    let mut saw_torch_unsorted = false;
+    for _ in 0..2 {
+        match recv_world(&mut stream).await {
+            ServerMessage::ItemMoved {
+                item_type,
+                slot_index,
+            } if item_type == "shield" => {
+                assert_eq!(slot_index, Some(2));
+                saw_shield_at_2 = true;
+            }
+            ServerMessage::ItemMoved {
+                item_type,
+                slot_index,
+            } if item_type == "torch" => {
+                assert_eq!(slot_index, None);
+                saw_torch_unsorted = true;
+            }
+            other => panic!("expected ItemMoved for the swap, got {other:?}"),
+        }
+    }
+    assert!(saw_shield_at_2, "shield should have moved into slot 2");
+    assert!(
+        saw_torch_unsorted,
+        "torch should have been displaced back to unsorted"
+    );
 }
 
 /// #214: `spawn-npc`'s host callback can't synchronously return a real

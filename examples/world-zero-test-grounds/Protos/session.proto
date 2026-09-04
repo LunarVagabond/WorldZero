@@ -98,6 +98,8 @@ message ClientMessage {
     GuildSetMotd guild_set_motd = 18;
     GuildSetTag guild_set_tag = 19;
     CraftItem craft_item = 20;
+    DropItem drop_item = 21;
+    MoveItemToSlot move_item_to_slot = 22;
   }
 }
 
@@ -112,6 +114,9 @@ message Move {
   double x = 1;
   double y = 2;
   uint32 seq = 3;
+  // #249: authoritative altitude — see world::spatial::Point's doc
+  // comment for the "z is real, zone bounds stay 2D" scope note.
+  double z = 4;
 }
 
 // Requests attacking target_entity_id — the server confirms the target
@@ -285,11 +290,41 @@ message CraftItem {
   string recipe_key = 1;
 }
 
+// Requests dropping quantity of item_type from this connection's own
+// inventory (#265) — unlike UseItem, removal is core-owned and
+// unconditional (character::CharacterStore::remove_item, the same
+// storage remove-item already writes through): dropping works the same
+// whether or not any plugin is loaded. Success is reported via the
+// existing ItemChanged (#211's convention), and the configured plugin's
+// on-item-drop hook fires afterward as a pure notification — the core
+// has no "item sitting on the ground" concept of its own.
+message DropItem {
+  string item_type = 1;
+  int64 quantity = 2;
+}
+
+// Requests placing item_type from this connection's own inventory at
+// slot_index (#276, split out of #243 — see that closed issue's decision
+// comment) — a purely visual/positional rearrangement, never a
+// quantity/ownership change. Error if the caller doesn't hold item_type,
+// or if slot_index is outside [0, WZ_INVENTORY_SLOT_COUNT). If another of
+// the caller's own stacks already occupies slot_index, it swaps to the
+// mover's previous slot (or unsorted, if the mover had none) rather than
+// being rejected — ordinary drag-and-drop UX
+// (character::CharacterStore::move_item_to_slot). Success is reported via
+// ItemMoved, once for the mover and, on a swap, once more for the
+// displaced stack.
+message MoveItemToSlot {
+  string item_type = 1;
+  int32 slot_index = 2;
+}
+
 message RosterEntry {
   string entity_id = 1;
   string entity_type = 2;
   double x = 3;
   double y = 4;
+  double z = 5;
 }
 
 message ServerMessage {
@@ -313,6 +348,7 @@ message ServerMessage {
     StatChanged stat_changed = 17;
     ItemChanged item_changed = 18;
     CurrencyChanged currency_changed = 19;
+    ItemMoved item_moved = 20;
   }
 }
 
@@ -328,6 +364,8 @@ message Joined {
   double y = 3;
   repeated RosterEntry roster = 4;
   uint64 tick = 5;
+  double z = 6;
+  string zone_id = 7;
 }
 
 // An entity (never this connection's own) newly exists in the zone.
@@ -336,6 +374,7 @@ message EntitySpawned {
   string entity_type = 2;
   double x = 3;
   double y = 4;
+  double z = 5;
 }
 
 message EntityDespawned {
@@ -354,6 +393,7 @@ message ZoneChanged {
   double y = 4;
   repeated RosterEntry roster = 5;
   uint64 tick = 6;
+  double z = 7;
 }
 
 // An accepted movement update, broadcast to every connected client.
@@ -368,6 +408,7 @@ message Moved {
   double y = 3;
   uint32 seq = 4;
   uint64 tick = 5;
+  double z = 6;
 }
 
 // A movement update this connection itself requested was rejected — only
@@ -475,6 +516,16 @@ message StatChanged {
 message ItemChanged {
   string item_type = 1;
   int64 quantity = 2;
+}
+
+// Reports a stack's new positional slot after a MoveItemToSlot (#276) —
+// purely positional, never implies a quantity change (that's always
+// ItemChanged). slot_index is unset (Rust None) if the stack went back to
+// unsorted — only possible for a displaced occupant, never for the
+// mover itself (a MoveItemToSlot request always names a real slot).
+message ItemMoved {
+  string item_type = 1;
+  optional int32 slot_index = 2;
 }
 
 // Pushed to a connection whenever its own character's currency balance
