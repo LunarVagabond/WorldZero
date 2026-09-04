@@ -53,7 +53,7 @@ triggers:
 | `bounds.coordinate_system.units` | string | yes | `"meters"` only for v0. |
 | `bounds.coordinate_system.origin` | `[f64, f64]` | yes | The `(0,0)` point of this zone's local coordinate space. |
 | `bounds.points` | `[[f64, f64], ...]` | yes | At least 3 points (a valid polygon). |
-| `collision.asset_ref` | string | yes | `sha256:<64 lowercase hex chars>` — see "Content-addressing" below. Format is validated; the loader does not fetch or verify the asset itself (no asset store exists yet). |
+| `collision.asset_ref` | string | yes | `sha256:<64 lowercase hex chars>` — see "Content-addressing" below. Format is validated by the manifest loader itself; resolving the reference to real, verified bytes is `content::AssetStore`'s job (#279), not the loader's. |
 | `collision.format` | string | yes | `"navmesh_v1"` only for v0. |
 | `links[].target_zone` | string | no (array may be empty) | Non-empty string; cross-zone existence is a content-pack-level concern (see below), not checked by a single manifest in isolation. |
 | `links[].edge` | `[[f64,f64], [f64,f64]]` | yes, if a link is present | Exactly 2 points (a line segment). |
@@ -108,7 +108,9 @@ Cross-zone validation that only makes sense at the pack level happens here, not 
 
 ## Content-addressing
 
-`collision.asset_ref` (and any future binary-asset reference) is `sha256:` followed by the lowercase hex-encoded SHA-256 digest of the asset file's bytes — 64 hex characters, always lowercase, no other encoding. Two zones referencing the same imported geometry produce the same hash and therefore the same `asset_ref`, which is what makes this CDN/cache-friendly and dedup-free-by-construction (proposal, "Content-addressing"). The manifest loader validates the **shape** of the string (`sha256:` prefix + exactly 64 lowercase hex characters) since no asset store/importer pipeline exists yet to fetch and verify the referenced bytes against the hash — that check is future work once one does.
+`collision.asset_ref` (and any future binary-asset reference) is `sha256:` followed by the lowercase hex-encoded SHA-256 digest of the asset file's bytes — 64 hex characters, always lowercase, no other encoding. Two zones referencing the same imported geometry produce the same hash and therefore the same `asset_ref`, which is what makes this CDN/cache-friendly and dedup-free-by-construction (proposal, "Content-addressing"). The manifest loader validates only the **shape** of the string (`sha256:` prefix + exactly 64 lowercase hex characters) — resolving it to real, verified bytes is a separate step.
+
+**`content::AssetStore` (#279)** is that separate step: a minimal, local, content-addressed store — `<config_dir>/assets/<sha256-hex>`, a flat directory a self-hoster drops the referenced file into by hand. No upload pipeline, no CDN, no importer tooling (out of scope; per the proposal's Design Principle #2, the server only ever consumes a gameplay-only representation, never authors one). `AssetStore::resolve(asset_ref)` reads `<assets_dir>/<hash>` and verifies the file's *actual* SHA-256 digest matches the reference before returning its bytes — a malformed reference, a missing file, and a hash mismatch are three distinct, clearly-named failure modes, never conflated into one generic "not found." Generic, not navmesh-specific: any future binary asset reference resolves through the same mechanism. Nothing wires a real consumer up to this yet — that's the navmesh-format half split off as its own ticket.
 
 ## `schema_version` semantics
 

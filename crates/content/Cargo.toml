@@ -10,3 +10,4 @@ publish.workspace = true
 common = { version = "0.1.0", path = "../common" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_yaml = "0.9.34"
+sha2 = "0.10"
