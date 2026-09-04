@@ -1,14 +1,13 @@
 //! Argon2id password hashing (docs/specs/Auth_Spec.md, "Password hashing").
 
 use argon2::Argon2;
-use argon2::password_hash::rand_core::OsRng;
-use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
+use argon2::password_hash::phc::PasswordHash;
+use argon2::password_hash::{PasswordHasher, PasswordVerifier};
 use common::{Error, Result};
 
 pub fn hash_password(password: &str) -> Result<String> {
-    let salt = SaltString::generate(&mut OsRng);
     Argon2::default()
-        .hash_password(password.as_bytes(), &salt)
+        .hash_password(password.as_bytes())
         .map(|hash| hash.to_string())
         .map_err(|e| Error::wrap("auth", "failed to hash password", e))
 }
