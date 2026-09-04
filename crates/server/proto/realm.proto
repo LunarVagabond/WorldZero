@@ -40,13 +40,21 @@ message RealmSummary {
   string realm_id = 1;
   string name = 2;
   string open_or_bound = 3;
-  // Census of characters whose realm_id row is this specific realm, not
-  // "characters the connecting account can select here" — for an `open`
-  // realm those differ, since ListCharacters spans every open realm's
-  // characters for that account. See RealmSummary's Rust doc comment
-  // (server::realm_protocol) for the full explanation.
+  // Realm-wide population census — characters whose realm_id row is
+  // this specific realm, not "characters the connecting account can
+  // select here". For an `open` realm those differ, since
+  // ListCharacters spans every open realm's characters for that
+  // account (see selectable_character_count below). See RealmSummary's
+  // Rust doc comment (server::realm_protocol) for the full explanation.
   int64 character_count = 4;
   uint64 live_connection_count = 5;
+  // The number of characters ListCharacters would actually return if
+  // this connection selected this realm right now (#261) — the number
+  // a realm-select picker should show, since it matches what Character
+  // Select will show next. Equals character_count for a bound realm;
+  // can differ for an open realm, whose character list spans every
+  // sibling open realm's characters for this account.
+  int64 selectable_character_count = 6;
 }
 
 message RealmList {

@@ -41,8 +41,14 @@ message RealmSummary {
   string realm_id = 1;
   string name = 2;
   string open_or_bound = 3;
+  // Realm-wide population census, not "characters I can select here" —
+  // see selectable_character_count below.
   int64 character_count = 4;
   uint64 live_connection_count = 5;
+  // The number of characters ListCharacters would actually return if
+  // this connection selected this realm right now (world_zero#261) —
+  // what a realm-select picker should show.
+  int64 selectable_character_count = 6;
 }
 
 message RealmList {

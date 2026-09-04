@@ -36,7 +36,10 @@ pub struct RealmPopulation {
     /// (`CharacterStore::list_by_account_in_open_realms`) deliberately
     /// spans every open realm's characters for that account, not just this
     /// one. A caller surfacing this on a realm picker should label it as a
-    /// realm-specific census, not a selectable-character count.
+    /// realm-specific census, not a selectable-character count — or better,
+    /// use `server::realm_protocol::RealmSummary::selectable_character_count`
+    /// (#261), which runs the real account-scoped `LoginPolicy::list_characters`
+    /// call instead of this population number.
     pub character_count: i64,
     pub live_connections: u64,
 }

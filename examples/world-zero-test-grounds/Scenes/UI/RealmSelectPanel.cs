@@ -13,13 +13,13 @@ namespace WorldZeroTestGrounds.Scenes.UI;
 // a hardcoded picker, so the flow is already correct for whenever #130
 // lands. Same Build*Section pattern as LoginPanel/CharacterSelectPanel.
 //
-// `character_count` is only meaningful for a `bound` realm (WoW-style:
-// a character belongs to exactly this realm, so a per-realm count is a
-// real number). For an `open` realm (OSRS-style: one character pool
-// shared across the whole open-realm group), no single realm "has" a
-// character count worth showing — `ListCharacters` after selecting can
-// span realms entirely differently from this row's own count (see
-// BACKEND_INTEGRATION_NOTES.md) — so only `online` is shown there.
+// `character_count` is a realm-wide population census, not "characters
+// I can select here" — for an `open` realm (OSRS-style: one character
+// pool shared across the whole open-realm group) those differ, since
+// `ListCharacters` after selecting spans every open realm's characters
+// for this account. `selectable_character_count` (world_zero#261) is
+// the number that actually matches what Character Select will show, for
+// both realm types, so that's what this panel displays.
 // Snapshot-only (a Refresh button, no polling): `online` is the only
 // number here that changes on its own moment to moment, and re-fetching
 // every few seconds just to watch a number that's usually static isn't
@@ -88,9 +88,7 @@ public partial class RealmSelectPanel : Control
         _realmList.Clear();
         foreach (var r in list.Realms)
         {
-            string label = r.OpenOrBound == "bound"
-                ? $"{r.Name}  [{r.OpenOrBound}]  characters={r.CharacterCount}  online={r.LiveConnectionCount}  ({r.RealmId})"
-                : $"{r.Name}  [{r.OpenOrBound}]  online={r.LiveConnectionCount}  ({r.RealmId})";
+            string label = $"{r.Name}  [{r.OpenOrBound}]  characters={r.SelectableCharacterCount}  online={r.LiveConnectionCount}  ({r.RealmId})";
             _realmList.AddItem(label);
         }
         if (_realmList.ItemCount > 0)
