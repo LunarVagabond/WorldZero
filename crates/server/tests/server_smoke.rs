@@ -5590,7 +5590,13 @@ async fn confirming_a_trade_after_the_offer_is_no_longer_held_is_rejected_and_re
                 assert!(!your_confirmed, "confirmation should have been reset");
                 saw_reset_state = true;
             }
-            ServerMessage::Moved { .. } | ServerMessage::EntitySpawned { .. } => {}
+            // test-plugin's on-item-drop hook (fired by the earlier
+            // DropItem) replies with its own PluginMessage — its exact
+            // delivery order relative to the trade sequence below isn't
+            // fixed, so it can land here rather than earlier.
+            ServerMessage::PluginMessage { .. }
+            | ServerMessage::Moved { .. }
+            | ServerMessage::EntitySpawned { .. } => {}
             other => panic!("expected the revalidation failure sequence, got {other:?}"),
         }
     }
