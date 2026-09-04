@@ -1,0 +1,489 @@
+// Wire schema for `server::session_protocol` — `message_type` 200
+// (docs/specs/Networking_Spec.md's catalog). Source of truth for this
+// message type, decided in #109, implemented in #123 — see
+// `crates/auth/proto/auth.proto`'s header comment for the same note on
+// why `server::session_protocol`'s Rust enum wraps this rather than being
+// generated from it directly.
+//
+// Every id (`entity_id`, `zone_id`) crosses this boundary as a plain
+// `string`, same "opaque id" discipline as `auth.proto`/`chat.proto` —
+// `zone_id` in particular is a content-manifest-declared string, never a
+// UUID, so this was already the natural representation.
+//
+// #196 adds client/server correlation for movement (`Move.seq`, echoed
+// on `Moved`/`Rejected`), a server-authoritative `tick` on every message
+// built from — or between — simulation ticks (`Moved`/`Rejected`/
+// `Joined`/`ZoneChanged`), and a `Ping`/`Pong` pair for latency
+// measurement independent of movement traffic. See
+// docs/specs/Networking_Spec.md's "Movement correlation and ping" for
+// the full design writeup.
+//
+// #142 adds `JoinGroupLayer` — live, same-zone layer reassignment for an
+// already-connected player joining a group whose members are on a
+// different layer of the same zone. Reuses `ZoneChanged` for the
+// confirmation (same zone_id, new roster) rather than a new message
+// type, since a layer move is the same "despawn here, spawn there, tell
+// the connection" shape as a real zone-link crossing. See
+// docs/specs/Networking_Spec.md's "Group-aware layer reassignment".
+//
+// #178 adds the real party/group system `JoinGroupLayer` deferred to:
+// `PartyInvite`/`PartyInviteResponse`/`PartyLeave` (client) and
+// `PartyInviteReceived`/`PartyInviteDeclined`/`PartyUpdate` (server).
+// `JoinGroupLayer` itself now validates real party membership before
+// moving anyone (see its own comment, updated by #178).
+//
+// #179 adds the real guild system: `GuildCreate`/`GuildInvite`/
+// `GuildInviteResponse`/`GuildLeave`/`GuildDisband`/`GuildKick`/
+// `GuildPromote`/`GuildDemote`/`GuildSetMotd`/`GuildSetTag` (client) and
+// `GuildInviteReceived`/`GuildInviteDeclined`/`GuildUpdate`/
+// `GuildDisbanded` (server). Unlike party, guild membership is
+// account-scoped, not tied to a specific character (`guild::GuildStore`'s
+// own doc comment) — but every message here still addresses a *target*
+// player by their live entity id, same discipline as `PartyInvite`, since
+// only a currently-connected player can be resolved to the account behind
+// an entity. Acting on an offline guild member (e.g. kicking or
+// promoting someone not currently connected) isn't supported by this
+// wire protocol in v0.
+//
+// #211 adds `StatChanged`/`ItemChanged`/`CurrencyChanged` (server only —
+// nothing a client ever requests) — pushed automatically whenever a
+// plugin's `apply-stat-delta`/`apply-stat-delta-for-character`/
+// `grant-item`/`remove-item`/`modify-currency` host-function call
+// actually lands (#210's decision), closing the gap where the write
+// succeeded in Postgres but the connected client never learned the new
+// value without the plugin inventing its own `PluginMessage` convention.
+// Each is sent only to the one connection that owns the affected
+// entity/character — never zone-broadcast, unlike `Moved` — since a
+// stat/inventory/currency value is private. `CurrencyChanged` carries a
+// `currency_key` alongside `balance` (#218) — a dev-declared multi-
+// currency system (`character.currency_schema.CurrencySchema`,
+// `currency.schema.yaml`, #217's decision) replaced `character`'s old
+// single `currency_balance` column, so a currency's identity has to be
+// on the wire too, not just its resulting value.
+//
+// #216 adds `CraftItem` (client) -- implementing #215's crafting
+// decision: resolves recipe_key against the dev-declared
+// crafting.schema.yaml (character::CraftingSchema) and, if every
+// declared input is present in sufficient quantity, atomically consumes
+// them and grants the declared output
+// (character::CharacterStore::craft_item). No new server message --
+// success is reported via the existing ItemChanged (once per affected
+// stack, #211) and failure via the existing Error, same "reuse what
+// already covers it" reasoning #211 itself already established.
+
+syntax = "proto3";
+
+package worldzero.session;
+option csharp_namespace = "WorldZeroTestGrounds.Wire.Session";
+
+message ClientMessage {
+  oneof kind {
+    Move move = 1;
+    Attack attack = 2;
+    UseItem use_item = 3;
+    InteractNpc interact_npc = 4;
+    Ping ping = 5;
+    JoinGroupLayer join_group_layer = 6;
+    PartyInvite party_invite = 7;
+    PartyInviteResponse party_invite_response = 8;
+    PartyLeave party_leave = 9;
+    GuildCreate guild_create = 10;
+    GuildInvite guild_invite = 11;
+    GuildInviteResponse guild_invite_response = 12;
+    GuildLeave guild_leave = 13;
+    GuildDisband guild_disband = 14;
+    GuildKick guild_kick = 15;
+    GuildPromote guild_promote = 16;
+    GuildDemote guild_demote = 17;
+    GuildSetMotd guild_set_motd = 18;
+    GuildSetTag guild_set_tag = 19;
+    CraftItem craft_item = 20;
+  }
+}
+
+// Requests moving this connection's own entity to (x, y) — queued for
+// the next simulation tick, never applied immediately
+// (`world::Zone::request_move`). `seq` is client-assigned and
+// monotonically increasing per connection (#196) — the server never
+// interprets it beyond echoing it back on `Moved`/`Rejected`, so a
+// client can correlate a specific outcome to the specific predicted step
+// it corresponds to, not just "the most recent move."
+message Move {
+  double x = 1;
+  double y = 2;
+  uint32 seq = 3;
+}
+
+// Requests attacking target_entity_id — the server confirms the target
+// actually exists in this zone before ever calling the configured
+// plugin's on-damage-calc hook; the client never reports a damage amount
+// or outcome, only the intent to attack (#154). stat_key is an opaque,
+// game-defined string naming which declared stat this attack is aimed
+// at — same "core has no privileged notion of HP" discipline as
+// apply-stat-delta's own stat_key.
+message Attack {
+  string target_entity_id = 1;
+  string stat_key = 2;
+}
+
+// Requests using item_type from this connection's own inventory — an
+// opaque string, same discipline as grant-item/remove-item. The server
+// never validates ownership itself; the configured plugin's on-item-use
+// hook decides what using it does (#154).
+message UseItem {
+  string item_type = 1;
+}
+
+// Requests interacting with npc_entity_id specifically — distinct from a
+// generic trigger-volume interaction. The server confirms the target
+// actually is a currently-spawned NPC before ever calling the configured
+// plugin's on-npc-interact hook (#154).
+message InteractNpc {
+  string npc_entity_id = 1;
+}
+
+// A latency probe, independent of gameplay/movement traffic (#196) —
+// client_sent_at is an opaque timestamp the client chose (Unix millis is
+// the intended convention, but the server never interprets it, only
+// echoes it back on Pong) so the client can compute round-trip time
+// against its own clock without needing the server's clock to agree
+// with it.
+message Ping {
+  int64 client_sent_at = 1;
+}
+
+// Requests moving this connection's own entity onto whichever layer of
+// the *current* zone other_entity_id is already spawned into (#142) —
+// the live layer-reassignment mechanism the real party system (#178)
+// uses once two players form a party. other_entity_id must actually be
+// a fellow party member (#178) — rejected with an Error otherwise. A
+// no-op (no message sent) if other_entity_id isn't currently spawned
+// anywhere in this zone, or is already on this connection's own layer.
+// See docs/specs/Networking_Spec.md's "Group-aware layer reassignment".
+message JoinGroupLayer {
+  string other_entity_id = 1;
+}
+
+// Invites target_entity_id (any currently-connected player, any zone) to
+// a party (#178) — creates one first if the inviter isn't already in
+// one, or grows the inviter's existing party. A no-op beyond delivering
+// PartyInviteReceived to the target; nothing is committed to storage
+// until PartyInviteResponse accepts. At most one pending invite per
+// invitee — a second invite before the first is answered simply
+// replaces it. party_type names one of the dev-declared entries in
+// party.schema.yaml (character::party_schema::PartySchema) — only
+// meaningful when this invite founds a *new* party; empty resolves to
+// the schema's first declared type. Joining an inviter's already-
+// existing party always uses whatever type it was actually founded
+// under, regardless of what this names.
+message PartyInvite {
+  string target_entity_id = 1;
+  string party_type = 2;
+}
+
+// Answers this connection's own most recently received party invite, if
+// any (#178) — Error if there is none pending. Accepting is a real,
+// durable `character::PartyStore` write (character::party's own doc
+// comment); declining just notifies the inviter.
+message PartyInviteResponse {
+  bool accept = 1;
+}
+
+// Leaves this connection's own current party (#178) — a real
+// `character::PartyStore` write, not a chat-channel leave. If this
+// would drop the party to a single remaining member, the whole party is
+// dissolved rather than leaving a "party of one" around. Error if this
+// connection isn't currently in a party.
+message PartyLeave {
+}
+
+// Creates a new guild owned by this connection's own account, named
+// `name` (#179) — Error if the account is already in a guild. The
+// founder is placed at the guild schema's founder rank
+// (guild::GuildSchema::founder_rank, always the first declared entry in
+// guild.schema.yaml).
+message GuildCreate {
+  string name = 1;
+}
+
+// Invites target_entity_id's account to this connection's own guild
+// (#179) — Error if this connection has no guild, its rank lacks the
+// `invite` permission, or the target is already in a guild. A no-op
+// beyond delivering GuildInviteReceived; nothing is committed until
+// GuildInviteResponse accepts. At most one pending invite per invitee —
+// a later invite before the first is answered simply replaces it.
+message GuildInvite {
+  string target_entity_id = 1;
+}
+
+// Answers this connection's own most recently received guild invite, if
+// any (#179) — Error if there is none pending.
+message GuildInviteResponse {
+  bool accept = 1;
+}
+
+// Leaves this connection's own current guild (#179). A member at the
+// guild's founder rank can't leave while other members remain — they
+// must promote a successor or disband first; a lone founder leaving
+// dissolves the guild entirely. Error if this connection isn't
+// currently in a guild.
+message GuildLeave {
+}
+
+// Disbands this connection's own current guild (#179) — only a
+// founder-rank member may do this. Error otherwise, or if this
+// connection isn't in a guild.
+message GuildDisband {
+}
+
+// Removes target_entity_id's account from this connection's own guild
+// (#179) — requires the `kick` permission; a founder-rank target can
+// never be kicked.
+message GuildKick {
+  string target_entity_id = 1;
+}
+
+// Moves target_entity_id's account to rank_key within this connection's
+// own guild (#179) — requires the `promote` permission. Moving anyone
+// into or out of the founder rank is restricted to an actor who already
+// holds the founder rank themselves, regardless of the `promote`
+// permission (guild::GuildStore's own core invariant).
+message GuildPromote {
+  string target_entity_id = 1;
+  string rank_key = 2;
+}
+
+// Same shape as GuildPromote, gated by the `demote` permission instead
+// (#179) — the store applies the identical rank-move logic either way;
+// which message a client sends is purely a UI-intent distinction.
+message GuildDemote {
+  string target_entity_id = 1;
+  string rank_key = 2;
+}
+
+// Sets this connection's own guild's message-of-the-day (#179) —
+// requires the `edit_motd` permission. Empty string clears it.
+message GuildSetMotd {
+  string motd = 1;
+}
+
+// Sets this connection's own guild's short tag/abbreviation (#179) —
+// requires the `edit_tag` permission. Empty string clears it.
+message GuildSetTag {
+  string tag = 1;
+}
+
+// Requests crafting recipe_key against this connection's own character
+// (#216) — recipe_key names one of the dev-declared entries in
+// crafting.schema.yaml (character::CraftingSchema). Error if recipe_key
+// is unknown, or if the caller's inventory doesn't hold at least the
+// declared amount of every input; nothing is consumed on a rejected
+// craft. On success, no dedicated reply: the resulting inventory change
+// (every consumed input, then the granted output) arrives as ordinary
+// ItemChanged pushes (#211).
+message CraftItem {
+  string recipe_key = 1;
+}
+
+message RosterEntry {
+  string entity_id = 1;
+  string entity_type = 2;
+  double x = 3;
+  double y = 4;
+}
+
+message ServerMessage {
+  oneof kind {
+    Joined joined = 1;
+    EntitySpawned entity_spawned = 2;
+    EntityDespawned entity_despawned = 3;
+    ZoneChanged zone_changed = 4;
+    Moved moved = 5;
+    Rejected rejected = 6;
+    Error error = 7;
+    PluginMessage plugin_message = 8;
+    Pong pong = 9;
+    PartyInviteReceived party_invite_received = 10;
+    PartyInviteDeclined party_invite_declined = 11;
+    PartyUpdate party_update = 12;
+    GuildInviteReceived guild_invite_received = 13;
+    GuildInviteDeclined guild_invite_declined = 14;
+    GuildUpdate guild_update = 15;
+    GuildDisbanded guild_disbanded = 16;
+    StatChanged stat_changed = 17;
+    ItemChanged item_changed = 18;
+    CurrencyChanged currency_changed = 19;
+  }
+}
+
+// Sent once, right after this connection's own entity is spawned into
+// the zone — see `server::session_protocol::ServerMessage::Joined`'s doc
+// comment for why this is one message rather than several. `tick` is the
+// zone's server-authoritative simulation-step counter at the moment this
+// was built (#196) — this connection's own baseline for reasoning about
+// the ordering/staleness of every later `Moved`/`Rejected`.
+message Joined {
+  string entity_id = 1;
+  double x = 2;
+  double y = 3;
+  repeated RosterEntry roster = 4;
+  uint64 tick = 5;
+}
+
+// An entity (never this connection's own) newly exists in the zone.
+message EntitySpawned {
+  string entity_id = 1;
+  string entity_type = 2;
+  double x = 3;
+  double y = 4;
+}
+
+message EntityDespawned {
+  string entity_id = 1;
+}
+
+// Sent to a connection whose entity just crossed a manifest-declared
+// zone link (#45) — same shape as Joined, but for an in-place zone
+// handoff. `tick` is the *destination* zone's own tick counter (#196) —
+// each zone-service instance ticks independently, so this is a fresh
+// baseline for the new zone, not a continuation of the old one's.
+message ZoneChanged {
+  string zone_id = 1;
+  string entity_id = 2;
+  double x = 3;
+  double y = 4;
+  repeated RosterEntry roster = 5;
+  uint64 tick = 6;
+}
+
+// An accepted movement update, broadcast to every connected client.
+// seq is 0 for a move that didn't originate from a real client Move
+// request (e.g. an NPC's plugin-driven movement) — a real client's own
+// seq always starts at 1, so a client correlating its own moves can
+// simply ignore any Moved whose seq is 0 or doesn't match one it sent.
+// tick is the simulation step this was applied on (#196).
+message Moved {
+  string entity_id = 1;
+  double x = 2;
+  double y = 3;
+  uint32 seq = 4;
+  uint64 tick = 5;
+}
+
+// A movement update this connection itself requested was rejected — only
+// sent back to the mover, never broadcast. seq echoes the rejected
+// Move's own seq (#196); tick is the simulation step the rejection was
+// decided on.
+message Rejected {
+  string reason = 1;
+  uint32 seq = 2;
+  uint64 tick = 3;
+}
+
+message Error {
+  string message = 1;
+}
+
+// A message a plugin's send-message host call addressed to this
+// connection's entity (docs/specs/Plugin_API.md).
+message PluginMessage {
+  string body = 1;
+}
+
+// Replies to a Ping — client_sent_at is echoed back verbatim so the
+// client can compute round-trip time against its own clock; server_time
+// is the server's own wall-clock (Unix millis) at the moment it replied,
+// for a client that wants to estimate clock skew too, not just RTT
+// (#196).
+message Pong {
+  int64 client_sent_at = 1;
+  int64 server_time = 2;
+}
+
+// A party invite arrived for this connection's own entity (#178) —
+// from_entity_id names the inviter. Answer with PartyInviteResponse.
+message PartyInviteReceived {
+  string from_entity_id = 1;
+}
+
+// The party invite this connection sent was declined (#178).
+message PartyInviteDeclined {
+  string by_entity_id = 1;
+}
+
+// This connection's current party roster, sent after any membership
+// change (accept, leave, disband — #178) — every other character
+// currently in the party, as their live entity ids. Empty means "no
+// party" (just left, or the party just dissolved).
+message PartyUpdate {
+  repeated string members = 1;
+}
+
+// A guild invite arrived for this connection's own entity (#179) —
+// from_entity_id names the inviter. Answer with GuildInviteResponse.
+message GuildInviteReceived {
+  string from_entity_id = 1;
+}
+
+// The guild invite this connection sent was declined (#179).
+message GuildInviteDeclined {
+  string by_entity_id = 1;
+}
+
+// A member entry in GuildUpdate — entity_id is that member's live
+// entity id if currently connected, empty otherwise (#179; unlike party,
+// a guild roster includes offline members, who have no live entity id
+// to report).
+message GuildMember {
+  string entity_id = 1;
+  string rank_key = 2;
+}
+
+// This connection's current guild, sent after any membership or
+// metadata change (create, invite accept, leave, kick, disband, rename,
+// motd/tag edit — #179). guild_id is empty and members is empty to mean
+// "no guild" (just left, kicked, or the guild just dissolved).
+message GuildUpdate {
+  string guild_id = 1;
+  string name = 2;
+  string motd = 3;
+  string tag = 4;
+  repeated GuildMember members = 5;
+}
+
+// This connection's guild was disbanded (#179).
+message GuildDisbanded {
+}
+
+// Pushed to a connection whenever one of its own character's declared
+// stats actually changes via `apply-stat-delta`/
+// `apply-stat-delta-for-character` (#211) — stat_key is the same opaque,
+// game-defined string every other stat_key in this protocol uses; value
+// is the resulting stat value after the delta was applied, not the delta
+// itself. Never sent for an NPC-targeted `apply-stat-delta` — an NPC has
+// no owning connection to push to.
+message StatChanged {
+  string stat_key = 1;
+  int64 value = 2;
+}
+
+// Pushed to a connection whenever one of its own character's item stacks
+// actually changes via `grant-item`/`remove-item` (#211) — quantity is
+// the stack's resulting total (0 if a `remove-item` emptied the stack),
+// not the delta granted/removed, same "resulting value, not delta"
+// convention as StatChanged.
+message ItemChanged {
+  string item_type = 1;
+  int64 quantity = 2;
+}
+
+// Pushed to a connection whenever its own character's currency balance
+// actually changes via `modify-currency` (#211) — balance is the
+// resulting balance, not the delta. `currency_key` (#218) names which of
+// the dev-declared currencies (`currency.schema.yaml`) changed — every
+// currency has a fully independent balance, so this always accompanies
+// `balance`.
+message CurrencyChanged {
+  string currency_key = 1;
+  int64 balance = 2;
+}

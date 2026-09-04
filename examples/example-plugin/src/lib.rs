@@ -202,6 +202,17 @@ impl Guest for Plugin {
     // profession XP bonus) the way `test-plugin`'s own on_craft_complete
     // fixture does.
     fn on_craft_complete(_character_id: String, _recipe_key: String) {}
+
+    // Live: fires after a client's DropItem action actually removes the
+    // item from inventory (#265) — the core already did the removal by
+    // the time this fires, so this is a pure notification a real plugin
+    // could use to spawn a world pickup entity via spawn-npc.
+    fn on_item_drop(_zone_id: String, entity_id: String, item_type: String, quantity: i64) {
+        let _ = worldzero::plugin::host::send_message(
+            &entity_id,
+            &format!("you drop {quantity} {item_type}"),
+        );
+    }
 }
 
 export!(Plugin);

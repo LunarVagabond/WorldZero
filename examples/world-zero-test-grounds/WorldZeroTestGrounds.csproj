@@ -1,0 +1,23 @@
+<Project Sdk="Godot.NET.Sdk/4.8.0-dev.3">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <RootNamespace>WorldZeroTestGrounds</RootNamespace>
+    <Nullable>enable</Nullable>
+    <!-- Google.Protobuf's C# codegen predates nullable-annotated code;
+         don't fail the build on warnings from generated Protos/*.g.cs. -->
+    <NoWarn>$(NoWarn);CS8600;CS8601;CS8602;CS8603;CS8618;CS8625;CS8765</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Google.Protobuf" Version="3.28.3" />
+    <PackageReference Include="Grpc.Tools" Version="2.66.0" PrivateAssets="All" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The five .proto files copied verbatim from ../world_zero (PROMPT.md
+         §2.3) — GrpcServices=None since this client speaks WorldZero's raw
+         length-delimited TCP framing (Net/Envelope.cs), not gRPC. -->
+    <Protobuf Include="Protos/*.proto" GrpcServices="None" ProtoRoot="Protos" />
+  </ItemGroup>
+</Project>

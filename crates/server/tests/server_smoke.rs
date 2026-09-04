@@ -73,6 +73,8 @@ const SESSION_RESUME_ADDR: &str = "127.0.0.1:7930";
 const ACCOUNT_ROLES_ADDR: &str = "127.0.0.1:7954";
 const DELETE_CHARACTER_ADDR: &str = "127.0.0.1:7955";
 const Z_MOVEMENT_ADDR: &str = "127.0.0.1:7956";
+const DROP_ITEM_ADDR: &str = "127.0.0.1:7957";
+const DROP_ITEM_INSUFFICIENT_ADDR: &str = "127.0.0.1:7958";
 const SESSION_RESUME_INVALID_ADDR: &str = "127.0.0.1:7931";
 const MOVE_CORRELATION_ADDR: &str = "127.0.0.1:7932";
 const PING_PONG_ADDR: &str = "127.0.0.1:7933";
@@ -656,7 +658,7 @@ fn setup_config_dir(test_name: &str) -> PathBuf {
             r#"
 [plugin]
 name = "test-plugin"
-host_api_version = "0.13.0"
+host_api_version = "0.14.0"
 capabilities = ["spawning", "movement", "combat", "economy", "messaging"]
 message_types = [1000]
 chat_commands = ["give", "spawn-track", "which-wolf"]
@@ -675,6 +677,7 @@ hooks = [
     "on-item-use",
     "on-item-acquire",
     "on-craft-complete",
+    "on-item-drop",
 ]
 "#,
         )
@@ -760,7 +763,7 @@ fn setup_multi_plugin_config_dir(test_name: &str) -> PathBuf {
         r#"
 [plugin]
 name = "test-plugin"
-host_api_version = "0.13.0"
+host_api_version = "0.14.0"
 capabilities = ["spawning", "movement", "combat", "economy", "messaging"]
 message_types = [1000]
 hooks = ["on-zone-loaded", "on-player-join-zone"]
@@ -780,7 +783,7 @@ hooks = ["on-zone-loaded", "on-player-join-zone"]
         r#"
 [plugin]
 name = "second-plugin"
-host_api_version = "0.13.0"
+host_api_version = "0.14.0"
 capabilities = ["messaging"]
 message_types = [1001]
 hooks = ["on-player-join-zone"]
@@ -879,7 +882,7 @@ fn setup_content_pack_config_dir_with_join_leave_plugin(test_name: &str) -> Path
         r#"
 [plugin]
 name = "test-plugin"
-host_api_version = "0.13.0"
+host_api_version = "0.14.0"
 capabilities = ["combat", "messaging"]
 message_types = [1000]
 hooks = ["on-player-join-zone", "on-player-leave-zone"]
@@ -4466,6 +4469,158 @@ async fn craft_item_with_an_unknown_recipe_key_is_rejected() {
             other => panic!("expected an Error for the unknown recipe, got {other:?}"),
         }
     }
+}
+
+/// #265, end to end through the real `server` binary: `DropItem`
+/// unconditionally removes the requested quantity — core-owned, not
+/// gated behind any plugin — and pushes `ItemChanged` with the resulting
+/// total, then the fixture plugin's `on-item-drop` hook fires for real
+/// (`test-plugin` replies via `send-message`, observed as
+/// `PluginMessage`), proving the hook ran regardless of whether any
+/// plugin happened to be loaded.
+#[tokio::test]
+#[ignore]
+async fn drop_item_with_sufficient_quantity_succeeds_and_fires_the_hook() {
+    let config_dir = setup_config_dir("drop-item-success");
+    let _server = start_server(&config_dir, DROP_ITEM_ADDR).await;
+    wait_for_port(DROP_ITEM_ADDR).await;
+
+    let username = format!("drop-{}", uuid::Uuid::now_v7());
+    let mut stream = connect(&config_dir, DROP_ITEM_ADDR).await;
+    send_auth(
+        &mut stream,
+        &AuthClientMessage::Register {
+            username: username.clone(),
+            password: "hunter2".to_string(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv_auth(&mut stream).await,
+        AuthServerMessage::Authenticated { .. }
+    ));
+    select_realm(&mut stream, _server.realm_id).await;
+    let character_id = select_or_create_character(&mut stream, &username).await;
+
+    loop {
+        if let ServerMessage::Joined { .. } = recv_world(&mut stream).await {
+            break;
+        }
+    }
+    loop {
+        match recv_world(&mut stream).await {
+            ServerMessage::PluginMessage { .. } => break,
+            ServerMessage::Moved { .. } => {}
+            other => panic!("expected the join greeting, got {other:?}"),
+        }
+    }
+
+    for _ in 0..3 {
+        give_item(&mut stream, "torch").await;
+    }
+
+    send_world(
+        &mut stream,
+        &ClientMessage::DropItem {
+            item_type: "torch".to_string(),
+            quantity: 2,
+        },
+    )
+    .await;
+
+    loop {
+        match recv_world(&mut stream).await {
+            ServerMessage::ItemChanged {
+                item_type,
+                quantity,
+            } => {
+                assert_eq!(item_type, "torch");
+                assert_eq!(quantity, 1);
+                break;
+            }
+            ServerMessage::Moved { .. } | ServerMessage::EntitySpawned { .. } => {}
+            other => panic!("expected ItemChanged after DropItem, got {other:?}"),
+        }
+    }
+
+    // test-plugin's on-item-drop hook replies "dropped 2 torch" via
+    // send-message — waiting for this is what actually proves the hook
+    // fired, not just that the removal itself succeeded.
+    loop {
+        match recv_world(&mut stream).await {
+            ServerMessage::PluginMessage { body } => {
+                assert_eq!(body, "dropped 2 torch");
+                break;
+            }
+            ServerMessage::Moved { .. } | ServerMessage::EntitySpawned { .. } => {}
+            other => panic!("expected on-item-drop's PluginMessage reply, got {other:?}"),
+        }
+    }
+
+    assert_eq!(read_item_quantity(&character_id, "torch").await, 1);
+}
+
+/// #265: `DropItem` naming more than the caller actually holds is
+/// rejected with a clear `Error` and removes nothing at all.
+#[tokio::test]
+#[ignore]
+async fn drop_item_with_insufficient_quantity_is_rejected_and_removes_nothing() {
+    let config_dir = setup_config_dir("drop-item-insufficient");
+    let _server = start_server(&config_dir, DROP_ITEM_INSUFFICIENT_ADDR).await;
+    wait_for_port(DROP_ITEM_INSUFFICIENT_ADDR).await;
+
+    let username = format!("drop-insufficient-{}", uuid::Uuid::now_v7());
+    let mut stream = connect(&config_dir, DROP_ITEM_INSUFFICIENT_ADDR).await;
+    send_auth(
+        &mut stream,
+        &AuthClientMessage::Register {
+            username: username.clone(),
+            password: "hunter2".to_string(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv_auth(&mut stream).await,
+        AuthServerMessage::Authenticated { .. }
+    ));
+    select_realm(&mut stream, _server.realm_id).await;
+    let character_id = select_or_create_character(&mut stream, &username).await;
+
+    loop {
+        if let ServerMessage::Joined { .. } = recv_world(&mut stream).await {
+            break;
+        }
+    }
+    loop {
+        match recv_world(&mut stream).await {
+            ServerMessage::PluginMessage { .. } => break,
+            ServerMessage::Moved { .. } => {}
+            other => panic!("expected the join greeting, got {other:?}"),
+        }
+    }
+
+    give_item(&mut stream, "torch").await;
+
+    send_world(
+        &mut stream,
+        &ClientMessage::DropItem {
+            item_type: "torch".to_string(),
+            quantity: 5,
+        },
+    )
+    .await;
+    loop {
+        match recv_world(&mut stream).await {
+            ServerMessage::Error { message } => {
+                assert!(message.contains("torch"), "{message}");
+                break;
+            }
+            ServerMessage::Moved { .. } | ServerMessage::EntitySpawned { .. } => {}
+            other => panic!("expected an Error for the insufficient drop, got {other:?}"),
+        }
+    }
+
+    assert_eq!(read_item_quantity(&character_id, "torch").await, 1);
 }
 
 /// #214: `spawn-npc`'s host callback can't synchronously return a real

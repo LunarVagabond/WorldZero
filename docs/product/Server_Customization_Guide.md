@@ -53,7 +53,7 @@ systems:
 
 ---
 
-## Step 1 — Your game's stats (`character`)
+## Step 1 — Your game's stats, characters, and social data (`character` + `guild`)
 
 This is the single most game-specific piece of configuration in the whole framework, and the one you should expect to spend the most time on. **The core ships with zero stats of its own — not even HP.** What your characters have, and what those stats mean, is entirely up to `<config_dir>/stats.schema.yaml`.
 
@@ -92,6 +92,44 @@ None of this is a database schema change on your end — `stats` is one `JSONB` 
 | Var | Default | Purpose |
 |---|---|---|
 | `WZ_INVENTORY_MAX_ITEM_TYPES` | `40` | Caps the number of *distinct* item types a character can hold — the classic "N inventory slots" limit. Granting more of an already-owned type is never blocked by this, only a new stack is. |
+
+**Character archetypes (`character.archetypes.yaml`, #212/#213).** Declares what a player can pick when creating a character — same "core has no opinion" discipline as stats: the framework ships zero classes/races of its own. Start from [`config/character.archetypes.example.yaml`](../../config/character.archetypes.example.yaml):
+
+```yaml
+schema_version: 1
+archetypes:
+  - key: warrior
+    name: Warrior
+    description: A frontline fighter who trades finesse for raw durability.
+    stats:
+      hp: 100
+      mana: 10
+```
+
+Each archetype's `stats` map is validated against `stats.schema.yaml` at load time — every key must be one your stats schema actually declares, and every value must fall within that stat's declared min/max. The first declared entry is what a fresh `CreateCharacter` gets when the client passes an empty `archetype_key`. Required by `make quickstart` — copied alongside `stats.schema.yaml` if missing. Full mechanism: [`docs/specs/Data_Model_Spec.md`](../specs/Data_Model_Spec.md), "Character list/create/select" section.
+
+**Crafting recipes (`crafting.schema.yaml`, #215/#216).** Declares recipes — again zero opinion of its own on professions or item types. Start from [`config/crafting.schema.example.yaml`](../../config/crafting.schema.example.yaml):
+
+```yaml
+schema_version: 1
+recipes:
+  - key: healing-tonic
+    category: alchemy
+    inputs:
+      - item_type: herb
+        amount: 2
+    output:
+      item_type: healing-tonic
+      amount: 1
+```
+
+`category` is an opaque, dev-owned display string — core stores and reports it but never interprets it. A `CraftItem` request succeeds only if the caller holds at least the declared amount of every input; consumption and the output grant happen atomically. Required by `make quickstart`.
+
+**Currencies (`currency.schema.yaml`, #217/#218).** Declares one or more currencies, each a flat integer balance per `(character, currency_key)` with an optional cosmetic denomination ladder computed at read time. Start from [`config/currency.schema.example.yaml`](../../config/currency.schema.example.yaml). Required by `make quickstart`.
+
+**Party types (`party.schema.yaml`, #178).** Declares party types and their member caps — start from [`config/party.schema.example.yaml`](../../config/party.schema.example.yaml). The first declared entry is what `PartyInvite` gets when the client doesn't name a type; omitting `max_members` on an entry means no cap. Required by `make quickstart`. See [`docs/specs/Chat_Spec.md`](../specs/Chat_Spec.md), "Party/group" section.
+
+**Guild ranks (`guild.schema.yaml`, #179) — the `guild` crate, not `character`.** Declares rank names and permissions (drawn from a fixed core set: `invite`, `kick`, `promote`, `demote`, `edit_motd`, `edit_tag`, `rename`) — start from [`config/guild.schema.example.yaml`](../../config/guild.schema.example.yaml). The first declared rank is always the founder/leader rank (enforced by `guild::GuildStore`, not configurable); the last is what a fresh invite's accepter joins at. Required by `make quickstart`. See [`docs/specs/Chat_Spec.md`](../specs/Chat_Spec.md), "Guild system" section.
 
 ---
 
@@ -235,6 +273,8 @@ Dynamic layer assignment ([#50](https://github.com/LunarVagabond/WorldZero/issue
 | `WZ_LAYER_ENABLED` | `true` | `false` pins every zone to exactly one layer forever, for deployments that don't want this at all (small player counts, or a game that needs every player in a zone able to see every other). |
 | `WZ_LAYER_POPULATION_THRESHOLD` | `200` | Connected sessions per layer before a new one spins up. A small community server might want `10`; a large one `1000+` — that range is exactly why this is a runtime env var, not a hardcoded constant. |
 
+**Real horizontal scaling across processes/machines (`WZ_ZONE_IDS`, #269).** Layering above spreads *one zone's* population across parallel copies within a single process. To split a realm's *zones* across multiple `server` processes — potentially on separate machines, sharing one Postgres/Redis — set `WZ_ZONE_IDS` (comma-separated zone ids) on each process to a disjoint slice of the realm's declared zones. Unset (the default) means every zone loads, today's single-process behavior, unchanged. Naming an id that isn't one of the realm's zones, or a filter that resolves to zero zones, is a startup-time panic listing what's actually available — not a silent partial start. This is a config knob, not an orchestrator: which processes actually run where is still your deployment tooling's job (systemd/k8s/Nomad — the same `/healthz`/`/readyz` probes [Step 6](#step-6--optional-services-chat-metrics-health) covers work here too). See [#130](https://github.com/LunarVagabond/WorldZero/issues/130)/[#190](https://github.com/LunarVagabond/WorldZero/issues/190) for the broader realm/shard process-lifecycle decision this is the first concrete slice of.
+
 ---
 
 ## Step 8 — Realms & transfers (real, but not yet live)
@@ -271,14 +311,15 @@ See [`docs/specs/Realm_Character_Policy_Spec.md`](../specs/Realm_Character_Polic
 | Crate | Env vars | Config file | Key types |
 |---|---|---|---|
 | `common` | `WZ_CONFIG_DIR`, `WZ_POSTGRES_*`, `WZ_REDIS_*`, `WZ_SERVICE_{CHAT,METRICS}_ENABLED`, `WZ_OTEL_*` | — | `PostgresConfig`, `RedisConfig`, `ServicesConfig` |
-| `character` | `WZ_INVENTORY_MAX_ITEM_TYPES` | `stats.schema.yaml` | `AttributeSchema`, `InventoryConfig`, `CharacterStore` |
+| `character` | `WZ_INVENTORY_MAX_ITEM_TYPES` | `stats.schema.yaml`, `character.archetypes.yaml`, `crafting.schema.yaml`, `currency.schema.yaml`, `party.schema.yaml` | `AttributeSchema`, `InventoryConfig`, `CharacterStore`, `ArchetypeSchema`, `CraftingSchema`, `CurrencySchema`, `PartySchema` |
+| `guild` | — | `guild.schema.yaml` | `GuildSchema`, `GuildStore` |
 | `content` | — | `zone.manifest.yaml` or `content-pack.yaml` | `ZoneManifest`, `ContentPack` |
 | `world` | `WZ_WORLD_TICK_RATE_HZ`, `WZ_WORLD_GRID_CELL_SIZE_METERS`, `WZ_WORLD_MAX_SPEED_MPS` | — | `WorldConfig` |
 | `auth` | (shared Postgres/Redis only) | — | `UsernamePasswordProvider`, `AccountStore`/`AccountRoleStore` |
 | `gateway` | `WZ_TLS_CERT_PATH`, `WZ_TLS_KEY_PATH` | — | `CertMaterial` |
 | `plugin-host` | — | `plugin.toml` | `PluginManifest` |
 | `chat` | `WZ_CHAT_PERSISTENCE_ENABLED` (`WZ_SERVICE_CHAT_ENABLED` toggle lives in `common`) | `chat.yaml` (optional) | `ChannelStore`, `ChatBus`, `MessageLog`, `SystemChannelConfig` |
-| `server` | `WZ_SERVER_ADDR`, `WZ_METRICS_ADDR`, `WZ_HEALTH_ADDR`, `WZ_LAYER_ENABLED`, `WZ_LAYER_POPULATION_THRESHOLD`, `WZ_PLUGINS_DIR`, `WZ_REALM_ID`, `WZ_REALM_LEASE_TTL_SECS` | `game.yaml` | `GameManifest` |
+| `server` | `WZ_SERVER_ADDR`, `WZ_METRICS_ADDR`, `WZ_HEALTH_ADDR`, `WZ_LAYER_ENABLED`, `WZ_LAYER_POPULATION_THRESHOLD`, `WZ_PLUGINS_DIR`, `WZ_REALM_ID`, `WZ_REALM_LEASE_TTL_SECS`, `WZ_ZONE_IDS` | `game.yaml` | `GameManifest` |
 | `realm-directory` | (consumed via `server`'s `WZ_REALM_ID`/`WZ_REALM_LEASE_TTL_SECS` above) | — | `RealmStore`, `LoginPolicy`, `RealmPresence` |
 | `transfer` | none | — | `TransferExecutor`, `TransferGateStore`, `TransferAuditLog` |
 

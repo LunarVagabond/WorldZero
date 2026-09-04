@@ -142,6 +142,16 @@ pub enum ClientMessage {
     /// resulting inventory change arrives as ordinary `ItemChanged`
     /// pushes (#211).
     CraftItem { recipe_key: String },
+    /// Requests dropping `quantity` of `item_type` from this
+    /// connection's own inventory (#265). Unlike `UseItem`, removal is
+    /// core-owned and unconditional
+    /// (`character::CharacterStore::remove_item`) — this works the same
+    /// whether or not any plugin is loaded. `Error` if the caller
+    /// doesn't hold at least `quantity`; nothing is removed on a
+    /// rejected drop. Success arrives as an ordinary `ItemChanged` push
+    /// (#211's convention), same as `CraftItem`; the configured plugin's
+    /// `on-item-drop` hook also fires afterward as a pure notification.
+    DropItem { item_type: String, quantity: i64 },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -500,6 +510,13 @@ impl From<&ClientMessage> for proto::ClientMessage {
             ClientMessage::CraftItem { recipe_key } => Kind::CraftItem(proto::CraftItem {
                 recipe_key: recipe_key.clone(),
             }),
+            ClientMessage::DropItem {
+                item_type,
+                quantity,
+            } => Kind::DropItem(proto::DropItem {
+                item_type: item_type.clone(),
+                quantity: *quantity,
+            }),
         };
         proto::ClientMessage { kind: Some(kind) }
     }
@@ -581,6 +598,13 @@ impl TryFrom<proto::ClientMessage> for ClientMessage {
             Some(Kind::CraftItem(proto::CraftItem { recipe_key })) => {
                 Ok(ClientMessage::CraftItem { recipe_key })
             }
+            Some(Kind::DropItem(proto::DropItem {
+                item_type,
+                quantity,
+            })) => Ok(ClientMessage::DropItem {
+                item_type,
+                quantity,
+            }),
             None => Err(Error::new(
                 "server",
                 "gateway world message has no kind set",
@@ -945,6 +969,21 @@ mod tests {
             decoded,
             ServerMessage::Pong { client_sent_at, server_time }
                 if client_sent_at == 12345 && server_time == 67890
+        ));
+    }
+
+    #[test]
+    fn drop_item_round_trips_through_an_envelope() {
+        let message = ClientMessage::DropItem {
+            item_type: "torch".to_string(),
+            quantity: 3,
+        };
+        let envelope = message.into_envelope().unwrap();
+        let decoded = ClientMessage::from_envelope(&envelope).unwrap();
+        assert!(matches!(
+            decoded,
+            ClientMessage::DropItem { item_type, quantity }
+                if item_type == "torch" && quantity == 3
         ));
     }
 

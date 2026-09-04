@@ -55,7 +55,7 @@
 // and/or lands as a new world, rather than silently changing what
 // `plugin` means underneath existing compiled plugins.
 
-package worldzero:plugin@0.13.0;
+package worldzero:plugin@0.14.0;
 
 /// What the host exposes for a plugin to call out to — nothing crosses
 /// this boundary that isn't listed here (docs/PROPOSAL.md, "Plugin
@@ -439,6 +439,20 @@ interface hooks {
     /// (`plugin_host::manifest::CAPABILITY_ECONOMY`), the same capability
     /// that already covers `grant-item`/`remove-item`/`modify-currency`.
     on-craft-complete: func(character-id: string, recipe-key: string);
+
+    /// Fired after a client's `DropItem` action actually removes
+    /// `quantity` of `item-type` from `entity-id`'s inventory (#265) —
+    /// unlike `on-item-use`, the removal itself is core-owned and
+    /// unconditional (`character::CharacterStore::remove_item`, the same
+    /// storage `remove-item` above writes through), so dropping works
+    /// the same whether or not any plugin is loaded. This hook is purely
+    /// a notification for a plugin that wants to react — e.g. spawn a
+    /// world pickup entity via `spawn-npc` — the core has no "item
+    /// sitting on the ground" concept of its own and never will unless a
+    /// plugin builds one. `quantity` is the amount actually removed
+    /// (always the full amount requested — a partial drop is rejected,
+    /// not truncated), never a running total.
+    on-item-drop: func(zone-id: string, entity-id: string, item-type: string, quantity: s64);
 }
 
 world plugin {

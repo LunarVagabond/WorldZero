@@ -1290,6 +1290,20 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
                                 }
                             }
                         }
+                        Ok(ClientMessage::DropItem { item_type, quantity }) => {
+                            match deps.character_store.remove_item(character_id, &item_type, quantity).await {
+                                Ok(remaining) => {
+                                    send_world(&mut sink, &ServerMessage::ItemChanged {
+                                        item_type: item_type.clone(),
+                                        quantity: remaining,
+                                    }).await?;
+                                    zone.world.dispatch_item_dropped(entity_id, item_type, quantity);
+                                }
+                                Err(e) => {
+                                    send_world(&mut sink, &ServerMessage::Error { message: e.to_string() }).await?;
+                                }
+                            }
+                        }
                         Ok(ClientMessage::CraftItem { recipe_key }) => {
                             let recipe = deps.crafting_schema.resolve(&recipe_key).cloned();
                             match recipe {

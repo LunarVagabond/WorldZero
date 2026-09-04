@@ -474,6 +474,17 @@ impl Guest for Plugin {
             5,
         );
     }
+
+    // Exercises on-item-drop end to end (#265) — the core already
+    // removed the item by the time this fires, so this is a pure
+    // notification; a black-box test observes it via the send-message
+    // reply below.
+    fn on_item_drop(_zone_id: String, entity_id: String, item_type: String, quantity: i64) {
+        let _ = worldzero::plugin::host::send_message(
+            &entity_id,
+            &format!("dropped {quantity} {item_type}"),
+        );
+    }
 }
 
 export!(Plugin);
