@@ -27,6 +27,13 @@ spawn_tables:
     max_population: 6
     respawn_seconds: 45
     route_id: wolf-patrol-01
+  # world-zero-test-grounds's Evil Cube manual-test NPC (PROMPT.md §7.2)
+  # — stationary, no route_id, paired with examples/evil-cube-plugin.
+  - id: evil-cube-01
+    entity_type: npc.evil_cube
+    points: [[250, 250]]
+    max_population: 1
+    respawn_seconds: 30
 
 routes:
   - id: wolf-patrol-01
