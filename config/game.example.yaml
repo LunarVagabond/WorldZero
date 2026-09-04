@@ -1,0 +1,27 @@
+# The top-level "what is this game, what does it run" file — loaded by
+# the `server` crate (crates/server/src/game_manifest.rs). Copy/rename
+# this as game.yaml in the config dir your instance actually uses
+# (WZ_CONFIG_DIR, or ./config by default) and adjust freely.
+#
+# game_name is metadata today — logged once at startup, not yet
+# consumed by any wire protocol or client-facing behavior.
+#
+# systems declares this deployment's *default* for the optional
+# services that already have a real WZ_SERVICE_*/WZ_CHAT_* env-var
+# toggle elsewhere (docs/product/Server_Customization_Guide.md's Step
+# 0 and Step 6) — an explicitly-set env var always overrides whatever's
+# declared here, so this is a checked-in default, not a hard override.
+# Omitting `systems` entirely, or any field under it, keeps that
+# system's ordinary default (chat/metrics on, chat persistence off) —
+# exactly what every deployment already had before this file existed.
+#
+# Doesn't cover party.schema.yaml/guild.schema.yaml/crafting.schema.yaml/
+# currency.schema.yaml — those systems have no enable/disable toggle of
+# their own yet; they're always-on, driven purely by their schema
+# file's presence.
+schema_version: 1
+game_name: "My Game"
+systems:
+  chat: true
+  chat_persistence: false
+  metrics: true

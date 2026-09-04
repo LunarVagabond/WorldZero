@@ -11,7 +11,7 @@ pub mod pubsub;
 pub mod schema;
 pub mod store;
 
-pub use message_log::{MessageLog, persistence_enabled_from_env};
+pub use message_log::{MessageLog, persistence_enabled, persistence_enabled_from_env};
 pub use pubsub::{ChatBus, ChatMessage};
 pub use schema::SystemChannelConfig;
 pub use store::{ChannelStore, ChannelType};

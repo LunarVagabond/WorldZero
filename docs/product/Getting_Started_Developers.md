@@ -28,7 +28,7 @@ make quickstart
 
 This is the actual thing docs/PROPOSAL.md's Developer Experience Bar asks for: a complete, runnable default game with zero required configuration beyond the Postgres/Redis connection info above. It:
 
-1. Copies every `config/*.example.yaml` this project ships → its real counterpart (`zone.manifest.yaml`, `stats.schema.yaml`, `party.schema.yaml`, `guild.schema.yaml`, `character.archetypes.yaml`, `crafting.schema.yaml`, `currency.schema.yaml`), but only for a file you don't already have your own copy of — it never overwrites a config you've customized. See [`Server_Customization_Guide.md`](Server_Customization_Guide.md) for what each one actually does.
+1. Copies every `config/*.example.yaml` this project ships → its real counterpart (`game.yaml`, `zone.manifest.yaml`, `stats.schema.yaml`, `party.schema.yaml`, `guild.schema.yaml`, `character.archetypes.yaml`, `crafting.schema.yaml`, `currency.schema.yaml`), but only for a file you don't already have your own copy of — it never overwrites a config you've customized. See [`Server_Customization_Guide.md`](Server_Customization_Guide.md) for what each one actually does.
 2. Builds [`examples/example-plugin`](../../examples/example-plugin) — the shipped example plugin — for `wasm32-wasip2` (adding that `rustup` target first if you don't have it).
 3. Applies pending database migrations.
 4. Starts `server` in the foreground, with the example plugin loaded.

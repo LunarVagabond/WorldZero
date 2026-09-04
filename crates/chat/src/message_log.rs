@@ -22,6 +22,15 @@ use crate::pubsub::ChatMessage;
 /// Same "unset keeps the default, set-but-unparsable is a config error"
 /// discipline as `common::config::ServicesConfig::from_env`.
 pub fn persistence_enabled_from_env() -> Result<bool> {
+    persistence_enabled(false)
+}
+
+/// Same as [`persistence_enabled_from_env`], but starting from a
+/// caller-supplied default instead of this function's hardcoded `false`
+/// — for a deployment declaring its own default (e.g. `server`'s
+/// `<config_dir>/game.yaml`) rather than this crate's blanket opt-out.
+/// An explicitly-set env var still always wins over either source.
+pub fn persistence_enabled(default: bool) -> Result<bool> {
     match std::env::var("WZ_CHAT_PERSISTENCE_ENABLED") {
         Ok(value) => value.parse().map_err(|_| {
             Error::new(
@@ -31,7 +40,7 @@ pub fn persistence_enabled_from_env() -> Result<bool> {
                 ),
             )
         }),
-        Err(std::env::VarError::NotPresent) => Ok(false),
+        Err(std::env::VarError::NotPresent) => Ok(default),
         Err(std::env::VarError::NotUnicode(_)) => Err(Error::new(
             "chat",
             "WZ_CHAT_PERSISTENCE_ENABLED is not valid UTF-8",

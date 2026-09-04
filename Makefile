@@ -67,6 +67,7 @@ run:
 # stats.schema.yaml), the rustup target/plugin build are idempotent, and
 # `migrate up` is a no-op once everything's already applied.
 quickstart:
+	@[ -f config/game.yaml ] || cp config/game.example.yaml config/game.yaml
 	@[ -f config/zone.manifest.yaml ] || cp config/zone.manifest.example.yaml config/zone.manifest.yaml
 	@[ -f config/stats.schema.yaml ] || cp config/stats.schema.example.yaml config/stats.schema.yaml
 	@[ -f config/party.schema.yaml ] || cp config/party.schema.example.yaml config/party.schema.yaml

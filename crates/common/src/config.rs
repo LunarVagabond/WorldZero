@@ -102,7 +102,19 @@ impl ServicesConfig {
     /// fallback (same convention as `world::WorldConfig::from_env`: a
     /// typo should fail loudly).
     pub fn from_env() -> Result<Self> {
-        let mut config = Self::default();
+        Self::from_env_with_defaults(Self::default())
+    }
+
+    /// Same as [`Self::from_env`], but starting from a caller-supplied
+    /// default instead of this type's hardcoded one — for a deployment
+    /// declaring its own default (e.g. `server`'s `<config_dir>/game.yaml`,
+    /// `game_manifest::GameManifest`) rather than this crate's blanket
+    /// `true`/`true`. An explicitly-set env var still always wins over
+    /// either source — the same "operator's runtime override beats any
+    /// checked-in default" discipline `from_env` already has, just with
+    /// a configurable floor underneath it.
+    pub fn from_env_with_defaults(defaults: Self) -> Result<Self> {
+        let mut config = defaults;
 
         if let Some(value) = optional_bool_env("WZ_SERVICE_CHAT_ENABLED")? {
             config.chat_enabled = value;

@@ -38,6 +38,19 @@ Every other step assumes this one is done. `common` is the one crate every other
 
 Nothing to build here — this step is entirely `.env`. See [`docs/specs/Observability_Spec.md`](../specs/Observability_Spec.md) for logging format and tracing details.
 
+**`<config_dir>/game.yaml` (#271) — the one file naming your game.** Required, like `stats.schema.yaml` below — copied by `make quickstart` from [`config/game.example.yaml`](../../config/game.example.yaml):
+
+```yaml
+schema_version: 1
+game_name: "My Game"
+systems:
+  chat: true
+  chat_persistence: false
+  metrics: true
+```
+
+`game_name` is metadata today (logged once at startup) — not yet consumed by any wire protocol. `systems` only ever supplies a *default* for the three env-var toggles above (`WZ_SERVICE_CHAT_ENABLED`, `WZ_CHAT_PERSISTENCE_ENABLED`, `WZ_SERVICE_METRICS_ENABLED`) — an explicitly-set env var still always wins, so this is a checked-in default an operator's runtime override can still beat, not a replacement for the env vars. Doesn't cover `party`/`guild`/`crafting`/`currency` — those have no enable/disable mechanism of their own yet, always-on and driven by their schema file's presence instead.
+
 ---
 
 ## Step 1 — Your game's stats, characters, and social data (`character` + `guild`)
@@ -306,7 +319,7 @@ See [`docs/specs/Realm_Character_Policy_Spec.md`](../specs/Realm_Character_Polic
 | `gateway` | `WZ_TLS_CERT_PATH`, `WZ_TLS_KEY_PATH` | — | `CertMaterial` |
 | `plugin-host` | — | `plugin.toml` | `PluginManifest` |
 | `chat` | `WZ_CHAT_PERSISTENCE_ENABLED` (`WZ_SERVICE_CHAT_ENABLED` toggle lives in `common`) | `chat.yaml` (optional) | `ChannelStore`, `ChatBus`, `MessageLog`, `SystemChannelConfig` |
-| `server` | `WZ_SERVER_ADDR`, `WZ_METRICS_ADDR`, `WZ_HEALTH_ADDR`, `WZ_LAYER_ENABLED`, `WZ_LAYER_POPULATION_THRESHOLD`, `WZ_PLUGINS_DIR`, `WZ_REALM_ID`, `WZ_REALM_LEASE_TTL_SECS`, `WZ_ZONE_IDS` | — | — |
+| `server` | `WZ_SERVER_ADDR`, `WZ_METRICS_ADDR`, `WZ_HEALTH_ADDR`, `WZ_LAYER_ENABLED`, `WZ_LAYER_POPULATION_THRESHOLD`, `WZ_PLUGINS_DIR`, `WZ_REALM_ID`, `WZ_REALM_LEASE_TTL_SECS`, `WZ_ZONE_IDS` | `game.yaml` | `GameManifest` |
 | `realm-directory` | (consumed via `server`'s `WZ_REALM_ID`/`WZ_REALM_LEASE_TTL_SECS` above) | — | `RealmStore`, `LoginPolicy`, `RealmPresence` |
 | `transfer` | none | — | `TransferExecutor`, `TransferGateStore`, `TransferAuditLog` |
 
