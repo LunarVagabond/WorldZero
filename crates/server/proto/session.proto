@@ -97,6 +97,7 @@ message ClientMessage {
     GuildSetMotd guild_set_motd = 18;
     GuildSetTag guild_set_tag = 19;
     CraftItem craft_item = 20;
+    DropItem drop_item = 21;
   }
 }
 
@@ -285,6 +286,19 @@ message GuildSetTag {
 // ItemChanged pushes (#211).
 message CraftItem {
   string recipe_key = 1;
+}
+
+// Requests dropping quantity of item_type from this connection's own
+// inventory (#265) — unlike UseItem, removal is core-owned and
+// unconditional (character::CharacterStore::remove_item, the same
+// storage remove-item already writes through): dropping works the same
+// whether or not any plugin is loaded. Success is reported via the
+// existing ItemChanged (#211's convention), and the configured plugin's
+// on-item-drop hook fires afterward as a pure notification — the core
+// has no "item sitting on the ground" concept of its own.
+message DropItem {
+  string item_type = 1;
+  int64 quantity = 2;
 }
 
 message RosterEntry {

@@ -888,6 +888,24 @@ impl LoadedPlugin {
                 )
             })
     }
+
+    /// Live: `server::session` calls this once a `DropItem` request has
+    /// already removed `quantity` of `item_type` from storage (#265) —
+    /// pure notification, same "confirmation callback, not a decision
+    /// point" shape as `on_item_use`; unlike that hook, the core already
+    /// did the removal by the time this fires.
+    pub fn on_item_drop(
+        &mut self,
+        zone_id: &str,
+        entity_id: &str,
+        item_type: &str,
+        quantity: i64,
+    ) -> Result<()> {
+        self.bindings
+            .worldzero_plugin_hooks()
+            .call_on_item_drop(&mut self.store, zone_id, entity_id, item_type, quantity)
+            .map_err(|e| Error::new("plugin-host", format!("on_item_drop hook failed: {e:#}")))
+    }
 }
 
 #[cfg(test)]
