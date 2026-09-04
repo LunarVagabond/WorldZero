@@ -75,6 +75,7 @@ quickstart:
 	@[ -f config/character.archetypes.yaml ] || cp config/character.archetypes.example.yaml config/character.archetypes.yaml
 	@[ -f config/crafting.schema.yaml ] || cp config/crafting.schema.example.yaml config/crafting.schema.yaml
 	@[ -f config/currency.schema.yaml ] || cp config/currency.schema.example.yaml config/currency.schema.yaml
+	@[ -f config/equipment.schema.yaml ] || cp config/equipment.schema.example.yaml config/equipment.schema.yaml
 	rustup target add wasm32-wasip2
 	$(CARGO) build --manifest-path $(EXAMPLE_PLUGIN_DIR)/Cargo.toml --target wasm32-wasip2 --release
 	$(CARGO) build -p server

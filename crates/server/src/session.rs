@@ -193,6 +193,11 @@ pub struct SessionDeps {
     /// — resolves `CraftItem`'s `recipe_key` before
     /// `character::CharacterStore::craft_item` ever touches storage.
     pub crafting_schema: Arc<character::CraftingSchema>,
+    /// The dev-declared equipment schema (#277/#245, `equipment.schema.yaml`)
+    /// — resolves `EquipItem`'s `item_type` (slot + stat deltas) before
+    /// `character::CharacterStore::equip_item`/`unequip_item` ever touch
+    /// storage.
+    pub equipment_schema: Arc<character::EquipmentSchema>,
     /// This process's own declared attribute schema (`stats.schema.yaml`)
     /// — a clone of the same instance `character_store` was built from
     /// (same "clone rather than a second file load that could drift"
@@ -1317,6 +1322,44 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
                                             slot_index: displaced_slot_index,
                                         }).await?;
                                     }
+                                }
+                                Err(e) => {
+                                    send_world(&mut sink, &ServerMessage::Error { message: e.to_string() }).await?;
+                                }
+                            }
+                        }
+                        Ok(ClientMessage::EquipItem { item_type }) => {
+                            match deps.character_store.equip_item(character_id, &item_type, &deps.equipment_schema).await {
+                                Ok(outcome) => {
+                                    for (stat_key, value) in outcome.stat_changes {
+                                        send_world(&mut sink, &ServerMessage::StatChanged { stat_key, value }).await?;
+                                    }
+                                    for (item_type, quantity) in outcome.item_changes {
+                                        send_world(&mut sink, &ServerMessage::ItemChanged { item_type, quantity }).await?;
+                                    }
+                                    send_world(&mut sink, &ServerMessage::EquipmentChanged {
+                                        slot: outcome.slot,
+                                        item_type: outcome.item_type,
+                                    }).await?;
+                                }
+                                Err(e) => {
+                                    send_world(&mut sink, &ServerMessage::Error { message: e.to_string() }).await?;
+                                }
+                            }
+                        }
+                        Ok(ClientMessage::UnequipItem { slot }) => {
+                            match deps.character_store.unequip_item(character_id, &slot, &deps.equipment_schema).await {
+                                Ok(outcome) => {
+                                    for (stat_key, value) in outcome.stat_changes {
+                                        send_world(&mut sink, &ServerMessage::StatChanged { stat_key, value }).await?;
+                                    }
+                                    for (item_type, quantity) in outcome.item_changes {
+                                        send_world(&mut sink, &ServerMessage::ItemChanged { item_type, quantity }).await?;
+                                    }
+                                    send_world(&mut sink, &ServerMessage::EquipmentChanged {
+                                        slot: outcome.slot,
+                                        item_type: String::new(),
+                                    }).await?;
                                 }
                                 Err(e) => {
                                     send_world(&mut sink, &ServerMessage::Error { message: e.to_string() }).await?;

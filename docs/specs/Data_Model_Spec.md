@@ -75,6 +75,33 @@ Validated at load (`CraftingSchema::from_yaml`): non-empty recipe list, unique r
 
 Core has no opinion on quality tiers, success chance, or profession/skill gating — that's the `on-craft-complete` plugin hook's job (`docs/specs/Plugin_API.md`).
 
+## Equipment: `equipment.schema.yaml` and `equipped_items` (#277/#245)
+
+Same "dev declares the domain specifics, core enforces generically" pattern as crafting — `equipment.schema.yaml` (`character::EquipmentSchema`) declares:
+
+- `slots` — a flat, dev-defined list of slot keys (e.g. `head`, `chest`, `weapon`); core has no opinion on what slots exist or how many
+- `items` — a list of equippable entries, each naming one `item_type` (must be unique across the list — one item_type maps to exactly one slot), which single `slot` it occupies (must be one of the declared `slots`), and an optional `stat_deltas` map (keys validated against `stats.schema.yaml` at *load* time via `AttributeSchema::declares` — existence only, not bounds, since a delta isn't a resulting value)
+
+An `item_type` not listed under `items` can't be equipped at all — `EquipItem` rejects it with an `Error`.
+
+```sql
+CREATE TABLE equipped_items (
+    character_id UUID NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+    slot TEXT NOT NULL,
+    item_type TEXT NOT NULL,
+    equipped_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (character_id, slot)
+);
+```
+
+One row per currently-worn item, keyed by `(character_id, slot)` — a slot holds at most one item at a time, enforced by the primary key itself.
+
+**The exchange.** `character::CharacterStore::equip_item`/`unequip_item` are the write paths. Equipping applies the item's `stat_deltas` via the existing `apply_stat_delta` primitive (free bounds enforcement against `stats.schema.yaml`'s declared `min`/`max`), removes one from inventory, and upserts the `equipped_items` row; unequipping reverses the deltas, grants the item back to inventory, and deletes the row. If the target slot is already occupied, the occupant is unequipped first (deltas reversed, granted back) rather than the request being rejected — same swap-on-conflict UX call `move_item_to_slot` (#276) makes, but simpler: only one slot is ever in play, so there's no second "where does the displaced item go" question the way inventory-slot swapping has.
+
+Deliberately **not** one Postgres transaction, unlike `craft_item` — same "best-effort, not fully transactional" stance `inventory.rs`'s own doc comment takes. The stat delta is applied *before* inventory is touched, so a delta rejected by a stat's declared bounds leaves the rest of the exchange untouched (matching how `craft_item` itself is sequenced) — but a displaced occupant, already unequipped before the new item's own delta is attempted, isn't rolled back if that delta then fails. Accepted as a soft-UX-limit tradeoff, not a data-integrity boundary, same as every other non-transactional write in this crate.
+
+Core has no opinion on set bonuses, durability, or cosmetic-only slots — those are plugin/game-specific concerns outside this table's scope, same "core has no privileged notion of what an item does" discipline as `items` itself.
+
 ## `realms`/`realm_zones` tables: the realm registry (#47)
 
 ```sql

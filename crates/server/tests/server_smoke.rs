@@ -77,6 +77,9 @@ const DROP_ITEM_ADDR: &str = "127.0.0.1:7957";
 const DROP_ITEM_INSUFFICIENT_ADDR: &str = "127.0.0.1:7958";
 const MOVE_ITEM_TO_SLOT_ADDR: &str = "127.0.0.1:7959";
 const MOVE_ITEM_TO_SLOT_SWAP_ADDR: &str = "127.0.0.1:7960";
+const EQUIP_ITEM_ADDR: &str = "127.0.0.1:7961";
+const EQUIP_ITEM_SWAP_ADDR: &str = "127.0.0.1:7962";
+const UNEQUIP_ITEM_ADDR: &str = "127.0.0.1:7963";
 const SESSION_RESUME_INVALID_ADDR: &str = "127.0.0.1:7931";
 const MOVE_CORRELATION_ADDR: &str = "127.0.0.1:7932";
 const PING_PONG_ADDR: &str = "127.0.0.1:7933";
@@ -641,6 +644,12 @@ fn setup_config_dir(test_name: &str) -> PathBuf {
         config_dir.join("currency.schema.yaml"),
     )
     .unwrap();
+    std::fs::copy(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../config/equipment.schema.example.yaml"),
+        config_dir.join("equipment.schema.yaml"),
+    )
+    .unwrap();
     // `<config_dir>/plugins/test-plugin/{plugin.toml,test_plugin.wasm}`
     // (#152's discovery convention) — only written if the compiled wasm
     // fixture actually exists, same "gracefully run with no plugin
@@ -743,6 +752,12 @@ fn setup_multi_plugin_config_dir(test_name: &str) -> PathBuf {
     std::fs::copy(
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../config/currency.schema.example.yaml"),
         config_dir.join("currency.schema.yaml"),
+    )
+    .unwrap();
+    std::fs::copy(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../config/equipment.schema.example.yaml"),
+        config_dir.join("equipment.schema.yaml"),
     )
     .unwrap();
 
@@ -853,6 +868,11 @@ fn setup_content_pack_config_dir(test_name: &str) -> PathBuf {
     std::fs::copy(
         repo_config_dir.join("currency.schema.example.yaml"),
         config_dir.join("currency.schema.yaml"),
+    )
+    .unwrap();
+    std::fs::copy(
+        repo_config_dir.join("equipment.schema.example.yaml"),
+        config_dir.join("equipment.schema.yaml"),
     )
     .unwrap();
     config_dir
@@ -4796,6 +4816,273 @@ async fn move_item_to_an_occupied_slot_swaps_the_occupant() {
         saw_torch_unsorted,
         "torch should have been displaced back to unsorted"
     );
+}
+
+/// #277, end to end through the real `server` binary: `EquipItem` on an
+/// owned, declared-equippable item type applies its `stat_deltas`,
+/// removes it from inventory, and reports the new occupant via
+/// `EquipmentChanged`.
+#[tokio::test]
+#[ignore]
+async fn equip_item_applies_deltas_and_removes_it_from_inventory() {
+    let config_dir = setup_config_dir("equip-item-success");
+    let _server = start_server(&config_dir, EQUIP_ITEM_ADDR).await;
+    wait_for_port(EQUIP_ITEM_ADDR).await;
+
+    let username = format!("equip-{}", uuid::Uuid::now_v7());
+    let mut stream = connect(&config_dir, EQUIP_ITEM_ADDR).await;
+    send_auth(
+        &mut stream,
+        &AuthClientMessage::Register {
+            username: username.clone(),
+            password: "hunter2".to_string(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv_auth(&mut stream).await,
+        AuthServerMessage::Authenticated { .. }
+    ));
+    select_realm(&mut stream, _server.realm_id).await;
+    select_or_create_character(&mut stream, &username).await;
+
+    loop {
+        if let ServerMessage::Joined { .. } = recv_world(&mut stream).await {
+            break;
+        }
+    }
+    loop {
+        match recv_world(&mut stream).await {
+            ServerMessage::PluginMessage { .. } => break,
+            ServerMessage::Moved { .. } => {}
+            other => panic!("expected the join greeting, got {other:?}"),
+        }
+    }
+
+    give_item(&mut stream, "iron-helmet").await;
+
+    send_world(
+        &mut stream,
+        &ClientMessage::EquipItem {
+            item_type: "iron-helmet".to_string(),
+        },
+    )
+    .await;
+
+    let mut saw_stat_changed = false;
+    let mut saw_item_changed = false;
+    loop {
+        match recv_world(&mut stream).await {
+            ServerMessage::StatChanged { stat_key, value } => {
+                assert_eq!(stat_key, "hp");
+                assert_eq!(value, 110);
+                saw_stat_changed = true;
+            }
+            ServerMessage::ItemChanged {
+                item_type,
+                quantity,
+            } => {
+                assert_eq!(item_type, "iron-helmet");
+                assert_eq!(quantity, 0);
+                saw_item_changed = true;
+            }
+            ServerMessage::EquipmentChanged { slot, item_type } => {
+                assert_eq!(slot, "head");
+                assert_eq!(item_type, "iron-helmet");
+                break;
+            }
+            ServerMessage::Moved { .. } | ServerMessage::EntitySpawned { .. } => {}
+            other => panic!("expected the equip sequence, got {other:?}"),
+        }
+    }
+    assert!(saw_stat_changed, "expected a StatChanged for hp");
+    assert!(saw_item_changed, "expected an ItemChanged for iron-helmet");
+}
+
+/// #277: equipping into an already-occupied slot unequips the occupant
+/// first (reversing its own deltas, granting it back to inventory)
+/// rather than being rejected.
+#[tokio::test]
+#[ignore]
+async fn equip_item_into_an_occupied_slot_swaps_the_occupant() {
+    let config_dir = setup_config_dir("equip-item-swap");
+    let _server = start_server(&config_dir, EQUIP_ITEM_SWAP_ADDR).await;
+    wait_for_port(EQUIP_ITEM_SWAP_ADDR).await;
+
+    let username = format!("equip-swap-{}", uuid::Uuid::now_v7());
+    let mut stream = connect(&config_dir, EQUIP_ITEM_SWAP_ADDR).await;
+    send_auth(
+        &mut stream,
+        &AuthClientMessage::Register {
+            username: username.clone(),
+            password: "hunter2".to_string(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv_auth(&mut stream).await,
+        AuthServerMessage::Authenticated { .. }
+    ));
+    select_realm(&mut stream, _server.realm_id).await;
+    let character_id = select_or_create_character(&mut stream, &username).await;
+
+    loop {
+        if let ServerMessage::Joined { .. } = recv_world(&mut stream).await {
+            break;
+        }
+    }
+    loop {
+        match recv_world(&mut stream).await {
+            ServerMessage::PluginMessage { .. } => break,
+            ServerMessage::Moved { .. } => {}
+            other => panic!("expected the join greeting, got {other:?}"),
+        }
+    }
+
+    give_item(&mut stream, "cloth-cap").await;
+    give_item(&mut stream, "iron-helmet").await;
+
+    send_world(
+        &mut stream,
+        &ClientMessage::EquipItem {
+            item_type: "cloth-cap".to_string(),
+        },
+    )
+    .await;
+    loop {
+        match recv_world(&mut stream).await {
+            ServerMessage::EquipmentChanged { item_type, .. } if item_type == "cloth-cap" => break,
+            ServerMessage::Moved { .. }
+            | ServerMessage::EntitySpawned { .. }
+            | ServerMessage::StatChanged { .. }
+            | ServerMessage::ItemChanged { .. } => {}
+            other => panic!("expected cloth-cap's EquipmentChanged, got {other:?}"),
+        }
+    }
+
+    send_world(
+        &mut stream,
+        &ClientMessage::EquipItem {
+            item_type: "iron-helmet".to_string(),
+        },
+    )
+    .await;
+
+    let mut saw_cloth_cap_returned = false;
+    loop {
+        match recv_world(&mut stream).await {
+            ServerMessage::ItemChanged {
+                item_type,
+                quantity,
+            } if item_type == "cloth-cap" => {
+                assert_eq!(quantity, 1);
+                saw_cloth_cap_returned = true;
+            }
+            ServerMessage::EquipmentChanged { slot, item_type } => {
+                assert_eq!(slot, "head");
+                assert_eq!(item_type, "iron-helmet");
+                break;
+            }
+            ServerMessage::Moved { .. }
+            | ServerMessage::EntitySpawned { .. }
+            | ServerMessage::StatChanged { .. }
+            | ServerMessage::ItemChanged { .. } => {}
+            other => panic!("expected the swap sequence, got {other:?}"),
+        }
+    }
+    assert!(
+        saw_cloth_cap_returned,
+        "cloth-cap should have been granted back to inventory"
+    );
+    assert_eq!(read_item_quantity(&character_id, "cloth-cap").await, 1);
+}
+
+/// #277: `UnequipItem` reverses the worn item's deltas and grants it back
+/// to inventory; the empty `item_type` on `EquipmentChanged` reports the
+/// slot as cleared.
+#[tokio::test]
+#[ignore]
+async fn unequip_item_reverses_deltas_and_returns_the_item() {
+    let config_dir = setup_config_dir("unequip-item-success");
+    let _server = start_server(&config_dir, UNEQUIP_ITEM_ADDR).await;
+    wait_for_port(UNEQUIP_ITEM_ADDR).await;
+
+    let username = format!("unequip-{}", uuid::Uuid::now_v7());
+    let mut stream = connect(&config_dir, UNEQUIP_ITEM_ADDR).await;
+    send_auth(
+        &mut stream,
+        &AuthClientMessage::Register {
+            username: username.clone(),
+            password: "hunter2".to_string(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv_auth(&mut stream).await,
+        AuthServerMessage::Authenticated { .. }
+    ));
+    select_realm(&mut stream, _server.realm_id).await;
+    let character_id = select_or_create_character(&mut stream, &username).await;
+
+    loop {
+        if let ServerMessage::Joined { .. } = recv_world(&mut stream).await {
+            break;
+        }
+    }
+    loop {
+        match recv_world(&mut stream).await {
+            ServerMessage::PluginMessage { .. } => break,
+            ServerMessage::Moved { .. } => {}
+            other => panic!("expected the join greeting, got {other:?}"),
+        }
+    }
+
+    give_item(&mut stream, "iron-helmet").await;
+    send_world(
+        &mut stream,
+        &ClientMessage::EquipItem {
+            item_type: "iron-helmet".to_string(),
+        },
+    )
+    .await;
+    loop {
+        match recv_world(&mut stream).await {
+            ServerMessage::EquipmentChanged { .. } => break,
+            ServerMessage::Moved { .. }
+            | ServerMessage::EntitySpawned { .. }
+            | ServerMessage::StatChanged { .. }
+            | ServerMessage::ItemChanged { .. } => {}
+            other => panic!("expected the initial equip to finish, got {other:?}"),
+        }
+    }
+
+    send_world(
+        &mut stream,
+        &ClientMessage::UnequipItem {
+            slot: "head".to_string(),
+        },
+    )
+    .await;
+
+    let mut saw_hp_reverted = false;
+    loop {
+        match recv_world(&mut stream).await {
+            ServerMessage::StatChanged { stat_key, value } => {
+                assert_eq!(stat_key, "hp");
+                assert_eq!(value, 100);
+                saw_hp_reverted = true;
+            }
+            ServerMessage::EquipmentChanged { slot, item_type } => {
+                assert_eq!(slot, "head");
+                assert_eq!(item_type, "");
+                break;
+            }
+            ServerMessage::Moved { .. } | ServerMessage::EntitySpawned { .. } => {}
+            other => panic!("expected the unequip sequence, got {other:?}"),
+        }
+    }
+    assert!(saw_hp_reverted, "expected hp to revert to its default");
+    assert_eq!(read_item_quantity(&character_id, "iron-helmet").await, 1);
 }
 
 /// #214: `spawn-npc`'s host callback can't synchronously return a real

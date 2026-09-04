@@ -305,6 +305,18 @@ async fn main() {
                 currency_schema_path.display()
             )
         });
+    // #277 — validated at load against the same declared attribute schema
+    // `schema` names below (a clone, since `schema` itself is moved into
+    // `CharacterStore::new` shortly after) — same reasoning as
+    // `archetype_schema`'s own load above.
+    let equipment_schema_path = config_dir.join("equipment.schema.yaml");
+    let equipment_schema = character::EquipmentSchema::from_file(&equipment_schema_path, &schema)
+        .unwrap_or_else(|e| {
+            panic!(
+                "failed to load the declared equipment schema at {} (see config/equipment.schema.example.yaml): {e}",
+                equipment_schema_path.display()
+            )
+        });
     let inventory_config =
         InventoryConfig::from_env().expect("invalid WZ_INVENTORY_MAX_ITEM_TYPES");
     // #193's character-creation cap — a `server`-side policy value (like
@@ -344,6 +356,7 @@ async fn main() {
     let archetype_schema = Arc::new(archetype_schema);
     let crafting_schema = Arc::new(crafting_schema);
     let currency_schema = Arc::new(currency_schema);
+    let equipment_schema = Arc::new(equipment_schema);
 
     let realm_store = realm_directory::RealmStore::new(pool.clone());
     let realm = resolve_realm(&realm_store).await;
@@ -801,6 +814,7 @@ async fn main() {
         max_characters_per_account,
         archetype_schema,
         crafting_schema,
+        equipment_schema,
         attribute_schema: npc_attribute_schema.clone(),
         transfer_executor,
         plugins: plugins.clone(),

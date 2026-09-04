@@ -1,0 +1,37 @@
+# Example declared equipment schema — loaded by the `character` crate
+# (crates/character/src/equipment_schema.rs), implementing #245's
+# equipment decision (#277). Copy/rename this as equipment.schema.yaml in
+# the config dir your instance actually uses (WZ_CONFIG_DIR, or ./config
+# by default) and adjust freely — the framework doesn't declare any
+# slots or equippable items of its own, same "core has no opinion on the
+# domain specifics" discipline stats.schema.yaml/crafting.schema.yaml
+# already follow.
+#
+# `slots` is a flat, dev-defined list of slot keys. Each entry under
+# `items` names one `item_type` from your inventory items, which single
+# `slot` it occupies (must be one of the declared `slots`), and an
+# optional `stat_deltas` map (keys must be declared in
+# stats.schema.yaml) applied while worn and reversed on unequip. An
+# item_type not listed here can't be equipped at all —
+# `EquipItem{item_type}` is rejected with an Error. This example's deltas
+# (hp/mana) match stats.schema.example.yaml's own declared keys — a real
+# game would declare its own combat stats (attack/defense/etc.) in both
+# files together.
+schema_version: 1
+slots:
+  - head
+  - chest
+  - weapon
+items:
+  - item_type: iron-helmet
+    slot: head
+    stat_deltas:
+      hp: 10
+  - item_type: cloth-cap
+    slot: head
+    stat_deltas:
+      hp: 2
+  - item_type: iron-sword
+    slot: weapon
+    stat_deltas:
+      mana: -5

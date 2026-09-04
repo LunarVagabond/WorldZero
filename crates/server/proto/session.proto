@@ -99,6 +99,8 @@ message ClientMessage {
     CraftItem craft_item = 20;
     DropItem drop_item = 21;
     MoveItemToSlot move_item_to_slot = 22;
+    EquipItem equip_item = 23;
+    UnequipItem unequip_item = 24;
   }
 }
 
@@ -318,6 +320,31 @@ message MoveItemToSlot {
   int32 slot_index = 2;
 }
 
+// Requests equipping item_type from this connection's own inventory
+// (#277, split out of #245 — see that closed issue's decision comment).
+// item_type's slot is resolved from equipment.schema.yaml
+// (character::EquipmentSchema) — Error if item_type isn't declared as
+// equippable at all, or the caller doesn't hold it. If the target slot
+// is already occupied by another item, that item is unequipped first
+// (its stat_deltas reversed, granted back to inventory) rather than the
+// request being rejected. Success is reported via StatChanged/
+// ItemChanged for every value that actually changed (#211's convention),
+// followed by one EquipmentChanged for the slot's new occupant
+// (character::CharacterStore::equip_item).
+message EquipItem {
+  string item_type = 1;
+}
+
+// Requests unequipping whatever currently occupies slot for this
+// connection's own character (#277) — Error if the slot isn't currently
+// occupied. Reverses the worn item's stat_deltas and grants it back to
+// inventory (character::CharacterStore::unequip_item). Success is
+// reported the same way as EquipItem: StatChanged/ItemChanged for every
+// changed value, then one EquipmentChanged with an empty item_type.
+message UnequipItem {
+  string slot = 1;
+}
+
 message RosterEntry {
   string entity_id = 1;
   string entity_type = 2;
@@ -348,6 +375,7 @@ message ServerMessage {
     ItemChanged item_changed = 18;
     CurrencyChanged currency_changed = 19;
     ItemMoved item_moved = 20;
+    EquipmentChanged equipment_changed = 21;
   }
 }
 
@@ -536,4 +564,14 @@ message ItemMoved {
 message CurrencyChanged {
   string currency_key = 1;
   int64 balance = 2;
+}
+
+// Reports a slot's new occupant after EquipItem/UnequipItem (#277) —
+// item_type is empty to mean "nothing equipped there now" (an unequip,
+// or the slot being cleared). Always preceded by whatever StatChanged/
+// ItemChanged pushes the underlying exchange actually produced — this is
+// purely the equip-state summary, never a value change on its own.
+message EquipmentChanged {
+  string slot = 1;
+  string item_type = 2;
 }
