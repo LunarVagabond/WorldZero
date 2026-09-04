@@ -123,6 +123,14 @@ For major work:
 2. Align implementation tasks with accepted docs.
 3. Update docs and behavior together on changes.
 
+## Keep The Example Client In Sync
+
+[`examples/world-zero-test-grounds`](../examples/world-zero-test-grounds) (a real Godot/C# client) is this project's only genuine end-to-end manual-test surface — the only place a human can actually drive the real wire protocol against a real running `server`, as opposed to reading an integration test. Treat it as load-bearing, not decorative.
+
+If your PR changes a `.proto` file (any `crates/*/proto/*.proto`) or `crates/plugin-host/wit/plugin.wit` in a way a real client or plugin would notice — a new/changed message, a new hook, a new host function, a changed `host_api_version` — update `examples/world-zero-test-grounds` (and `examples/evil-cube-plugin`/`examples/example-plugin` where relevant) in the same PR, not as follow-up. This has already rotted silently twice: `evil-cube-plugin`'s `plugin.toml` drifted to a stale `host_api_version` against what the server actually required, and the example client shipped a workaround for a server bug (#239) that outlived the bug itself. Both are the kind of thing that's cheap to catch in the PR that causes them and annoying to rediscover later.
+
+Not a CI gate today — a reviewer question, same as "did the docs get updated."
+
 ## Development Interface
 
 The `Makefile` at the repo root is the canonical entry point for local dev commands — run `make help` for the full list. The common ones:
