@@ -5201,6 +5201,17 @@ async fn trade_request_accept_offer_confirm_executes_the_exchange() {
         &ClientMessage::TradeRequestResponse { accept: true },
     )
     .await;
+    // The session is created by b's TradeRequestResponse landing on a
+    // completely separate connection/task from a's — wait for a's own
+    // TradeStateChanged proving the session actually exists server-side
+    // before sending offers from a, or a's TradeOfferItem below could
+    // race ahead of session creation and be rejected as "no active
+    // trade."
+    loop {
+        if let ServerMessage::TradeStateChanged { .. } = recv_world(&mut a).await {
+            break;
+        }
+    }
 
     send_world(
         &mut a,
@@ -5324,7 +5335,9 @@ async fn declining_a_trade_request_notifies_the_requester_and_opens_no_session()
                 assert_eq!(by_entity_id, b_entity_id);
                 break;
             }
-            ServerMessage::Moved { .. } | ServerMessage::EntitySpawned { .. } => {}
+            ServerMessage::PluginMessage { .. }
+            | ServerMessage::Moved { .. }
+            | ServerMessage::EntitySpawned { .. } => {}
             other => panic!("expected TradeRequestDeclined, got {other:?}"),
         }
     }
@@ -5420,6 +5433,19 @@ async fn cancelling_an_active_trade_notifies_the_other_side() {
             | ServerMessage::Moved { .. }
             | ServerMessage::EntitySpawned { .. } => {}
             other => panic!("expected TradeCancelled, got {other:?}"),
+        }
+    }
+    // `a` also gets its own TradeCancel echoed back (the proto's own
+    // "including this connection's own TradeCancel echoed back for
+    // UI-state simplicity" note) — drain it before checking the session
+    // is actually gone.
+    loop {
+        match recv_world(&mut a).await {
+            ServerMessage::TradeCancelled { .. } => break,
+            ServerMessage::TradeStateChanged { .. }
+            | ServerMessage::Moved { .. }
+            | ServerMessage::EntitySpawned { .. } => {}
+            other => panic!("expected a's own echoed TradeCancelled, got {other:?}"),
         }
     }
 

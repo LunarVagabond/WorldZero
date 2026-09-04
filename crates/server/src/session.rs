@@ -1635,7 +1635,14 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
                             }
                         }
                         Ok(ClientMessage::TradeCancel {}) => {
-                            if let Some(session) = deps.active_trades.lock().unwrap().remove(&entity_id) {
+                            // A plain `let` first, not `if let` directly on
+                            // the locking expression — `if let`'s scrutinee
+                            // temporary (the MutexGuard from `.lock()`)
+                            // would otherwise live for the whole block
+                            // below, which re-locks the same mutex and
+                            // deadlocks.
+                            let session = deps.active_trades.lock().unwrap().remove(&entity_id);
+                            if let Some(session) = session {
                                 let other_entity_id = session.lock().unwrap().other(entity_id);
                                 if let Some(other_entity_id) = other_entity_id {
                                     deps.active_trades.lock().unwrap().remove(&other_entity_id);
@@ -1865,7 +1872,10 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
     // `TradeSession`'s own doc comment takes) — the still-connected side
     // is told via `TradeCancelled` rather than being left to discover it
     // only when its next offer/confirm/cancel finds no session.
-    if let Some(session) = deps.active_trades.lock().unwrap().remove(&entity_id) {
+    // A plain `let` first, not `if let` directly on the locking
+    // expression — see the `TradeCancel` handler's own comment on why.
+    let disconnecting_trade_session = deps.active_trades.lock().unwrap().remove(&entity_id);
+    if let Some(session) = disconnecting_trade_session {
         let other_entity_id = session.lock().unwrap().other(entity_id);
         if let Some(other_entity_id) = other_entity_id {
             deps.active_trades.lock().unwrap().remove(&other_entity_id);
