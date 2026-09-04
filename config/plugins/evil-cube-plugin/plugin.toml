@@ -1,0 +1,24 @@
+# The evil-cube-plugin's manifest — a small custom plugin built for
+# world-zero-test-grounds's Evil Cube manual-test NPC (see that repo's
+# PROMPT.md §7.2) and its admin panel (caller-role-gated chat commands).
+[plugin]
+name = "evil-cube-plugin"
+host_api_version = "0.12.0"
+# report-death/report-respawn gated by combat, spawn-npc by spawning,
+# send-message by messaging, grant-item/modify-currency by economy
+# (docs/specs/Plugin_API.md's "Capability gating"). caller-role is
+# ungated regardless of declared capabilities.
+capabilities = ["combat", "spawning", "messaging", "economy"]
+message_types = []
+chat_commands = ["killcube", "respawncube", "grant", "grantcurrency"]
+# Every hook actually implemented meaningfully — undeclared hooks are
+# never called by the host at all (server::plugin_startup::PluginRuntime::wants),
+# regardless of whether the Guest impl below has real logic for them.
+hooks = [
+    "on-zone-loaded",
+    "on-entity-spawn",
+    "on-player-join-zone",
+    "on-damage-calc",
+    "on-death",
+    "on-respawn",
+]
