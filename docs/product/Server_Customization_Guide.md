@@ -92,6 +92,7 @@ None of this is a database schema change on your end — `stats` is one `JSONB` 
 | Var | Default | Purpose |
 |---|---|---|
 | `WZ_INVENTORY_MAX_ITEM_TYPES` | `40` | Caps the number of *distinct* item types a character can hold — the classic "N inventory slots" limit. Granting more of an already-owned type is never blocked by this, only a new stack is. |
+| `WZ_INVENTORY_SLOT_COUNT` | `40` | Valid range for a `MoveItemToSlot` (#276) target — `[0, WZ_INVENTORY_SLOT_COUNT)`. Kept separate from `WZ_INVENTORY_MAX_ITEM_TYPES` even though the defaults match, since a dev may want more visual slots than the stack cap. |
 
 **Character archetypes (`character.archetypes.yaml`, #212/#213).** Declares what a player can pick when creating a character — same "core has no opinion" discipline as stats: the framework ships zero classes/races of its own. Start from [`config/character.archetypes.example.yaml`](../../config/character.archetypes.example.yaml):
 

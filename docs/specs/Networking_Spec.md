@@ -119,3 +119,11 @@ If the configured plugin declared both `on-craft-complete` in `plugin.toml`'s `h
 No dedicated reply message. Success arrives as an ordinary `ItemChanged` push (above), same convention as `CraftItem`.
 
 If the configured plugin declared `on-item-drop` in `plugin.toml`'s `hooks`, a successful drop also fires that hook (`zone-id`, `entity-id`, `item-type`, `quantity`) — see docs/specs/Plugin_API.md's hooks table. Pure notification, no veto: the core has already committed the removal by the time it fires. The core has no "item sitting on the ground" concept of its own — a plugin wanting one (e.g. a pickup entity) builds it itself, typically via `spawn-npc` from inside this hook.
+
+## Slot-based inventory ordering (#276)
+
+**`MoveItemToSlot { item_type: string, slot_index: int32 }`** (`session.proto`, `message_type` 200, client) — requests placing `item_type` from this connection's own inventory at `slot_index`, a purely visual/positional rearrangement that never changes quantity or ownership (`character::CharacterStore::move_item_to_slot`). `Error` if the caller doesn't hold `item_type`, or if `slot_index` is outside `[0, WZ_INVENTORY_SLOT_COUNT)`; nothing changes on a rejected move.
+
+If another of the caller's own stacks already occupies `slot_index`, it swaps to the mover's previous slot (or back to unsorted/`NULL`, if the mover had none) rather than the request being rejected — ordinary drag-and-drop UX, not a conflict error.
+
+**`ItemMoved { item_type: string, slot_index: optional int32 }`** (`session.proto`, `message_type` 200, server) — reports a stack's new slot after a `MoveItemToSlot`. Sent once for the mover (`slot_index` always set) and, if a swap actually happened, once more for the displaced stack (`slot_index` unset if it went back to unsorted). A newly granted item's `slot_index` stays unset until the player explicitly places it — the core never auto-assigns one, and ordinary `grant-item`/`remove-item`/`DropItem` traffic never touches it; a stack keeps its slot across partial grants/removals and only loses it when the row itself is deleted (the stack hit zero).

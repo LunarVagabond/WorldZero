@@ -1304,6 +1304,25 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
                                 }
                             }
                         }
+                        Ok(ClientMessage::MoveItemToSlot { item_type, slot_index }) => {
+                            match deps.character_store.move_item_to_slot(character_id, &item_type, slot_index).await {
+                                Ok(result) => {
+                                    send_world(&mut sink, &ServerMessage::ItemMoved {
+                                        item_type: result.moved_item_type,
+                                        slot_index: Some(result.moved_slot_index),
+                                    }).await?;
+                                    if let Some((displaced_item_type, displaced_slot_index)) = result.displaced {
+                                        send_world(&mut sink, &ServerMessage::ItemMoved {
+                                            item_type: displaced_item_type,
+                                            slot_index: displaced_slot_index,
+                                        }).await?;
+                                    }
+                                }
+                                Err(e) => {
+                                    send_world(&mut sink, &ServerMessage::Error { message: e.to_string() }).await?;
+                                }
+                            }
+                        }
                         Ok(ClientMessage::CraftItem { recipe_key }) => {
                             let recipe = deps.crafting_schema.resolve(&recipe_key).cloned();
                             match recipe {

@@ -98,6 +98,7 @@ message ClientMessage {
     GuildSetTag guild_set_tag = 19;
     CraftItem craft_item = 20;
     DropItem drop_item = 21;
+    MoveItemToSlot move_item_to_slot = 22;
   }
 }
 
@@ -301,6 +302,22 @@ message DropItem {
   int64 quantity = 2;
 }
 
+// Requests placing item_type from this connection's own inventory at
+// slot_index (#276, split out of #243 — see that closed issue's decision
+// comment) — a purely visual/positional rearrangement, never a
+// quantity/ownership change. Error if the caller doesn't hold item_type,
+// or if slot_index is outside [0, WZ_INVENTORY_SLOT_COUNT). If another of
+// the caller's own stacks already occupies slot_index, it swaps to the
+// mover's previous slot (or unsorted, if the mover had none) rather than
+// being rejected — ordinary drag-and-drop UX
+// (character::CharacterStore::move_item_to_slot). Success is reported via
+// ItemMoved, once for the mover and, on a swap, once more for the
+// displaced stack.
+message MoveItemToSlot {
+  string item_type = 1;
+  int32 slot_index = 2;
+}
+
 message RosterEntry {
   string entity_id = 1;
   string entity_type = 2;
@@ -330,6 +347,7 @@ message ServerMessage {
     StatChanged stat_changed = 17;
     ItemChanged item_changed = 18;
     CurrencyChanged currency_changed = 19;
+    ItemMoved item_moved = 20;
   }
 }
 
@@ -497,6 +515,16 @@ message StatChanged {
 message ItemChanged {
   string item_type = 1;
   int64 quantity = 2;
+}
+
+// Reports a stack's new positional slot after a MoveItemToSlot (#276) —
+// purely positional, never implies a quantity change (that's always
+// ItemChanged). slot_index is unset (Rust None) if the stack went back to
+// unsorted — only possible for a displaced occupant, never for the
+// mover itself (a MoveItemToSlot request always names a real slot).
+message ItemMoved {
+  string item_type = 1;
+  optional int32 slot_index = 2;
 }
 
 // Pushed to a connection whenever its own character's currency balance

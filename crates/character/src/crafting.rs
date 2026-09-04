@@ -382,6 +382,7 @@ mod tests {
             schema(),
             InventoryConfig {
                 max_distinct_item_types: 2,
+                ..Default::default()
             },
         );
         let character_id = store
