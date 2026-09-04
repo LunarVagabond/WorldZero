@@ -89,6 +89,7 @@ pub const KNOWN_HOOKS: &[&str] = &[
     "on-item-acquire",
     "on-item-use",
     "on-craft-complete",
+    "on-item-drop",
 ];
 
 #[derive(Debug, Clone, Deserialize)]
