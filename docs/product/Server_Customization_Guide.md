@@ -260,6 +260,8 @@ Dynamic layer assignment ([#50](https://github.com/LunarVagabond/WorldZero/issue
 | `WZ_LAYER_ENABLED` | `true` | `false` pins every zone to exactly one layer forever, for deployments that don't want this at all (small player counts, or a game that needs every player in a zone able to see every other). |
 | `WZ_LAYER_POPULATION_THRESHOLD` | `200` | Connected sessions per layer before a new one spins up. A small community server might want `10`; a large one `1000+` — that range is exactly why this is a runtime env var, not a hardcoded constant. |
 
+**Real horizontal scaling across processes/machines (`WZ_ZONE_IDS`, #269).** Layering above spreads *one zone's* population across parallel copies within a single process. To split a realm's *zones* across multiple `server` processes — potentially on separate machines, sharing one Postgres/Redis — set `WZ_ZONE_IDS` (comma-separated zone ids) on each process to a disjoint slice of the realm's declared zones. Unset (the default) means every zone loads, today's single-process behavior, unchanged. Naming an id that isn't one of the realm's zones, or a filter that resolves to zero zones, is a startup-time panic listing what's actually available — not a silent partial start. This is a config knob, not an orchestrator: which processes actually run where is still your deployment tooling's job (systemd/k8s/Nomad — the same `/healthz`/`/readyz` probes [Step 6](#step-6--optional-services-chat-metrics-health) covers work here too). See [#130](https://github.com/LunarVagabond/WorldZero/issues/130)/[#190](https://github.com/LunarVagabond/WorldZero/issues/190) for the broader realm/shard process-lifecycle decision this is the first concrete slice of.
+
 ---
 
 ## Step 8 — Realms & transfers (real, but not yet live)
@@ -304,7 +306,7 @@ See [`docs/specs/Realm_Character_Policy_Spec.md`](../specs/Realm_Character_Polic
 | `gateway` | `WZ_TLS_CERT_PATH`, `WZ_TLS_KEY_PATH` | — | `CertMaterial` |
 | `plugin-host` | — | `plugin.toml` | `PluginManifest` |
 | `chat` | `WZ_CHAT_PERSISTENCE_ENABLED` (`WZ_SERVICE_CHAT_ENABLED` toggle lives in `common`) | `chat.yaml` (optional) | `ChannelStore`, `ChatBus`, `MessageLog`, `SystemChannelConfig` |
-| `server` | `WZ_SERVER_ADDR`, `WZ_METRICS_ADDR`, `WZ_HEALTH_ADDR`, `WZ_LAYER_ENABLED`, `WZ_LAYER_POPULATION_THRESHOLD`, `WZ_PLUGINS_DIR`, `WZ_REALM_ID`, `WZ_REALM_LEASE_TTL_SECS` | — | — |
+| `server` | `WZ_SERVER_ADDR`, `WZ_METRICS_ADDR`, `WZ_HEALTH_ADDR`, `WZ_LAYER_ENABLED`, `WZ_LAYER_POPULATION_THRESHOLD`, `WZ_PLUGINS_DIR`, `WZ_REALM_ID`, `WZ_REALM_LEASE_TTL_SECS`, `WZ_ZONE_IDS` | — | — |
 | `realm-directory` | (consumed via `server`'s `WZ_REALM_ID`/`WZ_REALM_LEASE_TTL_SECS` above) | — | `RealmStore`, `LoginPolicy`, `RealmPresence` |
 | `transfer` | none | — | `TransferExecutor`, `TransferGateStore`, `TransferAuditLog` |
 
