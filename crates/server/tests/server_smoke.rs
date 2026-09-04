@@ -597,6 +597,11 @@ fn setup_config_dir(test_name: &str) -> PathBuf {
     ));
     std::fs::create_dir_all(&config_dir).unwrap();
     std::fs::copy(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../config/game.example.yaml"),
+        config_dir.join("game.yaml"),
+    )
+    .unwrap();
+    std::fs::copy(
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../config/zone.manifest.example.yaml"),
         config_dir.join("zone.manifest.yaml"),
     )
@@ -694,6 +699,11 @@ fn setup_multi_plugin_config_dir(test_name: &str) -> PathBuf {
         std::process::id()
     ));
     std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::copy(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../config/game.example.yaml"),
+        config_dir.join("game.yaml"),
+    )
+    .unwrap();
     std::fs::copy(
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../config/zone.manifest.example.yaml"),
         config_dir.join("zone.manifest.yaml"),
@@ -793,6 +803,11 @@ fn setup_content_pack_config_dir(test_name: &str) -> PathBuf {
     std::fs::create_dir_all(&example_zones_dir).unwrap();
 
     let repo_config_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../config");
+    std::fs::copy(
+        repo_config_dir.join("game.example.yaml"),
+        config_dir.join("game.yaml"),
+    )
+    .unwrap();
     std::fs::copy(
         repo_config_dir.join("content-pack.example.yaml"),
         config_dir.join("content-pack.yaml"),

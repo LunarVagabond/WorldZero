@@ -11,6 +11,9 @@
 //!
 //! `cargo run -p server`. Needs, at minimum:
 //! - `WZ_POSTGRES_*` / `WZ_REDIS_*` (`.env`)
+//! - `<config_dir>/game.yaml` (see `config/game.example.yaml`) — names
+//!   this game and declares this deployment's default for the optional
+//!   systems below (`game_manifest::GameManifest`, #271)
 //! - `WZ_REALM_ID` — the realm this process serves (#136); create one
 //!   first with `make realm ARGS="create <name> open|bound"`
 //!   (docs/specs/Realm_Character_Policy_Spec.md, "Managing realms
@@ -88,6 +91,7 @@
 
 mod character_protocol;
 mod chat_session;
+mod game_manifest;
 mod health;
 mod plugin_startup;
 mod plugin_state;
@@ -184,6 +188,19 @@ async fn main() {
     let addr = std::env::var("WZ_SERVER_ADDR").unwrap_or_else(|_| DEFAULT_ADDR.to_string());
     let config_dir = common::config::config_dir();
 
+    let game_manifest_path = config_dir.join("game.yaml");
+    let game_manifest =
+        game_manifest::GameManifest::from_file(&game_manifest_path).unwrap_or_else(|e| {
+            panic!(
+                "failed to load the game manifest at {} (see config/game.example.yaml): {e}",
+                game_manifest_path.display()
+            )
+        });
+    tracing::info!(
+        game_name = game_manifest.game_name,
+        "worldzero server starting"
+    );
+
     let pg_config = PostgresConfig::from_env().expect("WZ_POSTGRES_* env vars set");
     let pool = postgres_pool(&pg_config, PoolOptions::default())
         .await
@@ -193,7 +210,11 @@ async fn main() {
         redis_pool(&redis_config, PoolOptions::default()).expect("failed to build Redis pool");
 
     let world_config = world::WorldConfig::from_env().expect("invalid WZ_WORLD_* config");
-    let services = ServicesConfig::from_env().expect("invalid WZ_SERVICE_* config");
+    let services = ServicesConfig::from_env_with_defaults(ServicesConfig {
+        chat_enabled: game_manifest.systems.chat,
+        metrics_enabled: game_manifest.systems.metrics,
+    })
+    .expect("invalid WZ_SERVICE_* config");
 
     // `None` end to end (not just an unused `Metrics`) when disabled —
     // no `/metrics` HTTP listener, and every instrumentation call site
@@ -373,7 +394,8 @@ async fn main() {
         // above (#174, docs/specs/Chat_Spec.md, "Durable message log") —
         // `None` end to end when off, no `MessageLog` constructed at all.
         let chat_persistence_enabled =
-            chat::persistence_enabled_from_env().expect("invalid WZ_CHAT_PERSISTENCE_ENABLED");
+            chat::persistence_enabled(game_manifest.systems.chat_persistence)
+                .expect("invalid WZ_CHAT_PERSISTENCE_ENABLED");
         let message_log = if chat_persistence_enabled {
             tracing::info!("chat message persistence enabled");
             Some(Arc::new(chat::MessageLog::new(pool.clone())))

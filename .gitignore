@@ -23,6 +23,7 @@ config/certs/
 # A dev's own real config, copied/customized from the tracked
 # config/*.example.* templates (by hand, or by `make quickstart`, #43) —
 # never the templates themselves.
+config/game.yaml
 config/zone.manifest.yaml
 config/stats.schema.yaml
 config/party.schema.yaml
