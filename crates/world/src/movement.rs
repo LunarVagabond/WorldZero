@@ -8,6 +8,7 @@
 
 use common::id::EntityId;
 use content::manifest::ZoneManifest;
+use content::navmesh::NavMesh;
 
 use crate::spatial::{Point, SpatialIndex};
 
@@ -20,8 +21,19 @@ const COLLISION_RADIUS_METERS: f64 = 0.5;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MovementRejection {
-    /// The destination falls outside the zone's manifest boundary polygon.
+    /// The destination falls outside the zone's coarse manifest `bounds`
+    /// polygon (a 2D, flat zone-extent check — see `validate_movement`'s
+    /// doc comment). Checked before the real navmesh containment below,
+    /// since a destination outside the zone's declared extent entirely
+    /// doesn't need the more expensive per-polygon check to be rejected.
     OutOfBounds,
+    /// The destination is within the zone's coarse `bounds`, but doesn't
+    /// land inside any `navmesh_v1` polygon — real 3D containment,
+    /// `z` included (#280). This is the actual walkability authority: a
+    /// destination inside a wall, above/below a floor, or in the gap
+    /// between two floors gets rejected here even though it passes the
+    /// flat `bounds` check above.
+    NotWalkable,
     /// The requested distance exceeds what's reachable in `dt` at the
     /// configured max speed — a spoofed "teleport" update, not necessarily
     /// malice (could also be a client clock hiccup), but rejected either way.
@@ -37,8 +49,10 @@ pub enum MovementRejection {
 /// tick loop) a movement update that fails any check — a rejected move is
 /// an expected, routine outcome, not a caller-visible error condition,
 /// per #33's acceptance criteria.
+#[allow(clippy::too_many_arguments)]
 pub fn validate_movement(
     manifest: &ZoneManifest,
+    navmesh: &NavMesh,
     index: &dyn SpatialIndex,
     mover: EntityId,
     max_speed_meters_per_second: f64,
@@ -55,12 +69,21 @@ pub fn validate_movement(
         });
     }
 
-    // Zone bounds are 2D-only, deliberately (#242 owns real 3D zone
-    // geometry) — project `to` down to its (x, y) footprint before
-    // checking it against the manifest's flat polygon. In effect: no
-    // vertical limit within a zone's footprint yet.
+    // `bounds` stays a 2D-only, coarse zone-extent check (still useful
+    // for e.g. spatial-indexing bucket sizing) — project `to` down to
+    // its (x, y) footprint before checking it against the manifest's
+    // flat polygon. Real walkability authority is the navmesh check
+    // below (#280); this is just a cheap first reject.
     if !point_in_polygon((to.0, to.1), &manifest.bounds.points) {
         return Err(MovementRejection::OutOfBounds);
+    }
+
+    // The actual walkability authority (#280): `to` must land inside
+    // some navmesh polygon, `z` included — this is what makes real
+    // interiors/obstacles/multi-floor geometry possible, replacing the
+    // old "no vertical limit within a zone's footprint" behavior.
+    if !navmesh.contains(to) {
+        return Err(MovementRejection::NotWalkable);
     }
 
     // Broad-phase collision via the spatial index's own range query
@@ -144,14 +167,28 @@ collision:
         .unwrap()
     }
 
+    /// A flat, single-floor navmesh covering the same footprint as
+    /// `square_manifest`'s `bounds` — the "prove the pipeline end to
+    /// end" shape #280's own acceptance criteria calls for, reused across
+    /// every test below that isn't specifically exercising multi-floor
+    /// geometry.
+    fn square_navmesh() -> NavMesh {
+        NavMesh::from_json(
+            r#"{"format":"navmesh_v1","polygons":[{"vertices":[[0,0,0],[100,0,0],[100,100,0],[0,100,0]]}]}"#,
+        )
+        .unwrap()
+    }
+
     #[test]
     fn in_bounds_reasonable_move_is_accepted() {
         let manifest = square_manifest();
+        let navmesh = square_navmesh();
         let index = crate::spatial::GridIndex::new(10.0);
         let mover = EntityId::new();
 
         let result = validate_movement(
             &manifest,
+            &navmesh,
             &index,
             mover,
             10.0,
@@ -165,6 +202,7 @@ collision:
     #[test]
     fn out_of_bounds_move_is_rejected() {
         let manifest = square_manifest();
+        let navmesh = square_navmesh();
         let index = crate::spatial::GridIndex::new(10.0);
         let mover = EntityId::new();
 
@@ -172,6 +210,7 @@ collision:
         // check — the speed cap itself is covered separately below.
         let result = validate_movement(
             &manifest,
+            &navmesh,
             &index,
             mover,
             10_000.0,
@@ -185,12 +224,14 @@ collision:
     #[test]
     fn a_move_faster_than_the_speed_cap_is_rejected() {
         let manifest = square_manifest();
+        let navmesh = square_navmesh();
         let index = crate::spatial::GridIndex::new(10.0);
         let mover = EntityId::new();
 
         // 50m in one 50ms tick at a 10 m/s cap (max ~0.5m) is a spoofed teleport.
         let result = validate_movement(
             &manifest,
+            &navmesh,
             &index,
             mover,
             10.0,
@@ -207,11 +248,13 @@ collision:
         // boundary in `validate_movement`'s speed check, previously
         // untested at the exact edge.
         let manifest = square_manifest();
+        let navmesh = square_navmesh();
         let index = crate::spatial::GridIndex::new(10.0);
         let mover = EntityId::new();
 
         let result = validate_movement(
             &manifest,
+            &navmesh,
             &index,
             mover,
             10.0,
@@ -225,6 +268,7 @@ collision:
     #[test]
     fn moving_onto_another_entity_is_blocked() {
         let manifest = square_manifest();
+        let navmesh = square_navmesh();
         let mut index = crate::spatial::GridIndex::new(10.0);
         let blocker = EntityId::new();
         index.insert(blocker, (50.1, 50.1, 0.0));
@@ -232,6 +276,7 @@ collision:
 
         let result = validate_movement(
             &manifest,
+            &navmesh,
             &index,
             mover,
             10.0,
@@ -252,11 +297,13 @@ collision:
         // Same (x, y) — pure altitude change — still counts against the
         // speed cap now that distance is 3D-aware (#249).
         let manifest = square_manifest();
+        let navmesh = square_navmesh();
         let index = crate::spatial::GridIndex::new(10.0);
         let mover = EntityId::new();
 
         let result = validate_movement(
             &manifest,
+            &navmesh,
             &index,
             mover,
             10.0,
@@ -268,16 +315,19 @@ collision:
     }
 
     #[test]
-    fn a_move_that_only_changes_altitude_within_bounds_is_accepted() {
-        // The bounds check projects onto (x, y) — no vertical limit
-        // within a zone's flat footprint yet (#242 owns real 3D zone
-        // geometry, not this).
+    fn a_move_that_only_changes_altitude_off_the_navmesh_is_rejected() {
+        // The old "no vertical limit within a zone's flat footprint"
+        // behavior is gone (#280) — the navmesh is now the real
+        // walkability authority, not just the flat `bounds` polygon.
+        // A generous speed cap isolates this from the speed check.
         let manifest = square_manifest();
+        let navmesh = square_navmesh();
         let index = crate::spatial::GridIndex::new(10.0);
         let mover = EntityId::new();
 
         let result = validate_movement(
             &manifest,
+            &navmesh,
             &index,
             mover,
             10_000.0,
@@ -285,7 +335,97 @@ collision:
             (50.0, 50.0, 0.0),
             (50.0, 50.0, 500.0),
         );
+        assert_eq!(result, Err(MovementRejection::NotWalkable));
+    }
+
+    #[test]
+    fn a_destination_inside_flat_bounds_but_off_every_navmesh_polygon_is_rejected() {
+        // The exact scenario #280's acceptance criteria calls out: a
+        // destination that's well inside the coarse flat `bounds`
+        // polygon, but doesn't land on any navmesh polygon (here: a
+        // single-floor navmesh that only covers half the zone's
+        // declared bounds — an "interior wall" stand-in without needing
+        // a real multi-polygon obstacle layout).
+        let manifest = square_manifest();
+        let navmesh = NavMesh::from_json(
+            r#"{"format":"navmesh_v1","polygons":[{"vertices":[[0,0,0],[50,0,0],[50,100,0],[0,100,0]]}]}"#,
+        )
+        .unwrap();
+        let index = crate::spatial::GridIndex::new(10.0);
+        let mover = EntityId::new();
+
+        // (75, 50) is inside the zone's [0,0]-[100,100] bounds, but
+        // outside the navmesh's [0,0]-[50,100] walkable half.
+        let result = validate_movement(
+            &manifest,
+            &navmesh,
+            &index,
+            mover,
+            10_000.0,
+            0.05,
+            (25.0, 50.0, 0.0),
+            (75.0, 50.0, 0.0),
+        );
+        assert_eq!(result, Err(MovementRejection::NotWalkable));
+    }
+
+    #[test]
+    fn a_move_onto_a_second_floor_directly_above_the_ground_floor_is_accepted() {
+        // Two navmesh polygons sharing the same (x, y) footprint at
+        // different z — the "second floor is just more navmesh
+        // geometry" design (#280) — resolving correctly depends on real
+        // 3D containment, not just the flat (x, y) bounds check.
+        let manifest = square_manifest();
+        let navmesh = NavMesh::from_json(
+            r#"{"format":"navmesh_v1","polygons":[
+                {"vertices":[[0,0,0],[100,0,0],[100,100,0],[0,100,0]]},
+                {"vertices":[[0,0,4],[100,0,4],[100,100,4],[0,100,4]]}
+            ]}"#,
+        )
+        .unwrap();
+        let index = crate::spatial::GridIndex::new(10.0);
+        let mover = EntityId::new();
+
+        let result = validate_movement(
+            &manifest,
+            &navmesh,
+            &index,
+            mover,
+            10_000.0,
+            0.05,
+            (50.0, 50.0, 4.0),
+            (50.5, 50.5, 4.0),
+        );
         assert_eq!(result, Ok(()));
+    }
+
+    #[test]
+    fn a_move_between_the_ground_and_second_floor_heights_is_rejected() {
+        // Same overlapping footprint as the test above, but the
+        // destination's z falls in the gap between the two floors —
+        // neither polygon's height tolerance covers it.
+        let manifest = square_manifest();
+        let navmesh = NavMesh::from_json(
+            r#"{"format":"navmesh_v1","polygons":[
+                {"vertices":[[0,0,0],[100,0,0],[100,100,0],[0,100,0]]},
+                {"vertices":[[0,0,4],[100,0,4],[100,100,4],[0,100,4]]}
+            ]}"#,
+        )
+        .unwrap();
+        let index = crate::spatial::GridIndex::new(10.0);
+        let mover = EntityId::new();
+
+        let result = validate_movement(
+            &manifest,
+            &navmesh,
+            &index,
+            mover,
+            10_000.0,
+            0.05,
+            (50.0, 50.0, 2.0),
+            (50.5, 50.5, 2.0),
+        );
+        assert_eq!(result, Err(MovementRejection::NotWalkable));
     }
 
     #[test]
@@ -294,6 +434,7 @@ collision:
         // this is correctly outside the collision radius, unlike a 2D
         // distance check which would have wrongly reported a collision.
         let manifest = square_manifest();
+        let navmesh = square_navmesh();
         let mut index = crate::spatial::GridIndex::new(10.0);
         let other = EntityId::new();
         index.insert(other, (50.0, 50.0, 100.0));
@@ -301,6 +442,7 @@ collision:
 
         let result = validate_movement(
             &manifest,
+            &navmesh,
             &index,
             mover,
             10.0,

@@ -13,7 +13,11 @@ bounds:
   points: [[0,0], [200,0], [200,200], [0,200]]
 
 collision:
-  asset_ref: "sha256:9f2ac1b3e4d5c6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1"
+  # A real navmesh_v1 asset (#280) — a single flat, walkable polygon
+  # covering this zone's whole bounds shape. See
+  # config/assets/48b4d7e0c79652088cb1bb4a73a25baea58d1738681df133be226a5dfa2b92bd
+  # (docs/specs/Content_Manifest_Spec.md's "navmesh_v1" section).
+  asset_ref: "sha256:48b4d7e0c79652088cb1bb4a73a25baea58d1738681df133be226a5dfa2b92bd"
   format: navmesh_v1
 
 links:

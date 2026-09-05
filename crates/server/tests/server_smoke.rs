@@ -23,7 +23,7 @@
 //! below) — two distinct compiled `.wasm` fixtures loaded into the same
 //! process at once.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::Arc;
 use std::time::Duration;
@@ -594,6 +594,21 @@ async fn register_and_authenticate(
     select_or_create_character(stream, username).await;
 }
 
+/// Copies the repo's shipped `config/assets/` (the real `navmesh_v1`
+/// assets the example zones' `collision.asset_ref`s resolve to, #280)
+/// into `<config_dir>/assets` — every setup helper below needs this now
+/// that movement validation actually resolves and loads real navmesh
+/// bytes at startup, not just checks the reference string's shape.
+fn copy_shared_assets(config_dir: &Path) {
+    let assets_dir = config_dir.join("assets");
+    std::fs::create_dir_all(&assets_dir).unwrap();
+    let repo_assets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../config/assets");
+    for entry in std::fs::read_dir(&repo_assets_dir).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::copy(entry.path(), assets_dir.join(entry.file_name())).unwrap();
+    }
+}
+
 /// Shared per-test config dir: zone manifest, attribute schema, and a
 /// plugin manifest declaring `message_types = [1000]` (#95) and
 /// `chat_commands = ["give"]` (#57/#211's e2e `grant-item` coverage) — a
@@ -698,6 +713,7 @@ hooks = [
         )
         .unwrap();
     }
+    copy_shared_assets(&config_dir);
     config_dir
 }
 
@@ -812,6 +828,7 @@ hooks = ["on-player-join-zone"]
     )
     .unwrap();
 
+    copy_shared_assets(&config_dir);
     config_dir
 }
 
@@ -879,6 +896,7 @@ fn setup_content_pack_config_dir(test_name: &str) -> PathBuf {
         config_dir.join("equipment.schema.yaml"),
     )
     .unwrap();
+    copy_shared_assets(&config_dir);
     config_dir
 }
 
