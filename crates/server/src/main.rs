@@ -252,6 +252,33 @@ async fn main() {
     // per-zone-actor loop below — #181's `/readyz` "zone manifests
     // loaded" check just wants the count, not the manifests themselves.
     let zone_count = zone_manifests.len();
+
+    // Every zone's `collision.asset_ref` resolved to a real, checked
+    // `navmesh_v1` asset (#280) — done once here, up front, rather than
+    // inside `Zone::new`/the tick loop: `world` has no notion of a
+    // config directory or asset store, and re-resolving/re-parsing the
+    // same file on every zone-layer spin-up (`LayerSpawner` below) would
+    // be pure waste since every layer of one zone shares one navmesh.
+    // A missing/mismatched/malformed navmesh asset is a startup-time
+    // panic, same "clear, actionable config error, not a silent runtime
+    // surprise" standard `load_zone_manifests` already applies.
+    let asset_store = content::AssetStore::from_config_dir();
+    let navmeshes: Arc<HashMap<String, Arc<content::NavMesh>>> = Arc::new(
+        zone_manifests
+            .iter()
+            .map(|manifest| {
+                let navmesh =
+                    content::NavMesh::from_asset_store(&asset_store, &manifest.collision.asset_ref)
+                        .unwrap_or_else(|e| {
+                            panic!(
+                                "failed to load the navmesh asset for zone {:?} ({}): {e}",
+                                manifest.id, manifest.collision.asset_ref
+                            )
+                        });
+                (manifest.id.clone(), Arc::new(navmesh))
+            })
+            .collect(),
+    );
     tracing::info!(
         zone_count = zone_manifests.len(),
         default_zone_id,
@@ -634,7 +661,11 @@ async fn main() {
 
     for manifest in zone_manifests.into_iter() {
         let zone_id = manifest.id.clone();
-        let mut zone = Zone::new(manifest.clone(), world_config);
+        let navmesh = navmeshes
+            .get(&zone_id)
+            .cloned()
+            .expect("navmesh loaded for every zone_manifests entry above");
+        let mut zone = Zone::new(manifest.clone(), world_config, navmesh);
         manifests.insert(zone_id.clone(), manifest);
 
         // Created before the zone's actor starts (as before #95) — a
@@ -748,8 +779,13 @@ async fn main() {
     let layer_spawner_plugin_state_store = plugin_state_store.clone();
     let layer_spawner_plugins = plugins.clone();
     let layer_spawner_global_sessions = global_sessions.clone();
+    let layer_spawner_navmeshes = navmeshes.clone();
     let layer_spawner: zone_registry::LayerSpawner = Box::new(move |zone_id, manifest| {
-        let zone = Zone::new(manifest.clone(), layer_spawner_world_config);
+        let navmesh = layer_spawner_navmeshes
+            .get(zone_id)
+            .cloned()
+            .expect("navmesh loaded for every zone this registry knows about");
+        let zone = Zone::new(manifest.clone(), layer_spawner_world_config, navmesh);
         let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
 
         let registry_cell = layer_spawner_registry_cell.clone();

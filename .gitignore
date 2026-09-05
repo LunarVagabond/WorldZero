@@ -23,7 +23,13 @@ config/certs/
 # The local content-addressed asset store (#279,
 # docs/specs/Content_Manifest_Spec.md, "Content-addressing") — real
 # binary asset files a self-hoster drops in by hand, not source.
-config/assets/
+# Exception: the shipped example zones' own navmesh_v1 assets (#280) ARE
+# committed below, the same way config/example-zones/*.yaml is — without
+# them the shipped content-pack.example.yaml/zone.manifest.example.yaml
+# wouldn't actually run out of the box on a fresh clone.
+config/assets/*
+!config/assets/9053d0456606fc25a498de1e85a29615605e870bbda12e4f087420ca9a00c168
+!config/assets/48b4d7e0c79652088cb1bb4a73a25baea58d1738681df133be226a5dfa2b92bd
 
 # A dev's own real config, copied/customized from the tracked
 # config/*.example.* templates (by hand, or by `make quickstart`, #43) —

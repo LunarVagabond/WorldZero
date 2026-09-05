@@ -12,7 +12,12 @@ bounds:
   points: [[0,0], [500,0], [500,500], [0,500]]
 
 collision:
-  asset_ref: "sha256:9f2ac1b3e4d5c6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1"
+  # A real navmesh_v1 asset (#280) — a single flat, walkable polygon
+  # covering this zone's whole bounds shape, enough to prove the
+  # load/resolve/containment pipeline end to end. See
+  # config/assets/9053d0456606fc25a498de1e85a29615605e870bbda12e4f087420ca9a00c168
+  # (docs/specs/Content_Manifest_Spec.md's "navmesh_v1" section).
+  asset_ref: "sha256:9053d0456606fc25a498de1e85a29615605e870bbda12e4f087420ca9a00c168"
   format: navmesh_v1
 
 links:

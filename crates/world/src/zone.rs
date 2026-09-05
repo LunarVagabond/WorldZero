@@ -8,9 +8,11 @@
 //! criteria.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use common::id::EntityId;
 use content::manifest::ZoneManifest;
+use content::navmesh::NavMesh;
 use tokio::time::Instant;
 
 use content::manifest::Route;
@@ -33,6 +35,15 @@ pub enum EntityKind {
 /// (docs/PROPOSAL.md, "Spatial Index: A → Z Roadmap").
 pub struct Zone {
     pub manifest: ZoneManifest,
+    /// The zone's loaded `navmesh_v1` asset (`manifest.collision`,
+    /// resolved through `content::AssetStore` by the caller before
+    /// `Zone::new`, not by `Zone` itself — `world` has no notion of a
+    /// config directory or asset store) — the real walkability authority
+    /// `validate_movement` checks every move against (#280). `Arc`'d
+    /// rather than owned outright so every layer of the same zone
+    /// (`zone_registry::LayerSpawner`) can share one parsed navmesh
+    /// instead of re-parsing/re-hashing the same asset file per layer.
+    navmesh: Arc<NavMesh>,
     config: WorldConfig,
     index: Box<dyn SpatialIndex>,
     entities: HashMap<EntityId, EntityKind>,
@@ -113,10 +124,11 @@ impl MovementOutcome {
 }
 
 impl Zone {
-    pub fn new(manifest: ZoneManifest, config: WorldConfig) -> Self {
+    pub fn new(manifest: ZoneManifest, config: WorldConfig, navmesh: Arc<NavMesh>) -> Self {
         Self {
             index: Box::new(GridIndex::new(config.grid_cell_size_meters)),
             manifest,
+            navmesh,
             config,
             entities: HashMap::new(),
             npc_routes: HashMap::new(),
@@ -299,6 +311,7 @@ impl Zone {
 
             match validate_movement(
                 &self.manifest,
+                &self.navmesh,
                 self.index.as_ref(),
                 entity,
                 self.config.max_speed_meters_per_second,
@@ -369,6 +382,20 @@ impl Zone {
 mod tests {
     use super::*;
 
+    /// A flat, single-floor navmesh covering `[0,0]`-`[max_x,max_y]` at
+    /// `z=0` — every test manifest in this module declares a rectangular
+    /// `bounds`, so a matching flat navmesh is enough to prove the tick
+    /// loop actually calls through to real navmesh containment
+    /// (#280) without every test needing its own bespoke geometry.
+    fn flat_navmesh(max_x: f64, max_y: f64) -> Arc<NavMesh> {
+        Arc::new(
+            NavMesh::from_json(&format!(
+                r#"{{"format":"navmesh_v1","polygons":[{{"vertices":[[0,0,0],[{max_x},0,0],[{max_x},{max_y},0],[0,{max_y},0]]}}]}}"#
+            ))
+            .unwrap(),
+        )
+    }
+
     fn zone_with_square_bounds() -> Zone {
         let manifest = ZoneManifest::from_yaml(
             r#"
@@ -387,7 +414,7 @@ collision:
 "#,
         )
         .unwrap();
-        Zone::new(manifest, WorldConfig::default())
+        Zone::new(manifest, WorldConfig::default(), flat_navmesh(100.0, 100.0))
     }
 
     fn zone_with_a_route() -> Zone {
@@ -414,7 +441,7 @@ routes:
 "#,
         )
         .unwrap();
-        Zone::new(manifest, WorldConfig::default())
+        Zone::new(manifest, WorldConfig::default(), flat_navmesh(100.0, 100.0))
     }
 
     #[test]
@@ -500,6 +527,7 @@ routes:
                 max_speed_meters_per_second: 10_000.0,
                 ..WorldConfig::default()
             },
+            flat_navmesh(100.0, 100.0),
         );
         let entity = EntityId::new();
         zone.spawn(entity, EntityKind::Player, (99.0, 50.0, 0.0));
@@ -624,6 +652,7 @@ links:
                 max_speed_meters_per_second: 10_000.0,
                 ..WorldConfig::default()
             },
+            flat_navmesh(100.0, 100.0),
         );
         let entity = EntityId::new();
         zone.spawn(entity, EntityKind::Player, (49.0, 50.0, 0.0));
@@ -671,7 +700,11 @@ links:
         // The default speed cap (10 m/s at a 50ms tick allows ~0.5m) —
         // this "move" crosses the link edge, but claims to cover 450m in
         // one tick.
-        let mut zone = Zone::new(manifest, WorldConfig::default());
+        let mut zone = Zone::new(
+            manifest,
+            WorldConfig::default(),
+            flat_navmesh(1000.0, 1000.0),
+        );
         let entity = EntityId::new();
         zone.spawn(entity, EntityKind::Player, (49.0, 50.0, 0.0));
 
@@ -726,6 +759,7 @@ links:
                 max_speed_meters_per_second: 10_000.0,
                 ..WorldConfig::default()
             },
+            flat_navmesh(100.0, 100.0),
         );
         let entity = EntityId::new();
         zone.spawn(entity, EntityKind::Npc, (49.0, 50.0, 0.0));

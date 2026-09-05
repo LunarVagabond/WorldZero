@@ -54,7 +54,7 @@ triggers:
 | `bounds.coordinate_system.origin` | `[f64, f64]` | yes | The `(0,0)` point of this zone's local coordinate space. |
 | `bounds.points` | `[[f64, f64], ...]` | yes | At least 3 points (a valid polygon). |
 | `collision.asset_ref` | string | yes | `sha256:<64 lowercase hex chars>` — see "Content-addressing" below. Format is validated by the manifest loader itself; resolving the reference to real, verified bytes is `content::AssetStore`'s job (#279), not the loader's. |
-| `collision.format` | string | yes | `"navmesh_v1"` only for v0. |
+| `collision.format` | string | yes | `"navmesh_v1"` only for v0 — see "`navmesh_v1`" below. |
 | `links[].target_zone` | string | no (array may be empty) | Non-empty string; cross-zone existence is a content-pack-level concern (see below), not checked by a single manifest in isolation. |
 | `links[].edge` | `[[f64,f64], [f64,f64]]` | yes, if a link is present | Exactly 2 points (a line segment). |
 | `links[].bidirectional` | bool | yes, if a link is present | — |
@@ -110,7 +110,41 @@ Cross-zone validation that only makes sense at the pack level happens here, not 
 
 `collision.asset_ref` (and any future binary-asset reference) is `sha256:` followed by the lowercase hex-encoded SHA-256 digest of the asset file's bytes — 64 hex characters, always lowercase, no other encoding. Two zones referencing the same imported geometry produce the same hash and therefore the same `asset_ref`, which is what makes this CDN/cache-friendly and dedup-free-by-construction (proposal, "Content-addressing"). The manifest loader validates only the **shape** of the string (`sha256:` prefix + exactly 64 lowercase hex characters) — resolving it to real, verified bytes is a separate step.
 
-**`content::AssetStore` (#279)** is that separate step: a minimal, local, content-addressed store — `<config_dir>/assets/<sha256-hex>`, a flat directory a self-hoster drops the referenced file into by hand. No upload pipeline, no CDN, no importer tooling (out of scope; per the proposal's Design Principle #2, the server only ever consumes a gameplay-only representation, never authors one). `AssetStore::resolve(asset_ref)` reads `<assets_dir>/<hash>` and verifies the file's *actual* SHA-256 digest matches the reference before returning its bytes — a malformed reference, a missing file, and a hash mismatch are three distinct, clearly-named failure modes, never conflated into one generic "not found." Generic, not navmesh-specific: any future binary asset reference resolves through the same mechanism. Nothing wires a real consumer up to this yet — that's the navmesh-format half split off as its own ticket.
+**`content::AssetStore` (#279)** is that separate step: a minimal, local, content-addressed store — `<config_dir>/assets/<sha256-hex>`, a flat directory a self-hoster drops the referenced file into by hand. No upload pipeline, no CDN, no importer tooling (out of scope; per the proposal's Design Principle #2, the server only ever consumes a gameplay-only representation, never authors one). `AssetStore::resolve(asset_ref)` reads `<assets_dir>/<hash>` and verifies the file's *actual* SHA-256 digest matches the reference before returning its bytes — a malformed reference, a missing file, and a hash mismatch are three distinct, clearly-named failure modes, never conflated into one generic "not found." Generic, not navmesh-specific: any future binary asset reference resolves through the same mechanism.
+
+## `navmesh_v1`
+
+The real format behind `collision.format: navmesh_v1` (#280) — resolved through `content::AssetStore` above and loaded by `content::navmesh::NavMesh`. A JSON payload: a flat list of convex walkable polygons, each a list of real `(x, y, z)` vertices —
+
+```json
+{
+  "format": "navmesh_v1",
+  "polygons": [
+    {
+      "vertices": [
+        [0, 0, 0],
+        [500, 0, 0],
+        [500, 500, 0],
+        [0, 500, 0]
+      ]
+    }
+  ]
+}
+```
+
+| Field | Type | Required | Validation |
+|---|---|---|---|
+| `format` | string | yes | Must equal `"navmesh_v1"` — an asset claiming a different format fails to load rather than being guessed at. |
+| `polygons` | array | yes | At least 1 polygon. |
+| `polygons[].vertices` | `[[f64, f64, f64], ...]` | yes | At least 3 points. |
+
+Authored externally — a content pipeline converts Tiled/glTF/whatever a game's own tooling emits into this simple format at content-build time (the server never owns art tooling, per the proposal's Design Principle #2), then a self-hoster drops the resulting file into `<config_dir>/assets/<sha256-hex>` for `AssetStore` to serve.
+
+**No separate "structure"/"interior" primitive.** A building's interior, a second floor, a doorway — none of these need a new manifest concept. They're just more navmesh geometry: an interior room is walkable polygons inside a building's footprint; a second floor is walkable polygons at a higher `z` that happen to overlap the ground floor's `(x, y)`. "Which floor am I on at this `(x, y)`" resolves by checking which polygon actually contains the point, `z` included — not by a new manifest concept.
+
+**Containment.** `NavMesh::contains((x, y, z))` is real 3D containment, checked per polygon: `(x, y)` must fall inside the polygon's flat projection (standard ray-casting), *and* `z` must land within a small tolerance (0.5m — loose enough to absorb authoring/float noise and a real player's feet not being a mathematical point, tight enough that a second floor several meters up is never mistaken for the ground floor beneath it) of the polygon's own walkable plane at that `(x, y)` — solved from the polygon's plane equation (via a Newell's-method normal), not just the vertices' raw min/max `z`. This is what lets one polygon represent a sloped ramp, not only a perfectly flat floor. A polygon whose plane is (near-)vertical (a wall) never contains anything — there's no meaningful "floor height" to compare against.
+
+**This is the actual walkability authority.** `world::movement::validate_movement` checks a move's destination against navmesh containment, not just `bounds`: `bounds` stays a coarse, flat 2D zone-extent check (still useful for e.g. spatial-indexing bucket sizing), but a destination inside `bounds` yet off every navmesh polygon — inside a wall, above/below a floor, in the gap between two floors — is rejected (`MovementRejection::NotWalkable`), same as a destination outside `bounds` entirely (`MovementRejection::OutOfBounds`).
 
 ## `schema_version` semantics
 
