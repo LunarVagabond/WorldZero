@@ -35,6 +35,31 @@ type ServerSink = futures_util::stream::SplitSink<ServerStream, Envelope>;
 /// insert/remove/iterate — never held across an `.await`.
 pub type Sessions = Arc<Mutex<HashMap<EntityId, mpsc::UnboundedSender<Envelope>>>>;
 
+/// #295's UDP/DTLS association state — process-wide, same locking
+/// discipline as [`Sessions`] (quick synchronous ops only, never held
+/// across an `.await`).
+///
+/// `token_to_entity` resolves a `BindUdp { session_token }` datagram back
+/// to the connection it belongs to (populated/removed alongside
+/// [`Sessions`]'s own insert/remove). Once bound, `remote_by_entity`
+/// answers "does this entity have a live UDP association, and where" for
+/// outbound routing (`session.rs`'s own outgoing-write point), and
+/// `inbound_routes` forwards subsequent datagrams from that remote into
+/// the *owning connection's own task* — required because the live
+/// `WorldHandle`/`zone` for an entity is owned by that task and changes
+/// across zone transitions, so the standalone UDP task in `main.rs` can't
+/// call into it directly.
+#[derive(Clone, Default)]
+pub struct UdpAssociations {
+    pub token_to_entity: Arc<Mutex<HashMap<String, EntityId>>>,
+    pub remote_by_entity: Arc<Mutex<HashMap<EntityId, std::net::SocketAddr>>>,
+    /// The reverse of `remote_by_entity` — how `main`'s standalone UDP
+    /// task resolves an already-bound inbound datagram's source address
+    /// back to the entity it belongs to, without re-parsing `BindUdp`.
+    pub entity_by_remote: Arc<Mutex<HashMap<std::net::SocketAddr, EntityId>>>,
+    pub inbound_routes: Arc<Mutex<HashMap<EntityId, mpsc::UnboundedSender<Envelope>>>>,
+}
+
 /// Which `character` row a connected player entity belongs to — the
 /// resolution `plugin_host`'s `apply-stat-delta` needs (a plugin only
 /// knows the opaque entity id; the actual stat write is per-character),
@@ -393,6 +418,14 @@ pub struct SessionDeps {
     /// final disconnect; it's untouched by `ZoneChanged` zone-hops, since
     /// the same connection/`outgoing_tx` carries straight through those.
     pub global_sessions: Sessions,
+    /// #295's UDP/DTLS association state, shared with `main`'s standalone
+    /// UDP task — see [`UdpAssociations`]'s own doc comment.
+    pub udp_associations: UdpAssociations,
+    /// A clone of `gateway::udp::DtlsChannels::outgoing` (`main`'s single
+    /// bound UDP socket) — how this connection's task sends a
+    /// `WORLD_MESSAGE_TYPE` envelope over UDP once `udp_associations`
+    /// shows it has a live association, instead of writing to `sink`/TCP.
+    pub udp_outgoing: mpsc::UnboundedSender<(std::net::SocketAddr, Envelope)>,
 }
 
 pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Result<()> {
@@ -426,7 +459,11 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
         &auth::gateway_protocol::ServerMessage::Authenticated {
             account_id,
             username: username.clone(),
-            session_token,
+            // Cloned, not moved — #295's UDP `BindUdp` association needs
+            // this connection's own copy of the token later, to register
+            // it in `deps.udp_associations.token_to_entity` once
+            // `entity_id` exists.
+            session_token: session_token.clone(),
             roles,
         },
     )
@@ -942,6 +979,25 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
         .lock()
         .unwrap()
         .insert(entity_id, outgoing_tx.clone());
+
+    // #295: this connection becomes reachable over UDP the moment a
+    // `BindUdp { session_token }` datagram (sent to `main`'s standalone
+    // UDP task) resolves back to `entity_id` via `token_to_entity` —
+    // `inbound_udp_tx`/`inbound_udp_rx` is how that task then forwards
+    // this entity's subsequent datagrams into this task's own `select!`
+    // loop below, since only this task's `zone`/`WorldHandle` is current
+    // across zone transitions.
+    let (inbound_udp_tx, mut inbound_udp_rx) = mpsc::unbounded_channel::<Envelope>();
+    deps.udp_associations
+        .token_to_entity
+        .lock()
+        .unwrap()
+        .insert(session_token.clone(), entity_id);
+    deps.udp_associations
+        .inbound_routes
+        .lock()
+        .unwrap()
+        .insert(entity_id, inbound_udp_tx);
 
     queue(
         &outgoing_tx,
@@ -1728,6 +1784,13 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
                                 }
                             }
                         }
+                        Ok(ClientMessage::BindUdp { .. }) => {
+                            // #295: BindUdp is a UDP-only handshake
+                            // message (see its own doc comment) — a
+                            // client sending it over TCP is a protocol
+                            // mistake, not something to act on.
+                            tracing::warn!(%entity_id, "received BindUdp over TCP, ignoring");
+                        }
                         Err(e) => {
                             send_world(&mut sink, &ServerMessage::Error { message: e.to_string() }).await?;
                         }
@@ -1801,6 +1864,41 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
                     .await?;
                 }
             }
+            // #295: a datagram `main`'s standalone UDP task forwarded
+            // here after resolving it to this entity via `BindUdp`.
+            // Deliberately narrow — only `Move`/`Ping`, the two message
+            // types docs/specs/Networking_Spec.md's framing section
+            // actually calls loss-tolerant ("position updates and combat
+            // ticks"). Everything else `WORLD_MESSAGE_TYPE` covers
+            // (`Attack`, `JoinGroupLayer`, party/guild/trade, ...) has
+            // real validation/side-effect logic living in the
+            // `maybe_frame` branch above; rather than duplicate it here,
+            // a well-behaved client simply never sends those over UDP,
+            // and one that does gets logged and ignored, not served.
+            Some(envelope) = inbound_udp_rx.recv() => {
+                match ClientMessage::from_envelope(&envelope) {
+                    Ok(ClientMessage::Move { x, y, z, seq }) => {
+                        zone.world.request_move(entity_id, (x, y, z), seq);
+                    }
+                    Ok(ClientMessage::Ping { client_sent_at }) => {
+                        // `queue`, not `send_world` — this reply must go
+                        // out through the same UDP-vs-TCP routing every
+                        // other outgoing envelope uses (the
+                        // `outgoing_rx` branch below), not straight to
+                        // `sink`/TCP.
+                        queue(&outgoing_tx, &ServerMessage::Pong {
+                            client_sent_at,
+                            server_time: unix_millis_now(),
+                        });
+                    }
+                    Ok(other) => tracing::warn!(
+                        ?other,
+                        %entity_id,
+                        "received a non-Move/Ping message over the UDP channel, ignoring"
+                    ),
+                    Err(e) => tracing::warn!(error = %e, %entity_id, "failed to decode a UDP world message"),
+                }
+            }
             Some(envelope) = outgoing_rx.recv() => {
                 // A `ZoneChanged` envelope both goes out to the client
                 // (below, same as any other envelope) and tells this
@@ -1870,9 +1968,33 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
                         }
                     }
                 }
-                let send_result = sink.send(envelope).await;
-                if send_result.is_err() {
-                    break;
+                // #295: once this entity has a live UDP association,
+                // every WORLD_MESSAGE_TYPE envelope addressed to it — its
+                // own Moved/Rejected/Pong, and any Moved/EntitySpawned/
+                // EntityDespawned broadcast about another entity it
+                // observes — goes out over UDP instead of TCP. This is
+                // the single choke point for all of that: every push to
+                // this entity, whoever originated it, already funnels
+                // through this same `outgoing_rx`. Everything else
+                // (chat, party/guild/trade, realm, auth) always stays on
+                // `sink`/TCP.
+                let udp_remote = if envelope.message_type == WORLD_MESSAGE_TYPE {
+                    deps.udp_associations
+                        .remote_by_entity
+                        .lock()
+                        .unwrap()
+                        .get(&entity_id)
+                        .copied()
+                } else {
+                    None
+                };
+                if let Some(remote) = udp_remote {
+                    let _ = deps.udp_outgoing.send((remote, envelope));
+                } else {
+                    let send_result = sink.send(envelope).await;
+                    if send_result.is_err() {
+                        break;
+                    }
                 }
             }
         }
@@ -1893,6 +2015,29 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
     zone.world.despawn(entity_id);
     zone.sessions.lock().unwrap().remove(&entity_id);
     deps.global_sessions.lock().unwrap().remove(&entity_id);
+    deps.udp_associations
+        .token_to_entity
+        .lock()
+        .unwrap()
+        .remove(&session_token);
+    deps.udp_associations
+        .inbound_routes
+        .lock()
+        .unwrap()
+        .remove(&entity_id);
+    if let Some(remote) = deps
+        .udp_associations
+        .remote_by_entity
+        .lock()
+        .unwrap()
+        .remove(&entity_id)
+    {
+        deps.udp_associations
+            .entity_by_remote
+            .lock()
+            .unwrap()
+            .remove(&remote);
+    }
     deps.entity_characters.lock().unwrap().remove(&entity_id);
     deps.character_entities
         .lock()

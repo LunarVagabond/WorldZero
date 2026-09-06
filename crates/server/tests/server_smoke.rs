@@ -85,6 +85,8 @@ const TRADE_DECLINE_ADDR: &str = "127.0.0.1:7965";
 const TRADE_CANCEL_ADDR: &str = "127.0.0.1:7966";
 const TRADE_REVALIDATION_ADDR: &str = "127.0.0.1:7967";
 const REGISTER_ITEM_ON_MESSAGE_ADDR: &str = "127.0.0.1:7968";
+const BIND_UDP_ADDR: &str = "127.0.0.1:7969";
+const BIND_UDP_UDP_ADDR: &str = "127.0.0.1:7970";
 const SESSION_RESUME_INVALID_ADDR: &str = "127.0.0.1:7931";
 const MOVE_CORRELATION_ADDR: &str = "127.0.0.1:7932";
 const PING_PONG_ADDR: &str = "127.0.0.1:7933";
@@ -355,10 +357,22 @@ async fn start_server_with_env(
     chat_enabled: bool,
     extra_env: &[(&str, &str)],
 ) -> ServerProcess {
+    // #295: every test gets its own UDP port too, derived from its own
+    // unique TCP `addr` (same "TCP+1" convention `main.rs`'s own
+    // `DEFAULT_UDP_ADDR` uses) — overridden below by `extra_env` for the
+    // handful of tests that want a specific one. Without this, every test
+    // that doesn't pass its own `WZ_GATEWAY_UDP_ADDR` would fall back to
+    // the same hardcoded default and race for that one UDP port when the
+    // suite runs in parallel.
+    let (host, tcp_port) = addr.rsplit_once(':').expect("addr must be host:port");
+    let udp_port: u16 = tcp_port.parse::<u16>().expect("addr port must be numeric") + 1;
+    let default_udp_addr = format!("{host}:{udp_port}");
+
     let mut command = Command::new(env!("CARGO_BIN_EXE_server"));
     command
         .env("WZ_CONFIG_DIR", config_dir)
         .env("WZ_SERVER_ADDR", addr)
+        .env("WZ_GATEWAY_UDP_ADDR", &default_udp_addr)
         .env(
             "WZ_SERVICE_CHAT_ENABLED",
             if chat_enabled { "true" } else { "false" },
@@ -3609,6 +3623,132 @@ async fn ping_gets_a_pong_with_the_echoed_timestamp_and_a_server_time() {
             break;
         }
     }
+}
+
+/// #295: a client that completes the UDP/DTLS handshake and sends
+/// `BindUdp { session_token }` gets `UdpBound` back over that same UDP
+/// channel, and from then on its `WORLD_MESSAGE_TYPE` traffic (`Move` ->
+/// `Moved`, both directions) travels over UDP instead of TCP — the whole
+/// point of wiring `gateway::udp` in. Reuses the same self-signed cert
+/// material as the TCP connection (`gateway::udp::certificate_from`,
+/// same reasoning as the real client: one keypair, one fingerprint).
+#[tokio::test]
+#[ignore]
+async fn bind_udp_associates_the_session_and_moves_travel_over_udp() {
+    let config_dir = setup_config_dir("bind-udp");
+    let _server = start_server_with_env(
+        &config_dir,
+        BIND_UDP_ADDR,
+        true,
+        &[("WZ_GATEWAY_UDP_ADDR", BIND_UDP_UDP_ADDR)],
+    )
+    .await;
+    wait_for_port(BIND_UDP_ADDR).await;
+
+    let username = format!("smoke-{}", uuid::Uuid::now_v7());
+    let mut stream = connect(&config_dir, BIND_UDP_ADDR).await;
+    send_auth(
+        &mut stream,
+        &AuthClientMessage::Register {
+            username: username.clone(),
+            password: "hunter2".to_string(),
+        },
+    )
+    .await;
+    let session_token = match recv_auth(&mut stream).await {
+        AuthServerMessage::Authenticated { session_token, .. } => session_token,
+        other => panic!("expected Authenticated, got {other:?}"),
+    };
+    select_realm(&mut stream, _server.realm_id).await;
+    select_or_create_character(&mut stream, &username).await;
+    loop {
+        if let ServerMessage::Joined { .. } = recv_world(&mut stream).await {
+            break;
+        }
+    }
+
+    // The plugin fixture's on-player-join-zone hook broadcasts a
+    // PluginMessage right at zone join — a real WORLD_MESSAGE_TYPE
+    // message that legitimately went out over TCP, since it was sent
+    // before BindUdp below ever ran. Drain it (and anything else still
+    // in flight from before the bind) so the later "no TCP traffic"
+    // assertion only ever catches something sent *after* this
+    // connection is actually UDP-bound.
+    while tokio::time::timeout(Duration::from_millis(200), stream.next())
+        .await
+        .is_ok()
+    {}
+
+    let udp_remote: std::net::SocketAddr = BIND_UDP_UDP_ADDR.parse().unwrap();
+    let cert = gateway::tls::load_or_generate(&config_dir).unwrap();
+    let client_cert = gateway::udp::certificate_from(&cert).unwrap();
+    let udp = gateway::udp::connect(udp_remote, client_cert)
+        .await
+        .unwrap();
+    let mut udp = udp;
+    tokio::time::timeout(STEP_TIMEOUT, udp.handshake_complete.recv())
+        .await
+        .expect("DTLS handshake timed out")
+        .expect("handshake channel closed");
+
+    udp.outgoing
+        .send((
+            udp_remote,
+            ClientMessage::BindUdp {
+                session_token: session_token.clone(),
+            }
+            .into_envelope()
+            .unwrap(),
+        ))
+        .unwrap();
+    let (_, ack) = tokio::time::timeout(STEP_TIMEOUT, udp.incoming.recv())
+        .await
+        .expect("timed out waiting for UdpBound")
+        .expect("UDP channel closed");
+    assert!(matches!(
+        ServerMessage::from_envelope(&ack).unwrap(),
+        ServerMessage::UdpBound {}
+    ));
+
+    const MOVE_TO: (f64, f64) = (0.4, 0.1);
+    udp.outgoing
+        .send((
+            udp_remote,
+            ClientMessage::Move {
+                x: MOVE_TO.0,
+                y: MOVE_TO.1,
+                z: 0.0,
+                seq: 1,
+            }
+            .into_envelope()
+            .unwrap(),
+        ))
+        .unwrap();
+
+    loop {
+        let (_, envelope) = tokio::time::timeout(STEP_TIMEOUT, udp.incoming.recv())
+            .await
+            .expect("timed out waiting for Moved over UDP")
+            .expect("UDP channel closed");
+        match ServerMessage::from_envelope(&envelope).unwrap() {
+            ServerMessage::Moved { x, y, seq, .. } => {
+                assert_eq!((x, y), MOVE_TO);
+                assert_eq!(seq, 1);
+                break;
+            }
+            ServerMessage::Rejected { reason, .. } => panic!("move rejected: {reason}"),
+            _ => {}
+        }
+    }
+
+    // Once bound, this connection's WORLD_MESSAGE_TYPE traffic never
+    // touches TCP again — confirm the TCP stream stays silent rather than
+    // also delivering the same Moved.
+    let tcp_silence = tokio::time::timeout(Duration::from_millis(300), stream.next()).await;
+    assert!(
+        tcp_silence.is_err(),
+        "expected no WORLD_MESSAGE_TYPE traffic over TCP once UDP-bound, got {tcp_silence:?}"
+    );
 }
 
 /// #197: an NPC entity — no character row, no `entity_characters` entry

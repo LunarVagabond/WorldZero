@@ -119,14 +119,18 @@ use futures_util::StreamExt;
 use session::{
     AccountEntities, ActiveTrades, BlockedZoneChannels, CharacterEntities, EntityAccounts,
     EntityCharacters, EntityRoles, NpcStats, PendingGuildInvites, PendingPartyInvites,
-    PendingTradeRequests, SessionDeps, Sessions,
+    PendingTradeRequests, SessionDeps, Sessions, UdpAssociations,
 };
-use session_protocol::{RosterEntry, ServerMessage};
+use session_protocol::{ClientMessage, RosterEntry, ServerMessage, WORLD_MESSAGE_TYPE};
 use tokio::sync::mpsc;
 use world::{EntityKind, MovementOutcome, Point, Zone};
 use zone_registry::{ZoneRegistry, ZoneRuntime};
 
 const DEFAULT_ADDR: &str = "127.0.0.1:7900";
+/// #295: one port above `DEFAULT_ADDR` by convention — an operator who
+/// hasn't set `WZ_GATEWAY_UDP_ADDR` still gets a predictable UDP port
+/// next to the TCP one.
+const DEFAULT_UDP_ADDR: &str = "127.0.0.1:7901";
 const DEFAULT_METRICS_ADDR: &str = "127.0.0.1:9090";
 /// #181's `/healthz`/`/readyz` listener — a distinct port from
 /// `WZ_METRICS_ADDR`'s default (#48) rather than the next one along, so
@@ -911,6 +915,26 @@ async fn main() {
         .expect("failed to bind the gateway TCP listener");
     tracing::info!(%local_addr, "worldzero server listening");
 
+    // #295: the DTLS/UDP channel, same cert material as TCP+TLS
+    // (`gateway::udp::certificate_from` exists for exactly this reuse —
+    // one keypair, one fingerprint an operator manages). See
+    // `handle_udp_datagrams` below for the association handshake this
+    // feeds into `session::UdpAssociations`.
+    let udp_addr =
+        std::env::var("WZ_GATEWAY_UDP_ADDR").unwrap_or_else(|_| DEFAULT_UDP_ADDR.to_string());
+    let dtls_cert =
+        gateway::udp::certificate_from(&cert).expect("failed to derive the DTLS certificate");
+    let udp_channels = gateway::udp::listen(&udp_addr, dtls_cert)
+        .await
+        .expect("failed to bind the gateway UDP listener");
+    tracing::info!(local_addr = %udp_channels.local_addr, "worldzero UDP/DTLS channel listening");
+    let udp_associations = UdpAssociations::default();
+    tokio::spawn(handle_udp_datagrams(
+        udp_channels.incoming,
+        udp_channels.outgoing.clone(),
+        udp_associations.clone(),
+    ));
+
     let deps = Arc::new(SessionDeps {
         auth_provider,
         character_store,
@@ -952,6 +976,8 @@ async fn main() {
         plugin_state_store,
         plugin_state_cache,
         global_sessions,
+        udp_associations,
+        udp_outgoing: udp_channels.outgoing,
     });
 
     let mut incoming = Box::pin(incoming);
@@ -1333,6 +1359,86 @@ fn send_to(sessions: &Sessions, entity_id: common::id::EntityId, message: Server
     };
     if let Some(sender) = sessions.lock().unwrap().get(&entity_id) {
         let _ = sender.send(envelope);
+    }
+}
+
+/// #295's standalone UDP task, owning `gateway::udp::DtlsChannels::incoming`
+/// for the whole process's lifetime. Every datagram is either a `BindUdp`
+/// association handshake (handled inline here, purely a map update — see
+/// [`UdpAssociations`]'s own doc comment) or gets forwarded, unmodified,
+/// into the owning connection's own `session::handle_session` task via
+/// `inbound_routes` — this task never touches a `Zone`/`WorldHandle`
+/// itself, since a connection's own task is the only place that state is
+/// current across zone transitions.
+async fn handle_udp_datagrams(
+    mut incoming: tokio::sync::mpsc::UnboundedReceiver<(std::net::SocketAddr, gateway::Envelope)>,
+    outgoing: tokio::sync::mpsc::UnboundedSender<(std::net::SocketAddr, gateway::Envelope)>,
+    udp_associations: UdpAssociations,
+) {
+    while let Some((remote, envelope)) = incoming.recv().await {
+        if envelope.message_type != WORLD_MESSAGE_TYPE {
+            tracing::warn!(%remote, message_type = envelope.message_type, "unexpected message_type over UDP, ignoring");
+            continue;
+        }
+        match ClientMessage::from_envelope(&envelope) {
+            Ok(ClientMessage::BindUdp { session_token }) => {
+                let entity_id = udp_associations
+                    .token_to_entity
+                    .lock()
+                    .unwrap()
+                    .get(&session_token)
+                    .copied();
+                let Some(entity_id) = entity_id else {
+                    // Unknown/expired token — see BindUdp's own doc
+                    // comment on why this is silently ignored rather
+                    // than answered with an Error.
+                    tracing::warn!(%remote, "BindUdp with an unrecognized session_token, ignoring");
+                    continue;
+                };
+                udp_associations
+                    .remote_by_entity
+                    .lock()
+                    .unwrap()
+                    .insert(entity_id, remote);
+                udp_associations
+                    .entity_by_remote
+                    .lock()
+                    .unwrap()
+                    .insert(remote, entity_id);
+                tracing::info!(%remote, %entity_id, "UDP association bound");
+                if let Ok(ack) = (ServerMessage::UdpBound {}).into_envelope() {
+                    let _ = outgoing.send((remote, ack));
+                }
+            }
+            _ => {
+                // Anything else (a decode failure counts too) only makes
+                // sense once `remote` is already bound to an entity —
+                // route it into that connection's own task, same as any
+                // other already-authenticated request.
+                let entity_id = udp_associations
+                    .entity_by_remote
+                    .lock()
+                    .unwrap()
+                    .get(&remote)
+                    .copied();
+                match entity_id {
+                    Some(entity_id) => {
+                        let sender = udp_associations
+                            .inbound_routes
+                            .lock()
+                            .unwrap()
+                            .get(&entity_id)
+                            .cloned();
+                        if let Some(sender) = sender {
+                            let _ = sender.send(envelope);
+                        }
+                    }
+                    None => {
+                        tracing::warn!(%remote, "UDP datagram from an unbound remote, ignoring");
+                    }
+                }
+            }
+        }
     }
 }
 

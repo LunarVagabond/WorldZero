@@ -46,7 +46,7 @@ world_zero/                      <- the backend, a Rust cargo workspace
   config/          - example YAML configs you'll copy from
 ```
 
-`server` is one binary that runs auth + character + world + gateway + content + chat + realm-directory (+ a plugin-host slice) as a single combined process. There is no separate "API server" vs "realtime server" — **one TCP+TLS connection carries everything**: auth handshake, realm select, character select, world/movement, chat, and any plugin-custom messages, multiplexed by a `message_type` field on every message.
+`server` is one binary that runs auth + character + world + gateway + content + chat + realm-directory (+ a plugin-host slice) as a single combined process. There is no separate "API server" vs "realtime server" — **one TCP+TLS connection carries everything**: auth handshake, realm select, character select, world/movement, chat, and any plugin-custom messages, multiplexed by a `message_type` field on every message. As of #295, world/movement traffic (`message_type` 200) can optionally move onto a second UDP/DTLS connection once bound — see §2.1 — but TCP alone still carries everything if you don't build that.
 
 **There is no REST/HTTP API for gameplay.** The only HTTP endpoints in the whole system are a Prometheus `/metrics` text endpoint (`WZ_METRICS_ADDR`, default `127.0.0.1:9090`) and `/healthz`/`/readyz` liveness/readiness endpoints (#181, `WZ_HEALTH_ADDR`, default `127.0.0.1:9091`) — none of these are something a game client calls. Everything gameplay-related is the TCP+TLS protocol below.
 
@@ -63,10 +63,10 @@ Source of truth: `world_zero/crates/gateway/src/envelope.rs`, and the `.proto` f
 
 ### 2.1 Transport
 
-- **Plain TCP wrapped in TLS.** One socket, one connection, for the whole session (auth + realm + character + world + chat + plugin messages all multiplexed over it).
+- **Plain TCP wrapped in TLS.** One socket, one connection, for the whole session (auth + realm + character + world + chat + plugin messages all multiplexed over it). This is the only transport required — everything below in this doc works over TCP alone.
 - Default listen address: `127.0.0.1:7900` (`WZ_SERVER_ADDR`, configurable).
-- **There is a UDP/DTLS transport module in the `gateway` crate (`udp.rs`) but `server`'s `main.rs` never wires it up.** The runnable server today is TCP-only. Do not build a UDP path — there is nothing listening on it.
 - **TLS certificate:** by default `server` generates a self-signed cert for `"localhost"` and caches it at `<config_dir>/certs/self_signed.cert.der` (`world_zero/crates/gateway/src/tls.rs`). Your client needs to either (a) trust that exact certificate (read the same `.der` file `server` generated, add it as a trusted root — this is exactly what World Zero's own Rust integration test client does, see `world_zero/crates/server/tests/server_smoke.rs`'s `connect()`), or (b) disable certificate validation entirely for local dev (acceptable for a disposable test client talking to `localhost`). Either is fine; document which one you chose in this project's own README.
+- **UDP/DTLS (optional, #295).** `server`'s `main.rs` also stands up a DTLS/UDP listener at `WZ_GATEWAY_UDP_ADDR` (default `127.0.0.1:7901`), reusing the same cert. It carries the exact same `message_type` 200 envelopes as TCP, just bare-datagram framed (no 4-byte length prefix — a datagram already has a natural boundary). To use it: complete the ordinary TCP handshake through `Joined` first (you need `Authenticated.session_token`), separately complete a DTLS handshake to the UDP address, send `BindUdp { session_token }` as your first UDP datagram, and wait for `UdpBound {}` back over that same UDP path. Once bound, send `Move`/`Ping` over UDP instead of TCP, and every `message_type` 200 reply addressed to you (including broadcasts about other entities) arrives over UDP too — everything outside `message_type` 200 is unaffected and always stays on TCP. This is genuinely optional: skip it and stay TCP-only, nothing else in this doc changes.
 
 ### 2.2 Framing (byte layout)
 
@@ -88,7 +88,7 @@ This is `tokio_util::codec::LengthDelimitedCodec` (default config: big-endian u3
 | `2` | `server::realm_protocol` | `realm.proto` | Realm discovery/selection (#136/#192) — required right after auth succeeds, before anything else is accepted |
 | `3` | `server::character_protocol` | `character.proto` | Character list/create/select (#193) — required right after realm selection, before world-join |
 | `100` | `chat::gateway_protocol` | `chat.proto` | Join/leave/send chat, gated behind auth |
-| `200` | `server::session_protocol` | `session.proto` | Move, attack, use item, interact, party, guild — zone/world traffic, gated behind having a selected character |
+| `200` | `server::session_protocol` | `session.proto` | Move, attack, use item, interact, party, guild — zone/world traffic, gated behind having a selected character. Also carries `BindUdp`/`UdpBound` (#295), the optional UDP-association handshake — see §2.1. |
 | `>= 1000` | plugin-declared, opaque | none (whatever the plugin defines) | Routed to a specific loaded plugin's `on-message` hook — see §7 |
 | everything else in `0-999` not listed above | core-reserved | — | Don't use — this range is reserved for future core message types |
 
