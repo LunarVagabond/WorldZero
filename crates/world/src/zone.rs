@@ -62,6 +62,12 @@ pub struct Zone {
     /// spawn-table-originated NPC spawns; never populated for a player.
     entity_types: HashMap<EntityId, String>,
     pending_moves: Vec<(EntityId, Point, u32)>,
+    /// Queued via `request_teleport` (#307) — applied on the next `tick`
+    /// same as `pending_moves`, but skipping `validate_movement` entirely
+    /// (no speed cap, no collision, no navmesh check). Deliberately
+    /// separate from `pending_moves` rather than a flag on the same
+    /// queue, so the two code paths in `tick()` can never be confused.
+    pending_teleports: Vec<(EntityId, Point)>,
     /// How many ticks this zone has run since it was created (#196) — the
     /// server-authoritative counter `Moved`/`Rejected`/`Joined`/
     /// `ZoneChanged` stamp so a client can reason about ordering/staleness
@@ -134,6 +140,7 @@ impl Zone {
             npc_routes: HashMap::new(),
             entity_types: HashMap::new(),
             pending_moves: Vec::new(),
+            pending_teleports: Vec::new(),
             tick_count: 0,
         }
     }
@@ -243,6 +250,19 @@ impl Zone {
         self.pending_moves.push((entity, to, seq));
     }
 
+    /// Queues a direct position write for the next `tick` (#307,
+    /// `teleport-entity`'s host-function backing) — unlike
+    /// [`Self::request_move`], never validated: no speed cap, no
+    /// collision, no navmesh containment. A deliberate escape hatch for
+    /// admin/QA tooling, not a gameplay primitive. Applied as an ordinary
+    /// `MovementOutcome::Applied { seq: 0, .. }` (same "no client seq to
+    /// echo" convention `move-entity`'s queued moves already use), so
+    /// every existing broadcast/UDP-routing call site handles it exactly
+    /// like any other accepted move with zero changes.
+    pub fn request_teleport(&mut self, entity: EntityId, to: Point) {
+        self.pending_teleports.push((entity, to));
+    }
+
     /// Advances the simulation by exactly one tick at the configured
     /// fixed rate. Pure and synchronous — the async wall-clock scheduling
     /// lives in [`Self::run`], kept separate so tick logic itself is
@@ -327,6 +347,19 @@ impl Zone {
                     outcomes.push((entity, MovementOutcome::Rejected { seq, rejection }));
                 }
             }
+        }
+
+        // #307: teleports skip `validate_movement` on purpose — see
+        // `request_teleport`'s own doc comment. `seq: 0` since there's no
+        // client request to correlate back to (same convention
+        // plugin-driven `move-entity` moves already use).
+        for (entity, to) in std::mem::take(&mut self.pending_teleports) {
+            if self.index.position_of(entity).is_none() {
+                // Not currently spawned in this zone — nothing to move.
+                continue;
+            }
+            self.index.update(entity, to);
+            outcomes.push((entity, MovementOutcome::Applied { seq: 0, to }));
         }
 
         outcomes
@@ -546,6 +579,53 @@ routes:
             ) if e == entity
         ));
         assert_eq!(zone.position_of(entity), Some((99.0, 50.0, 0.0)));
+    }
+
+    #[test]
+    fn a_teleport_bypasses_validation_that_would_reject_the_same_move() {
+        // Same setup `an_out_of_bounds_move_is_rejected_and_position_is_unchanged`
+        // uses to force a real rejection via `request_move` — proving
+        // `request_teleport` succeeds at the exact same destination is the
+        // whole point of #307's escape hatch.
+        let manifest = zone_with_square_bounds().manifest;
+        let mut zone = Zone::new(
+            manifest,
+            WorldConfig {
+                max_speed_meters_per_second: 10_000.0,
+                ..WorldConfig::default()
+            },
+            flat_navmesh(100.0, 100.0),
+        );
+        let entity = EntityId::new();
+        zone.spawn(entity, EntityKind::Player, (99.0, 50.0, 0.0));
+
+        zone.request_teleport(entity, (500.0, 50.0, 0.0));
+        let outcomes = zone.tick();
+
+        assert_eq!(
+            outcomes,
+            vec![(
+                entity,
+                MovementOutcome::Applied {
+                    seq: 0,
+                    to: (500.0, 50.0, 0.0)
+                }
+            )]
+        );
+        assert_eq!(zone.position_of(entity), Some((500.0, 50.0, 0.0)));
+    }
+
+    #[test]
+    fn a_teleport_for_a_despawned_entity_is_silently_skipped() {
+        let mut zone = zone_with_square_bounds();
+        let entity = EntityId::new();
+        zone.spawn(entity, EntityKind::Player, (50.0, 50.0, 0.0));
+        zone.despawn(entity);
+
+        zone.request_teleport(entity, (60.0, 60.0, 0.0));
+        let outcomes = zone.tick();
+
+        assert!(outcomes.is_empty());
     }
 
     #[test]

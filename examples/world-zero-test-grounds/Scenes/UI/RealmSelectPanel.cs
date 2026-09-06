@@ -54,7 +54,7 @@ public partial class RealmSelectPanel : Control
     private void BuildStatusLabel(Control parent)
     {
         _statusLabel = UiHelpers.AddWrappingLabel(parent);
-        _statusLabel.Modulate = new Color(1f, 0.35f, 0.35f);
+        _statusLabel.Modulate = AppTheme.Error;
     }
 
     private void BuildRealmListSection(Control parent)

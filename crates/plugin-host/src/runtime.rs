@@ -122,6 +122,18 @@ pub trait HostCallbacks: Send + 'static {
         z: f64,
     ) -> std::result::Result<(), String>;
 
+    /// Places `entity_id` at `(x, y, z)` directly (`wit/plugin.wit`'s
+    /// `teleport-entity`, #307) — applied on the zone's next tick same as
+    /// `move_entity`, but skipping `validate_movement` entirely. A real,
+    /// deliberately unrestricted teleport for admin/QA tooling.
+    fn teleport_entity(
+        &mut self,
+        entity_id: &str,
+        x: f64,
+        y: f64,
+        z: f64,
+    ) -> std::result::Result<(), String>;
+
     /// Grants an item stack (`wit/plugin.wit`'s `grant-item`) — queued,
     /// applied through `character::CharacterStore::grant_item` (#112).
     fn grant_item(
@@ -232,13 +244,14 @@ pub trait HostCallbacks: Send + 'static {
 /// entity by id, not just the one a hook call was actually about.
 fn required_capability(function: &str) -> Option<&'static str> {
     use crate::manifest::{
-        CAPABILITY_COMBAT, CAPABILITY_ECONOMY, CAPABILITY_MESSAGING, CAPABILITY_MOVEMENT,
-        CAPABILITY_SPAWNING,
+        CAPABILITY_ADMIN, CAPABILITY_COMBAT, CAPABILITY_ECONOMY, CAPABILITY_MESSAGING,
+        CAPABILITY_MOVEMENT, CAPABILITY_SPAWNING,
     };
     match function {
         "spawn-npc" => Some(CAPABILITY_SPAWNING),
         "send-message" => Some(CAPABILITY_MESSAGING),
         "move-entity" => Some(CAPABILITY_MOVEMENT),
+        "teleport-entity" => Some(CAPABILITY_ADMIN),
         "apply-stat-delta"
         | "apply-stat-delta-for-character"
         | "report-death"
@@ -334,6 +347,17 @@ impl HostCallbacks for CapabilityGatedCallbacks {
     ) -> std::result::Result<(), String> {
         self.check("move-entity")?;
         self.inner.move_entity(entity_id, x, y, z)
+    }
+
+    fn teleport_entity(
+        &mut self,
+        entity_id: &str,
+        x: f64,
+        y: f64,
+        z: f64,
+    ) -> std::result::Result<(), String> {
+        self.check("teleport-entity")?;
+        self.inner.teleport_entity(entity_id, x, y, z)
     }
 
     fn grant_item(
@@ -482,6 +506,16 @@ impl HostInterface for PluginState {
         z: f64,
     ) -> std::result::Result<(), String> {
         self.callbacks.move_entity(&entity_id, x, y, z)
+    }
+
+    fn teleport_entity(
+        &mut self,
+        entity_id: String,
+        x: f64,
+        y: f64,
+        z: f64,
+    ) -> std::result::Result<(), String> {
+        self.callbacks.teleport_entity(&entity_id, x, y, z)
     }
 
     fn grant_item(
@@ -1041,6 +1075,15 @@ mod tests {
         ) -> std::result::Result<(), String> {
             Ok(())
         }
+        fn teleport_entity(
+            &mut self,
+            _: &str,
+            _: f64,
+            _: f64,
+            _: f64,
+        ) -> std::result::Result<(), String> {
+            Ok(())
+        }
         fn grant_item(&mut self, _: &str, _: &str, _: i64) -> std::result::Result<(), String> {
             Ok(())
         }
@@ -1123,6 +1166,7 @@ mod tests {
         assert!(none.spawn_npc("table").is_err());
         assert!(none.send_message("e1", "hi").is_err());
         assert!(none.move_entity("e1", 0.0, 0.0, 0.0).is_err());
+        assert!(none.teleport_entity("e1", 0.0, 0.0, 0.0).is_err());
         assert!(none.apply_stat_delta("e1", "hp", -1).is_err());
         assert!(none.apply_stat_delta_for_character("c1", "hp", -1).is_err());
         assert!(none.report_death("e1").is_err());
@@ -1143,7 +1187,12 @@ mod tests {
 
         let mut movement = gated(&["movement"]);
         assert!(movement.move_entity("e1", 0.0, 0.0, 0.0).is_ok());
+        assert!(movement.teleport_entity("e1", 0.0, 0.0, 0.0).is_err());
         assert!(movement.apply_stat_delta("e1", "hp", -1).is_err());
+
+        let mut admin = gated(&["admin"]);
+        assert!(admin.teleport_entity("e1", 0.0, 0.0, 0.0).is_ok());
+        assert!(admin.move_entity("e1", 0.0, 0.0, 0.0).is_err());
 
         let mut combat = gated(&["combat"]);
         assert!(combat.apply_stat_delta("e1", "hp", -1).is_ok());

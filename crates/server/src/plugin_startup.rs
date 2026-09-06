@@ -83,6 +83,11 @@ pub struct PluginCallbacks {
     /// `(entity_id, x, y, z)`, drained and applied via
     /// `world::Zone::request_move` by the caller.
     pending_moves: PendingMoves,
+    /// `(entity_id, x, y, z)` requested via `teleport-entity` (#307) —
+    /// same shape as `pending_moves`, but drained and applied via a
+    /// direct-position `world::Zone` write instead of `request_move`,
+    /// skipping `validate_movement` entirely.
+    pending_teleports: PendingMoves,
     /// `(entity_id, item_type, quantity)`, drained and applied through
     /// `character::CharacterStore::grant_item` by the caller (#57/#112).
     pending_item_grants: Arc<Mutex<Vec<(String, String, i64)>>>,
@@ -205,6 +210,20 @@ impl HostCallbacks for PluginCallbacks {
         z: f64,
     ) -> std::result::Result<(), String> {
         self.pending_moves
+            .lock()
+            .unwrap()
+            .push((entity_id.to_string(), x, y, z));
+        Ok(())
+    }
+
+    fn teleport_entity(
+        &mut self,
+        entity_id: &str,
+        x: f64,
+        y: f64,
+        z: f64,
+    ) -> std::result::Result<(), String> {
+        self.pending_teleports
             .lock()
             .unwrap()
             .push((entity_id.to_string(), x, y, z));
@@ -421,6 +440,7 @@ pub struct PluginRuntime {
     pending_stat_deltas: Arc<Mutex<Vec<(String, String, i64)>>>,
     pending_character_stat_deltas: Arc<Mutex<Vec<(String, String, i64)>>>,
     pending_moves: PendingMoves,
+    pending_teleports: PendingMoves,
     pending_item_grants: Arc<Mutex<Vec<(String, String, i64)>>>,
     pending_item_removals: Arc<Mutex<Vec<(String, String, i64)>>>,
     pending_currency_deltas: Arc<Mutex<Vec<(String, String, i64)>>>,
@@ -454,6 +474,12 @@ impl PluginRuntime {
     /// drain, in call order.
     pub fn drain_pending_moves(&self) -> Vec<(String, f64, f64, f64)> {
         std::mem::take(&mut self.pending_moves.lock().unwrap())
+    }
+
+    /// `(entity_id, x, y, z)` requested via `teleport-entity` since the
+    /// last drain, in call order (#307).
+    pub fn drain_pending_teleports(&self) -> Vec<(String, f64, f64, f64)> {
+        std::mem::take(&mut self.pending_teleports.lock().unwrap())
     }
 
     /// `(entity_id, item_type, quantity)` requested via `grant-item`
@@ -572,6 +598,7 @@ pub fn load_plugin(
     let pending_stat_deltas = Arc::new(Mutex::new(Vec::new()));
     let pending_character_stat_deltas = Arc::new(Mutex::new(Vec::new()));
     let pending_moves = Arc::new(Mutex::new(Vec::new()));
+    let pending_teleports = Arc::new(Mutex::new(Vec::new()));
     let pending_item_grants = Arc::new(Mutex::new(Vec::new()));
     let pending_item_removals = Arc::new(Mutex::new(Vec::new()));
     let pending_currency_deltas = Arc::new(Mutex::new(Vec::new()));
@@ -584,6 +611,7 @@ pub fn load_plugin(
         pending_stat_deltas: pending_stat_deltas.clone(),
         pending_character_stat_deltas: pending_character_stat_deltas.clone(),
         pending_moves: pending_moves.clone(),
+        pending_teleports: pending_teleports.clone(),
         pending_item_grants: pending_item_grants.clone(),
         pending_item_removals: pending_item_removals.clone(),
         pending_currency_deltas: pending_currency_deltas.clone(),
@@ -646,6 +674,7 @@ pub fn load_plugin(
         pending_stat_deltas,
         pending_character_stat_deltas,
         pending_moves,
+        pending_teleports,
         pending_item_grants,
         pending_item_removals,
         pending_currency_deltas,
@@ -684,6 +713,7 @@ mod tests {
             pending_stat_deltas: Arc::new(Mutex::new(Vec::new())),
             pending_character_stat_deltas: Arc::new(Mutex::new(Vec::new())),
             pending_moves: Arc::new(Mutex::new(Vec::new())),
+            pending_teleports: Arc::new(Mutex::new(Vec::new())),
             pending_item_grants: Arc::new(Mutex::new(Vec::new())),
             pending_item_removals: Arc::new(Mutex::new(Vec::new())),
             pending_currency_deltas: Arc::new(Mutex::new(Vec::new())),

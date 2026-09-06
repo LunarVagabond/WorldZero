@@ -3,7 +3,7 @@
 # or config/stats.schema.yaml). See docs/specs/Plugin_API.md.
 [plugin]
 name = "example-plugin"
-host_api_version = "0.15.0"
+host_api_version = "0.16.0"
 # This plugin calls spawn-npc, send-message, move-entity,
 # apply-stat-delta, grant-item, and register-item-type — all gated
 # behind these five capabilities (docs/specs/Plugin_API.md's

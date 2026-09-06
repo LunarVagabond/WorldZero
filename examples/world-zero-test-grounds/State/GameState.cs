@@ -76,6 +76,10 @@ public partial class GameState : Node
     // false until a real announcement says otherwise. ---
     public readonly List<string> Roles = new();
     public bool IsAdmin => Roles.Contains("admin");
+    // #307: a lighter-weight way to grant a test account admin-like
+    // powers without using the real "admin" designation — unlocks the
+    // same Admin/QA tab `IsAdmin` does (Hud.cs gates on either).
+    public bool IsQa => Roles.Contains("qa");
     public event Action? RolesChanged;
 
     public void SetRoles(IEnumerable<string> roles)
@@ -101,6 +105,18 @@ public partial class GameState : Node
     public readonly Dictionary<string, long> OwnStats = new();
     public readonly Dictionary<string, long> OwnItems = new();
     public readonly Dictionary<string, long> OwnCurrency = new();
+
+    // --- Equipment (#307): slot -> equipped item_type, from EquipmentChanged.
+    // Empty item_type in a push means "nothing equipped there now" (server
+    // convention) — represented here as simply removing the slot entry. ---
+    public readonly Dictionary<string, string> EquippedItems = new();
+
+    // --- Active trade negotiation (#307), from TradeStateChanged — null
+    // when no trade is in progress. "Your"/"their" are always from this
+    // connection's own point of view, same convention the wire message
+    // itself uses. ---
+    public TradeState? ActiveTrade;
+    public string? PendingTradeRequestFromEntityId;
 
     // --- Evil Cube HP, parsed from the ad-hoc `cube:` PluginMessage convention (§7.1) — kept
     // separate from OwnStats/etc. since it's NPC state, not a structured push. Keyed by entity_id. ---
@@ -142,5 +158,20 @@ public partial class GameState : Node
         OwnCurrency.Clear();
         CubeHp.Clear();
         PendingMoves.Clear();
+        EquippedItems.Clear();
+        ActiveTrade = null;
+        PendingTradeRequestFromEntityId = null;
     }
 }
+
+// #307: a plain snapshot of TradeStateChanged's fields — kept as a small
+// record rather than loose GameState fields since a Trade panel needs to
+// render "your side" and "their side" together, not as scattered values.
+public sealed record TradeState(
+    string OtherEntityId,
+    IReadOnlyList<(string ItemType, long Quantity)> YourItems,
+    IReadOnlyList<(string CurrencyKey, long Amount)> YourCurrency,
+    bool YourConfirmed,
+    IReadOnlyList<(string ItemType, long Quantity)> TheirItems,
+    IReadOnlyList<(string CurrencyKey, long Amount)> TheirCurrency,
+    bool TheirConfirmed);

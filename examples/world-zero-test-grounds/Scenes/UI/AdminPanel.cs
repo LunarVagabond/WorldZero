@@ -4,14 +4,16 @@ using WorldZeroTestGrounds.State;
 
 namespace WorldZeroTestGrounds.Scenes.UI;
 
-// Admin-only commands, backed by evil-cube-plugin's real caller-role-gated
-// chat commands (docs/specs/Auth_Spec.md's "Account roles" — the one
-// real, backend-enforced privilege mechanism World Zero has; there is no
-// core wire concept of "admin" beyond it). This panel's own visibility
-// (Hud.cs only adds it once GameState.IsAdmin says so) is purely a UI
+// Admin/QA-only commands, backed by evil-cube-plugin's real
+// caller-role-gated chat commands (docs/specs/Auth_Spec.md's "Account
+// roles" — the one real, backend-enforced privilege mechanism World Zero
+// has; there is no core wire concept of "admin" beyond it). Gated on
+// either the real `admin` role or the lighter-weight `qa` role (#307 —
+// grant it via `make role ARGS="grant <username> qa"`, zero backend
+// plumbing needed). This panel's own visibility (Hud.cs) is purely a UI
 // convenience — every command below still gets independently re-checked
-// server-side, so a non-admin account is blocked by the actual backend
-// even if this panel were somehow shown to them.
+// server-side, so an account with neither role is blocked by the actual
+// backend even if this panel were somehow shown to them.
 public partial class AdminPanel : Control
 {
     public override void _Ready()
@@ -19,11 +21,12 @@ public partial class AdminPanel : Control
         SetAnchorsPreset(LayoutPreset.FullRect);
         var box = UiHelpers.CreateScrollableColumn(this);
 
-        UiHelpers.AddWrappingLabel(box, "Every command here is re-checked server-side against your account's real \"admin\" role — this panel only ever shows for an account that already announced it has one.");
+        UiHelpers.AddWrappingLabel(box, "Every command here is re-checked server-side against your account's real \"admin\" or \"qa\" role — this panel only ever shows for an account that already announced it has one of them.");
 
         BuildGrantSection(box);
         BuildCurrencySection(box);
         BuildCubeSection(box);
+        BuildTeleportSection(box);
     }
 
     private static void BuildGrantSection(Control parent)
@@ -65,5 +68,28 @@ public partial class AdminPanel : Control
         var respawnButton = new Button { Text = "Respawn cube" };
         respawnButton.Pressed += () => NetworkClient.Instance.SendPluginChatCommand("/respawncube");
         row.AddChild(respawnButton);
+    }
+
+    // #307: a real, unrestricted teleport — evil-cube-plugin's
+    // `teleport-entity` host-function call skips the server's normal
+    // movement validation entirely (speed cap, collision, navmesh), so
+    // this actually goes anywhere, unlike Move/WASD.
+    private static void BuildTeleportSection(Control parent)
+    {
+        var section = UiHelpers.Section(parent, "Teleport (/teleport, admin/QA only)");
+        var row = new HBoxContainer();
+        section.AddChild(row);
+        var xEdit = new LineEdit { PlaceholderText = "x", CustomMinimumSize = new Vector2(60, 0) };
+        UiHelpers.LockMovementWhileFocused(xEdit);
+        row.AddChild(xEdit);
+        var yEdit = new LineEdit { PlaceholderText = "y", CustomMinimumSize = new Vector2(60, 0) };
+        UiHelpers.LockMovementWhileFocused(yEdit);
+        row.AddChild(yEdit);
+        var zEdit = new LineEdit { PlaceholderText = "z", Text = "0", CustomMinimumSize = new Vector2(60, 0) };
+        UiHelpers.LockMovementWhileFocused(zEdit);
+        row.AddChild(zEdit);
+        var button = new Button { Text = "Teleport self" };
+        button.Pressed += () => NetworkClient.Instance.SendPluginChatCommand($"/teleport {xEdit.Text.Trim()} {yEdit.Text.Trim()} {zEdit.Text.Trim()}");
+        section.AddChild(button);
     }
 }
