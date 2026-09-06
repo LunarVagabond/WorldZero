@@ -126,6 +126,13 @@ recipes:
 
 `category` is an opaque, dev-owned display string — core stores and reports it but never interprets it. A `CraftItem` request succeeds only if the caller holds at least the declared amount of every input; consumption and the output grant happen atomically. Required by `make quickstart`.
 
+**Every `item_type` referenced here must already be a real entry in the central item catalog (#287 — see "The item catalog" below), and a recipe's `output.item_type` must specifically carry the `craftable_output` tag.** `crafting_schema::CraftingSchema::from_yaml` cross-validates every `inputs[].item_type`/`output.item_type` against the catalog at load time and fails loudly, naming the exact fix, if either check fails:
+
+- an unknown `item_type` → `crafting.schema.yaml: recipe "<key>" input item_type "<x>" is not declared in the item catalog — register it first with `make items ARGS="create <x> <display name>"` (or from a plugin's `register-item-type` call)`
+- a known `item_type` missing the `craftable_output` tag on the recipe's `output` → `crafting.schema.yaml: recipe "<key>" output item_type "<x>" exists in the item catalog but isn't tagged "craftable_output" — add that tag with `make items ARGS="create <x> <display name> craftable_output"``
+
+`make quickstart` seeds the item catalog entries its own shipped `crafting.schema.example.yaml`/`equipment.schema.example.yaml` need (`wolf-fang`, `iron-ore`, `wolf-fang-dagger`, `herb`, `water-flask`, `healing-tonic`, `iron-helmet`, `cloth-cap`, `iron-sword`) via `make items ARGS="ensure ..."` before starting `server` — see the Makefile's `quickstart` target for the exact commands it runs.
+
 **Currencies (`currency.schema.yaml`, #217/#218).** Declares one or more currencies, each a flat integer balance per `(character, currency_key)` with an optional cosmetic denomination ladder computed at read time. Start from [`config/currency.schema.example.yaml`](../../config/currency.schema.example.yaml). Required by `make quickstart`.
 
 **Party types (`party.schema.yaml`, #178).** Declares party types and their member caps — start from [`config/party.schema.example.yaml`](../../config/party.schema.example.yaml). The first declared entry is what `PartyInvite` gets when the client doesn't name a type; omitting `max_members` on an entry means no cap. Required by `make quickstart`. See [`docs/specs/Chat_Spec.md`](../specs/Chat_Spec.md), "Party/group" section.
@@ -148,6 +155,35 @@ items:
 
 `stat_deltas` keys are validated against `stats.schema.yaml` at load time (must be a declared stat — the bounds check itself happens when the delta is actually applied). Make sure any stat you grant gear bonuses against actually has headroom below its declared `max` — a stat whose `default` already sits at `max` (the shipped `stats.schema.example.yaml`'s `hp`/`mana` both do) rejects any positive gear delta the moment it's equipped, since the resulting value would exceed the bound; `config/equipment.schema.example.yaml`'s own helmets use `reputation.ironclad_guild` (no declared bound) rather than `hp` for exactly this reason. An `item_type` not listed here can't be equipped at all. If the target slot is already occupied, `EquipItem` unequips the occupant first (deltas reversed, granted back to inventory) rather than rejecting the request. Required by `make quickstart`.
 
+**Every `item_type` listed under `items` here must already be a real catalog entry (#287), and it must specifically carry the `equippable` tag.** `equipment_schema::EquipmentSchema::from_yaml` checks both at load time, the same way `crafting.schema.yaml` above does, and names the exact fix if either is missing:
+
+- an unknown `item_type` → `equipment.schema.yaml: item_type "<x>" is not declared in the item catalog — register it first with `make items ARGS="create <x> <display name>"``
+- a known `item_type` missing the `equippable` tag → `equipment.schema.yaml: item_type "<x>" exists in the item catalog but isn't tagged "equippable" — add that tag with `make items ARGS="create <x> <display name> equippable"``
+
+**The item catalog (`item_types`/`item_drop_sources`, #287).** The single source of truth every `item_type` string in this crate (crafting inputs/outputs, equipment items, and a player-initiated `DropItem`'s target) is now cross-validated against — replacing what used to be three independently-typo-able declarations of the same opaque string. A catalog entry is a real Postgres row (`item_types`: `item_type`, `display_name`, an open `tags` array, and a narrow `metadata` JSONB column for per-item-arbitrary data like an icon reference) plus, optionally, one or more `item_drop_sources` rows linking it to a `(zone_id, spawn_table_id)` it can drop from. `tags` is deliberately open, not a closed enum — a dev or plugin can invent their own, but four are checked by core code today:
+
+| Tag | Meaning |
+|---|---|
+| `craftable_output` | Usable as a `crafting.schema.yaml` recipe's `output.item_type`. |
+| `equippable` | Usable as an `equipment.schema.yaml` `items[].item_type`. |
+| `tradeable` | Offerable in a player-to-player trade (`character::trade`). |
+| `drop_only` | Only ever granted via `item_drop_sources` — never craftable, equippable, or a starting-inventory grant. |
+
+Manage the catalog with `make items` (`crates/content/src/bin/items.rs`; needs `WZ_POSTGRES_*`):
+
+```sh
+make items ARGS="create wolf-fang 'Wolf Fang' craftable_output"
+make items ARGS="ensure wolf-fang 'Wolf Fang' craftable_output"   # same as create, but named for "safe to re-run"
+make items ARGS="list"
+make items ARGS="get wolf-fang"
+make items ARGS="delete wolf-fang"
+make items ARGS="link-drop-source wolf-fang greenwood-forest wolf-pack-01"
+make items ARGS="unlink-drop-source wolf-fang greenwood-forest wolf-pack-01"
+make items ARGS="drop-sources wolf-fang"
+```
+
+A plugin can register its own item types the same way at `on_load`, via the WIT `register-item-type` host function (`item-type`, `display-name`, `tags`, `metadata` — see `crates/plugin-host/wit/plugin.wit`); `get-item` reads one entry back. Both the CLI and the plugin path go through the same `ItemCatalogStore::register`, so downstream validation can't tell which one declared a given item type. `make quickstart` seeds the entries its own shipped `crafting.schema.example.yaml`/`equipment.schema.example.yaml` reference — see the Makefile's `quickstart` target for the exact `make items ARGS="ensure ..."` calls.
+
 ---
 
 ## Step 2 — Your world (`content` + `world`)
@@ -158,6 +194,10 @@ items:
 - `<config_dir>/content-pack.yaml` — multiple zones, if present ([`config/content-pack.example.yaml`](../../config/content-pack.example.yaml) + zone files under [`config/example-zones/`](../../config/example-zones)). A player walking through a declared `links[]` edge between two zones crosses live, no reconnect.
 
 A zone manifest declares its bounds, a navmesh collision reference, NPC spawn tables (entity type, population cap, respawn timer, optional patrol route), and interaction triggers. Full field reference: [`docs/specs/Content_Manifest_Spec.md`](../specs/Content_Manifest_Spec.md).
+
+**Collision (`collision.asset_ref`/`collision.format`, #279/#280) is real, not a placeholder.** `collision.format: navmesh_v1` is the only supported format today — a JSON payload of convex walkable polygons, each a list of real `(x, y, z)` vertices (`content::navmesh::NavMesh`; full format in [`docs/specs/Content_Manifest_Spec.md`](../specs/Content_Manifest_Spec.md#navmesh_v1)). `collision.asset_ref` points at it by content hash — `sha256:<64 lowercase hex chars>` — resolved through `content::AssetStore` against a flat, content-addressed directory at `<config_dir>/assets/<hex digest>` (a self-hoster drops the file in by hand under its own hash as the filename; there's no upload pipeline or importer yet, per #279's deliberately-minimal scope). The shipped example zones ([`config/zone.manifest.example.yaml`](../../config/zone.manifest.example.yaml), [`config/example-zones/greenwood-forest.yaml`](../../config/example-zones/greenwood-forest.yaml)) both reference `sha256:9053d0456606fc25a498de1e85a29615605e870bbda12e4f087420ca9a00c168` — a single flat polygon covering the whole zone, checked into `config/assets/` — as the real worked example of the pattern; two zones with identical navmesh geometry hash (and therefore resolve) identically, by design.
+
+Movement validation now checks real 3D polygon containment against the resolved navmesh — a destination's `(x, y)` must fall inside a walkable polygon's 2D projection *and* its `z` must land within the polygon's own walkable plane (so a ramp or a second floor at a different height is a real, distinguishable destination, not just more flat area) — this is the actual walkability authority, not the zone's `bounds`. `bounds` still exists and is still checked first, but only as a coarse, flat 2D pre-filter on the zone's overall extent (`world::movement::validate_movement`) — it's a cheap early reject, not what determines whether a specific point is actually walkable.
 
 **World simulation tuning (`world`):**
 
@@ -204,7 +244,7 @@ A plugin is a `wasmtime`-sandboxed WASM component plus a manifest, [`config/plug
 ```toml
 [plugin]
 name = "example-plugin"
-host_api_version = "0.13.0"
+host_api_version = "0.15.0"
 capabilities = []
 message_types = []
 chat_commands = []
@@ -330,7 +370,7 @@ See [`docs/specs/Realm_Character_Policy_Spec.md`](../specs/Realm_Character_Polic
 | `common` | `WZ_CONFIG_DIR`, `WZ_POSTGRES_*`, `WZ_REDIS_*`, `WZ_SERVICE_{CHAT,METRICS}_ENABLED`, `WZ_OTEL_*` | — | `PostgresConfig`, `RedisConfig`, `ServicesConfig` |
 | `character` | `WZ_INVENTORY_MAX_ITEM_TYPES`, `WZ_INVENTORY_SLOT_COUNT` | `stats.schema.yaml`, `character.archetypes.yaml`, `crafting.schema.yaml`, `currency.schema.yaml`, `equipment.schema.yaml`, `party.schema.yaml` | `AttributeSchema`, `InventoryConfig`, `CharacterStore`, `ArchetypeSchema`, `CraftingSchema`, `CurrencySchema`, `EquipmentSchema`, `PartySchema` |
 | `guild` | — | `guild.schema.yaml` | `GuildSchema`, `GuildStore` |
-| `content` | — | `zone.manifest.yaml` or `content-pack.yaml` | `ZoneManifest`, `ContentPack` |
+| `content` | — | `zone.manifest.yaml` or `content-pack.yaml`; item catalog managed via `make items`, not a config file | `ZoneManifest`, `ContentPack`, `AssetStore`, `NavMesh`, `ItemCatalogStore` |
 | `world` | `WZ_WORLD_TICK_RATE_HZ`, `WZ_WORLD_GRID_CELL_SIZE_METERS`, `WZ_WORLD_MAX_SPEED_MPS` | — | `WorldConfig` |
 | `auth` | (shared Postgres/Redis only) | — | `UsernamePasswordProvider`, `AccountStore`/`AccountRoleStore` |
 | `gateway` | `WZ_TLS_CERT_PATH`, `WZ_TLS_KEY_PATH` | — | `CertMaterial` |
