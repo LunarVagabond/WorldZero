@@ -382,6 +382,7 @@ See [`docs/specs/Realm_Character_Policy_Spec.md`](../specs/Realm_Character_Polic
 
 ## Where to go next
 
+- [`Connecting_A_Client.md`](Connecting_A_Client.md) for a step-by-step walkthrough of actually wiring a game client (any engine/language) to a running server — auth through movement through a custom plugin message — with pointers back into this guide at every customizable step.
 - [`docs/specs/`](../specs) for depth on any of the above — wire protocols, full data model, decision rationale.
 - [`examples/example-plugin`](../../examples/example-plugin) to start writing gameplay logic.
 - [`crates/server/tests/server_smoke.rs`](../../crates/server/tests/server_smoke.rs) is a real client speaking the wire protocol end to end — the best worked example of what a real client needs to do, since there's no GUI client shipped with this project (infrastructure, not a game — see `docs/PROPOSAL.md`'s "What This Project Is Not").
