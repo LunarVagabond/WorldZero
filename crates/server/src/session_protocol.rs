@@ -136,11 +136,13 @@ pub enum ClientMessage {
     /// Requests crafting `recipe_key` against this connection's own
     /// character (#216) — `recipe_key` names a dev-declared entry in
     /// `crafting.schema.yaml` (`character::CraftingSchema`). `Error` if
-    /// `recipe_key` is unknown, or if the caller's inventory doesn't
-    /// hold at least the declared amount of every input; nothing is
-    /// consumed on a rejected craft. No dedicated success reply — the
-    /// resulting inventory change arrives as ordinary `ItemChanged`
-    /// pushes (#211).
+    /// `recipe_key` is unknown, if a declared `requires` stat threshold
+    /// (#289) isn't met, or if the caller's inventory doesn't hold at
+    /// least the declared amount of every input; nothing is consumed on
+    /// a rejected craft. No dedicated success reply — the resulting
+    /// inventory change arrives as ordinary `ItemChanged` pushes (#211),
+    /// followed by one `StatChanged` push per declared `grants` delta
+    /// (#289).
     CraftItem { recipe_key: String },
     /// Requests dropping `quantity` of `item_type` from this
     /// connection's own inventory (#265). Unlike `UseItem`, removal is

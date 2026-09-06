@@ -17,23 +17,58 @@ use sqlx::Row;
 use crate::crafting_schema::Recipe;
 use crate::store::CharacterStore;
 
+/// The result of a successful `craft_item` (#289 added `stat_changes` to
+/// what was previously a bare `Vec<(item_type, quantity)>`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CraftOutcome {
+    /// `(item_type, resulting_quantity)` for every stack this craft
+    /// touched — every consumed input (0 if a stack was fully consumed)
+    /// followed by the granted output, in recipe declaration order.
+    pub item_changes: Vec<(String, i64)>,
+    /// `(stat_key, resulting_value)` for every declared `grants` delta
+    /// (#289), in declaration order — empty if the recipe declares none.
+    pub stat_changes: Vec<(String, i64)>,
+}
+
 impl CharacterStore {
     /// Resolves `recipe` against `character_id`'s current inventory and,
     /// in one transaction, consumes every declared input and grants the
     /// declared output — or changes nothing at all. Rejected (nothing
-    /// consumed or granted) if any input is missing or insufficient, or
-    /// if the output would be a *new* stack and the character is already
-    /// at `InventoryConfig::max_distinct_item_types` (same soft cap
-    /// `grant_item` enforces). Returns the resulting `(item_type,
-    /// quantity)` for every stack this craft touched — every consumed
-    /// input (0 if a stack was fully consumed) followed by the granted
-    /// output — so the caller can push accurate `ItemChanged` messages
-    /// without a second read.
+    /// consumed or granted) if any input is missing or insufficient, if
+    /// the output would be a *new* stack and the character is already at
+    /// `InventoryConfig::max_distinct_item_types` (same soft cap
+    /// `grant_item` enforces), or (#289) if any declared `requires` isn't
+    /// met by the character's *current* stat value — checked before the
+    /// transaction opens, so an ungated craft never even attempts the
+    /// input check.
+    ///
+    /// On success, every declared `grants` delta (#289) is applied via
+    /// `apply_stat_delta` — the same write path `equipment_schema.rs`'s
+    /// `stat_deltas` application already uses, so `stats.schema.yaml`'s
+    /// declared bounds are enforced for real. This happens *after* the
+    /// craft's own transaction commits, not inside it — same "best-effort,
+    /// not fully transactional" stance `equipment.rs`'s own doc comment
+    /// already takes for its stat-delta application: if a grant is
+    /// rejected (an out-of-bounds delta), the craft itself has already
+    /// gone through and isn't rolled back.
     pub async fn craft_item(
         &self,
         character_id: CharacterId,
         recipe: &Recipe,
-    ) -> Result<Vec<(String, i64)>> {
+    ) -> Result<CraftOutcome> {
+        for req in &recipe.requires {
+            let current = self.get_stat(character_id, &req.stat).await?;
+            if current < req.min {
+                return Err(Error::new(
+                    "character",
+                    format!(
+                        "craft \"{}\" requires {} to be at least {}, character {} is at {}",
+                        recipe.key, req.stat, req.min, character_id, current
+                    ),
+                ));
+            }
+        }
+
         let mut tx = self
             .pool()
             .begin()
@@ -149,7 +184,18 @@ impl CharacterStore {
             .await
             .map_err(|e| Error::wrap("character", "failed to commit craft", e))?;
 
-        Ok(results)
+        let mut stat_changes = Vec::with_capacity(recipe.grants.len());
+        for grant in &recipe.grants {
+            let new_value = self
+                .apply_stat_delta(character_id, &grant.stat, grant.amount)
+                .await?;
+            stat_changes.push((grant.stat.clone(), new_value));
+        }
+
+        Ok(CraftOutcome {
+            item_changes: results,
+            stat_changes,
+        })
     }
 }
 
@@ -167,6 +213,26 @@ mod tests {
 
     fn schema() -> AttributeSchema {
         AttributeSchema::from_yaml("schema_version: 1\nstats: []\n").unwrap()
+    }
+
+    /// A schema declaring the two stats `crafting_with_an_unmet_requires_stat_is_rejected`/
+    /// `crafting_with_a_met_requires_stat_applies_its_grants` (#289) exercise.
+    fn schema_with_profession_stats() -> AttributeSchema {
+        AttributeSchema::from_yaml(
+            r#"
+schema_version: 1
+stats:
+  - key: profession.blacksmithing_level
+    type: int
+    default: 1
+    min: 1
+    max: 100
+  - key: profession.blacksmithing_xp
+    type: int
+    default: 0
+"#,
+        )
+        .unwrap()
     }
 
     fn dagger_recipe() -> Recipe {
@@ -187,6 +253,25 @@ mod tests {
                 item_type: "wolf-fang-dagger".to_string(),
                 amount: 1,
             },
+            requires: Vec::new(),
+            grants: Vec::new(),
+        }
+    }
+
+    /// #289 — `dagger_recipe` with a `requires`/`grants` pair added: gated
+    /// behind `profession.blacksmithing_level >= 5`, grants
+    /// `profession.blacksmithing_xp` +10 on success.
+    fn dagger_recipe_with_profession_hooks() -> Recipe {
+        Recipe {
+            requires: vec![crate::crafting_schema::StatRequirement {
+                stat: "profession.blacksmithing_level".to_string(),
+                min: 5,
+            }],
+            grants: vec![crate::crafting_schema::StatGrant {
+                stat: "profession.blacksmithing_xp".to_string(),
+                amount: 10,
+            }],
+            ..dagger_recipe()
         }
     }
 
@@ -202,6 +287,12 @@ mod tests {
     }
 
     async fn store_with_character() -> (CharacterStore, CharacterId) {
+        store_with_character_and_schema(schema()).await
+    }
+
+    async fn store_with_character_and_schema(
+        attribute_schema: AttributeSchema,
+    ) -> (CharacterStore, CharacterId) {
         let config = PostgresConfig::from_env().expect("WZ_POSTGRES_* env vars set");
         let pool = postgres_pool(&config, PoolOptions::default())
             .await
@@ -216,7 +307,7 @@ mod tests {
             .unwrap();
 
         let realm_id = insert_realm(&pool).await;
-        let store = CharacterStore::new(pool, schema(), Default::default());
+        let store = CharacterStore::new(pool, attribute_schema, Default::default());
         let character_id = store
             .create(account_id, "Test Character", realm_id, "greenwood-forest")
             .await
@@ -235,18 +326,19 @@ mod tests {
             .unwrap();
         store.grant_item(character_id, "iron-ore", 2).await.unwrap();
 
-        let results = store
+        let outcome = store
             .craft_item(character_id, &dagger_recipe())
             .await
             .unwrap();
         assert_eq!(
-            results,
+            outcome.item_changes,
             vec![
                 ("wolf-fang".to_string(), 0),
                 ("iron-ore".to_string(), 0),
                 ("wolf-fang-dagger".to_string(), 1),
             ]
         );
+        assert!(outcome.stat_changes.is_empty());
 
         assert_eq!(
             store
@@ -414,6 +506,93 @@ mod tests {
         assert_eq!(
             store.item_quantity(character_id, "iron-ore").await.unwrap(),
             2
+        );
+    }
+
+    // #289 — requires/grants stat hooks.
+
+    #[tokio::test]
+    #[ignore]
+    async fn crafting_with_an_unmet_requires_stat_is_rejected_and_consumes_nothing() {
+        let (store, character_id) =
+            store_with_character_and_schema(schema_with_profession_stats()).await;
+        store
+            .grant_item(character_id, "wolf-fang", 3)
+            .await
+            .unwrap();
+        store.grant_item(character_id, "iron-ore", 2).await.unwrap();
+        // profession.blacksmithing_level defaults to 1; the recipe
+        // requires >= 5.
+
+        let err = store
+            .craft_item(character_id, &dagger_recipe_with_profession_hooks())
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("profession.blacksmithing_level"),
+            "{err}"
+        );
+
+        // Nothing consumed — the requires check runs before the craft's
+        // own transaction even opens.
+        assert_eq!(
+            store
+                .item_quantity(character_id, "wolf-fang")
+                .await
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            store.item_quantity(character_id, "iron-ore").await.unwrap(),
+            2
+        );
+        assert_eq!(
+            store
+                .item_quantity(character_id, "wolf-fang-dagger")
+                .await
+                .unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn crafting_with_a_met_requires_stat_succeeds_and_applies_grants() {
+        let (store, character_id) =
+            store_with_character_and_schema(schema_with_profession_stats()).await;
+        store
+            .grant_item(character_id, "wolf-fang", 3)
+            .await
+            .unwrap();
+        store.grant_item(character_id, "iron-ore", 2).await.unwrap();
+        store
+            .set_stat(character_id, "profession.blacksmithing_level", 5)
+            .await
+            .unwrap();
+
+        let outcome = store
+            .craft_item(character_id, &dagger_recipe_with_profession_hooks())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            outcome.item_changes,
+            vec![
+                ("wolf-fang".to_string(), 0),
+                ("iron-ore".to_string(), 0),
+                ("wolf-fang-dagger".to_string(), 1),
+            ]
+        );
+        assert_eq!(
+            outcome.stat_changes,
+            vec![("profession.blacksmithing_xp".to_string(), 10)]
+        );
+        assert_eq!(
+            store
+                .get_stat(character_id, "profession.blacksmithing_xp")
+                .await
+                .unwrap(),
+            10
         );
     }
 }

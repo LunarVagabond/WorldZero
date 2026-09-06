@@ -1696,11 +1696,20 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
                                 }
                                 Ok(recipe) => {
                                     match deps.character_store.craft_item(character_id, &recipe).await {
-                                        Ok(results) => {
-                                            for (item_type, quantity) in results {
+                                        Ok(outcome) => {
+                                            for (item_type, quantity) in outcome.item_changes {
                                                 send_world(&mut sink, &ServerMessage::ItemChanged {
                                                     item_type,
                                                     quantity,
+                                                }).await?;
+                                            }
+                                            // #289 — every declared `grants` delta this craft
+                                            // applied, pushed the same way `EquipItem`/
+                                            // `UnequipItem` already push their own stat_changes.
+                                            for (stat_key, value) in outcome.stat_changes {
+                                                send_world(&mut sink, &ServerMessage::StatChanged {
+                                                    stat_key,
+                                                    value,
                                                 }).await?;
                                             }
                                             fire_on_craft_complete(

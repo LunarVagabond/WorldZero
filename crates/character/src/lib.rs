@@ -22,7 +22,10 @@ pub mod trade;
 
 pub use archetype_schema::{ArchetypeSchema, CharacterArchetype};
 pub use bound_liveness::BoundRealmLiveness;
-pub use crafting_schema::{CraftingInput, CraftingOutput, CraftingSchema, Recipe};
+pub use crafting::CraftOutcome;
+pub use crafting_schema::{
+    CraftingInput, CraftingOutput, CraftingSchema, Recipe, StatGrant, StatRequirement,
+};
 pub use currency_schema::{Currency, CurrencyDenomination, CurrencySchema};
 pub use equipment::{EquipOutcome, UnequipOutcome};
 pub use equipment_schema::{EquipmentItem, EquipmentSchema};
