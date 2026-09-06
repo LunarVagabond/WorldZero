@@ -136,6 +136,69 @@ async fn create_realm(open_or_bound: realm_directory::OpenOrBound) -> common::id
     store.create(&name, open_or_bound).await.unwrap()
 }
 
+/// #287 — every test's `setup_config_dir`/`setup_content_pack_config_dir`
+/// copies in `crafting.schema.example.yaml`/`equipment.schema.example.yaml`
+/// verbatim, and `server::main` now cross-validates every `item_type`
+/// those files reference against the central item catalog at startup
+/// (`content::ItemCatalogStore`) — without this, every test that starts
+/// a real server would fail at startup the moment either schema loads.
+/// Seeds exactly the catalog entries those two example files reference
+/// (`docs/specs/Data_Model_Spec.md`'s "The item catalog" has the full
+/// list/tag reasoning), plus the one `item_drop_sources` link
+/// `Makefile`'s `quickstart` target also seeds for a real deployment —
+/// idempotent (`ItemCatalogStore::register` upserts,
+/// `link_drop_source` is `ON CONFLICT DO NOTHING`), so safe to call once
+/// per test against a real, possibly-already-seeded, shared Postgres.
+async fn seed_example_item_catalog() {
+    let pg_config = common::config::PostgresConfig::from_env().expect("WZ_POSTGRES_* env vars set");
+    let pool = common::pool::postgres_pool(&pg_config, common::pool::PoolOptions::default())
+        .await
+        .expect("failed to connect to Postgres to seed the test item catalog");
+    let store = content::ItemCatalogStore::new(pool);
+
+    let entries: &[(&str, &str, &[&str])] = &[
+        ("wolf-fang", "Wolf Fang", &["craftable_output"]),
+        ("iron-ore", "Iron Ore", &["craftable_output"]),
+        (
+            "wolf-fang-dagger",
+            "Wolf Fang Dagger",
+            &["craftable_output", "tradeable"],
+        ),
+        ("herb", "Herb", &["craftable_output"]),
+        ("water-flask", "Water Flask", &["craftable_output"]),
+        (
+            "healing-tonic",
+            "Healing Tonic",
+            &["craftable_output", "tradeable"],
+        ),
+        ("iron-helmet", "Iron Helmet", &["equippable", "tradeable"]),
+        ("cloth-cap", "Cloth Cap", &["equippable", "tradeable"]),
+        ("iron-sword", "Iron Sword", &["equippable", "tradeable"]),
+        // Not referenced by either example schema, but plenty of this
+        // file's own tests grant/drop/trade ad hoc item_types that
+        // `DropItem`'s own catalog check (#287) now has to find too.
+        ("torch", "Torch", &["tradeable", "drop_only"]),
+        ("sword", "Sword", &["tradeable"]),
+        ("shield", "Shield", &["tradeable"]),
+    ];
+    for (item_type, display_name, tags) in entries {
+        let entry = content::ItemCatalogEntry::new(*item_type, *display_name)
+            .with_tags(tags.iter().map(|t| t.to_string()).collect());
+        store
+            .register(&entry)
+            .await
+            .unwrap_or_else(|e| panic!("failed to seed item catalog entry {item_type:?}: {e}"));
+    }
+    store
+        .link_drop_source(&content::DropSource {
+            item_type: "wolf-fang".to_string(),
+            zone_id: "greenwood-forest".to_string(),
+            spawn_table_id: "wolf-pack-01".to_string(),
+        })
+        .await
+        .expect("failed to seed the wolf-fang drop source");
+}
+
 /// Reads a declared stat straight from `characters.stats` (#194's
 /// `on-character-create` fixture test) — a direct DB read rather than
 /// going through the wire protocol, since there's no client-facing "read
@@ -327,6 +390,13 @@ async fn start_server_with_env(
     if let Ok(password) = std::env::var("WZ_REDIS_PASSWORD") {
         command.env("WZ_REDIS_PASSWORD", password);
     }
+
+    // #287 — every test's copy of crafting.schema.example.yaml/
+    // equipment.schema.example.yaml gets cross-validated against the
+    // item catalog at server startup now; seed it before the server
+    // process is ever spawned, or that validation fails startup for
+    // every single test that reaches this point.
+    seed_example_item_catalog().await;
 
     // A fresh open realm by default (#136) — overridden below if
     // `extra_env` names its own `WZ_REALM_ID` (the realm-policy tests do
@@ -688,7 +758,7 @@ fn setup_config_dir(test_name: &str) -> PathBuf {
             r#"
 [plugin]
 name = "test-plugin"
-host_api_version = "0.14.0"
+host_api_version = "0.15.0"
 capabilities = ["spawning", "movement", "combat", "economy", "messaging"]
 message_types = [1000]
 chat_commands = ["give", "spawn-track", "which-wolf"]
@@ -800,7 +870,7 @@ fn setup_multi_plugin_config_dir(test_name: &str) -> PathBuf {
         r#"
 [plugin]
 name = "test-plugin"
-host_api_version = "0.14.0"
+host_api_version = "0.15.0"
 capabilities = ["spawning", "movement", "combat", "economy", "messaging"]
 message_types = [1000]
 hooks = ["on-zone-loaded", "on-player-join-zone"]
@@ -820,7 +890,7 @@ hooks = ["on-zone-loaded", "on-player-join-zone"]
         r#"
 [plugin]
 name = "second-plugin"
-host_api_version = "0.14.0"
+host_api_version = "0.15.0"
 capabilities = ["messaging"]
 message_types = [1001]
 hooks = ["on-player-join-zone"]
@@ -926,7 +996,7 @@ fn setup_content_pack_config_dir_with_join_leave_plugin(test_name: &str) -> Path
         r#"
 [plugin]
 name = "test-plugin"
-host_api_version = "0.14.0"
+host_api_version = "0.15.0"
 capabilities = ["combat", "messaging"]
 message_types = [1000]
 hooks = ["on-player-join-zone", "on-player-leave-zone"]

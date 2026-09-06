@@ -15,7 +15,7 @@ EXAMPLE_PLUGIN_WASM := $(EXAMPLE_PLUGIN_DIR)/target/wasm32-wasip2/release/exampl
 # their own WZ_REALM_ID in .env skips this file entirely.
 QUICKSTART_REALM_ID_FILE := $(RUN_DIR)/quickstart_realm_id
 
-.PHONY: help build run quickstart start stop restart status test test-live fmt fmt-check lint check clean migrate migrate-down chat-server chat realm role docker-up docker-down docker-status docker-logs
+.PHONY: help build run quickstart start stop restart status test test-live fmt fmt-check lint check clean migrate migrate-down chat-server chat realm role items docker-up docker-down docker-status docker-logs
 
 help:
 	@echo "WorldZero — local dev commands"
@@ -41,6 +41,9 @@ help:
 	@echo "                     delete/assign-zone/unassign-zone — needs WZ_POSTGRES_*, run 'make realm ARGS=' for full usage)"
 	@echo "  make role ARGS='grant alice admin'      auth account-role CLI (grant/revoke/list — needs"
 	@echo "                     WZ_POSTGRES_*, run 'make role ARGS=' for full usage)"
+	@echo "  make items ARGS='create wolf-fang \"Wolf Fang\"'  content item-catalog CLI (create/ensure/list/"
+	@echo "                     get/delete/link-drop-source/unlink-drop-source/drop-sources — needs"
+	@echo "                     WZ_POSTGRES_*, run 'make items ARGS=' for full usage)"
 	@echo "  make chat-server   run the chat gateway demo server (TCP+TLS+auth, routes into chat) — start this first"
 	@echo "  make chat NAME=x   run an interactive chat demo client as username 'x' (gateway mode by default,"
 	@echo "                     needs ARGS='--password <pw>' — add --register on first use to create the account;"
@@ -80,6 +83,25 @@ quickstart:
 	$(CARGO) build --manifest-path $(EXAMPLE_PLUGIN_DIR)/Cargo.toml --target wasm32-wasip2 --release
 	$(CARGO) build -p server
 	$(CARGO) run -p common --bin migrate -- up
+	@# #287 — the example crafting.schema.yaml/equipment.schema.yaml both
+	@# reference item_types now cross-validated against the item catalog
+	@# at server startup; seed the ones the shipped examples actually use
+	@# so a fresh `make quickstart` doesn't fail that validation. Each
+	@# `items ensure` call is an upsert, safe to re-run.
+	$(CARGO) run -q -p content --bin items -- ensure wolf-fang "Wolf Fang" craftable_output
+	$(CARGO) run -q -p content --bin items -- ensure iron-ore "Iron Ore" craftable_output
+	$(CARGO) run -q -p content --bin items -- ensure wolf-fang-dagger "Wolf Fang Dagger" craftable_output,tradeable
+	$(CARGO) run -q -p content --bin items -- ensure herb "Herb" craftable_output
+	$(CARGO) run -q -p content --bin items -- ensure water-flask "Water Flask" craftable_output
+	$(CARGO) run -q -p content --bin items -- ensure healing-tonic "Healing Tonic" craftable_output,tradeable
+	$(CARGO) run -q -p content --bin items -- ensure iron-helmet "Iron Helmet" equippable,tradeable
+	$(CARGO) run -q -p content --bin items -- ensure cloth-cap "Cloth Cap" equippable,tradeable
+	$(CARGO) run -q -p content --bin items -- ensure iron-sword "Iron Sword" equippable,tradeable
+	@# `wolf-pack-01` (config/zone.manifest.example.yaml's `greenwood-forest`
+	@# zone) is the shipped example zone's spawn table wolf-fang actually
+	@# drops from — the acceptance criterion for `item_drop_sources`
+	@# referencing a real shipped example.
+	$(CARGO) run -q -p content --bin items -- link-drop-source wolf-fang greenwood-forest wolf-pack-01
 	@mkdir -p config/plugins/example-plugin
 	@[ -f config/plugins/example-plugin/plugin.toml ] || cp $(EXAMPLE_PLUGIN_DIR)/plugin.toml config/plugins/example-plugin/plugin.toml
 	cp $(EXAMPLE_PLUGIN_WASM) config/plugins/example-plugin/example_plugin.wasm
@@ -145,6 +167,9 @@ realm:
 
 role:
 	$(CARGO) run -p auth --bin role -- $(ARGS)
+
+items:
+	$(CARGO) run -p content --bin items -- $(ARGS)
 
 chat-server:
 	$(CARGO) run -p chat --bin gateway_server

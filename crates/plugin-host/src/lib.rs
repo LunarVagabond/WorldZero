@@ -7,4 +7,4 @@ pub mod manifest;
 pub mod runtime;
 
 pub use manifest::{HOST_API_VERSION, PluginManifest, check_no_collisions};
-pub use runtime::{HostCallbacks, LoadedPlugin, PluginHost, PluginStateScope};
+pub use runtime::{HostCallbacks, ItemCatalogEntry, LoadedPlugin, PluginHost, PluginStateScope};

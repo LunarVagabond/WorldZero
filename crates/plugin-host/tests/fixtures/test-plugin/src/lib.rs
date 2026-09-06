@@ -32,6 +32,27 @@ impl Guest for Plugin {
                 panic!("sandbox escape: read a file with no preopened filesystem access");
             }
         }
+
+        // #287 — exercises register-item-type/get-item through the real
+        // sandbox boundary: register a catalog entry, then read it back
+        // to prove get-item answers from the same catalog, not a stale
+        // or separate one. Harmless no-op under `restricted_manifest`
+        // (no "economy" capability, so register-item-type is rejected —
+        // `let _` just swallows the `Err`, same as every other
+        // capability-gated call this fixture makes without checking the
+        // result).
+        #[cfg(not(any(feature = "panic_on_load", feature = "escape_attempt")))]
+        {
+            let _ = worldzero::plugin::host::register_item_type(
+                "fixture-test-item",
+                "Fixture Test Item",
+                &["tradeable".to_string()],
+                r#"{"note":"registered from on_load"}"#,
+            );
+            // Read it straight back — same catalog, same call, proves
+            // get-item isn't answering from an empty/separate cache.
+            let _ = worldzero::plugin::host::get_item("fixture-test-item");
+        }
     }
 
     fn on_unload() {}

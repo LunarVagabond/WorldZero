@@ -5,10 +5,12 @@
 
 pub mod assets;
 pub mod content_pack;
+pub mod items;
 pub mod manifest;
 pub mod navmesh;
 
 pub use assets::AssetStore;
 pub use content_pack::ContentPack;
+pub use items::{DropSource, ItemCatalogEntry, ItemCatalogStore};
 pub use manifest::ZoneManifest;
 pub use navmesh::NavMesh;
