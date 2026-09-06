@@ -31,7 +31,8 @@ This is the actual thing docs/PROPOSAL.md's Developer Experience Bar asks for: a
 1. Copies every `config/*.example.yaml` this project ships → its real counterpart (`game.yaml`, `zone.manifest.yaml`, `stats.schema.yaml`, `party.schema.yaml`, `guild.schema.yaml`, `character.archetypes.yaml`, `crafting.schema.yaml`, `currency.schema.yaml`, `equipment.schema.yaml`), but only for a file you don't already have your own copy of — it never overwrites a config you've customized. See [`Server_Customization_Guide.md`](Server_Customization_Guide.md) for what each one actually does.
 2. Builds [`examples/example-plugin`](../../examples/example-plugin) — the shipped example plugin — for `wasm32-wasip2` (adding that `rustup` target first if you don't have it).
 3. Applies pending database migrations.
-4. Starts `server` in the foreground, with the example plugin loaded.
+4. Seeds the central item catalog (#287) with every `item_type` the shipped `crafting.schema.yaml`/`equipment.schema.yaml` reference (`wolf-fang`, `iron-ore`, `wolf-fang-dagger`, `herb`, `water-flask`, `healing-tonic`, `iron-helmet`, `cloth-cap`, `iron-sword`) via `make items ARGS="ensure ..."` — required since crafting/equipment schema loading now fails if a referenced `item_type` isn't a real catalog entry with the right tag. See [`Server_Customization_Guide.md`](Server_Customization_Guide.md#step-1--your-games-stats-characters-and-social-data-character--guild) for the full mechanism.
+5. Starts `server` in the foreground, with the example plugin loaded.
 
 Safe to run again any time — every step is a no-op if there's nothing left to do (an existing config file is left alone, an already-applied migration is skipped, rebuilding the plugin is harmless).
 
