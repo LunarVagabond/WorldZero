@@ -496,18 +496,13 @@ impl PluginRuntime {
     /// Entries requested via `register-item-type` since the last drain,
     /// in call order (#287) — `load_plugin` already drains and persists
     /// whatever was requested during `on_load` itself before this
-    /// `PluginRuntime` is ever handed back (the documented, tested path);
-    /// this is for any *later* call (e.g. from `on_message`), which
-    /// `world_actor`'s tick/hook-effect draining doesn't call yet —
-    /// same kind of acknowledged, deferred gap as
-    /// docs/specs/Plugin_API.md's "Beyond this v0 slice" (a mid-session
-    /// `register-item-type` call still updates `item_catalog_cache`
-    /// immediately via `PluginCallbacks::register_item_type`, so
-    /// same-process `get-item` sees it right away; it just won't reach
-    /// durable storage until something drains this queue). Kept public
-    /// and real, not deleted, so wiring it into `world_actor` later is a
-    /// pure addition, not a redesign.
-    #[allow(dead_code)]
+    /// `PluginRuntime` is ever handed back (see that function's own doc
+    /// comment for why); `world_actor::drain_and_apply_plugin_effects`
+    /// drains and persists this queue for every *later* call (from
+    /// `on_tick`, `on_interact`, a chat command, or any other hook), the
+    /// same "drain after every hook call, regardless of which hook made
+    /// the request" discipline every other `pending_*` queue on this
+    /// struct already gets.
     pub fn drain_pending_item_registrations(&self) -> Vec<content::ItemCatalogEntry> {
         std::mem::take(&mut self.pending_item_registrations.lock().unwrap())
     }

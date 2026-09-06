@@ -793,6 +793,7 @@ async fn main() {
             zone_id.clone(),
             metrics.clone(),
             global_sessions.clone(),
+            item_catalog_store.clone(),
             move |zone, outcomes| {
                 handle_tick_outcomes(
                     &registry_cell,
@@ -845,6 +846,7 @@ async fn main() {
     let layer_spawner_plugins = plugins.clone();
     let layer_spawner_global_sessions = global_sessions.clone();
     let layer_spawner_navmeshes = navmeshes.clone();
+    let layer_spawner_item_catalog_store = item_catalog_store.clone();
     let layer_spawner: zone_registry::LayerSpawner = Box::new(move |zone_id, manifest| {
         let navmesh = layer_spawner_navmeshes
             .get(zone_id)
@@ -869,6 +871,7 @@ async fn main() {
             zone_id.to_string(),
             layer_spawner_metrics.clone(),
             layer_spawner_global_sessions.clone(),
+            layer_spawner_item_catalog_store.clone(),
             move |zone, outcomes| {
                 handle_tick_outcomes(
                     &registry_cell,

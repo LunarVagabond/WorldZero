@@ -84,6 +84,7 @@ const TRADE_SUCCESS_ADDR: &str = "127.0.0.1:7964";
 const TRADE_DECLINE_ADDR: &str = "127.0.0.1:7965";
 const TRADE_CANCEL_ADDR: &str = "127.0.0.1:7966";
 const TRADE_REVALIDATION_ADDR: &str = "127.0.0.1:7967";
+const REGISTER_ITEM_ON_MESSAGE_ADDR: &str = "127.0.0.1:7968";
 const SESSION_RESUME_INVALID_ADDR: &str = "127.0.0.1:7931";
 const MOVE_CORRELATION_ADDR: &str = "127.0.0.1:7932";
 const PING_PONG_ADDR: &str = "127.0.0.1:7933";
@@ -6049,4 +6050,104 @@ system_channels:
         system_channel_id(None, "trade").await.is_some(),
         "expected the declared global-scope `trade` channel to exist right after startup"
     );
+}
+
+/// #287: `register-item-type` called from a hook *other* than `on_load`
+/// (here, `on_message`, #95) still reaches durable storage, not just
+/// this process's own in-memory `item_catalog_cache` — proving
+/// `world_actor::drain_and_apply_plugin_effects` actually drains and
+/// persists `PluginRuntime::drain_pending_item_registrations` after
+/// every hook call, the same way it already does for
+/// `grant-item`/`apply-stat-delta`/etc. `on_load`'s own registration
+/// (`fixture-test-item`, exercised by `plugin-host`'s own
+/// `plugin_sandbox.rs`) doesn't exercise this path at all: it's drained
+/// and persisted by `plugin_startup::load_plugin` directly, before the
+/// plugin is ever handed to a zone actor.
+#[tokio::test]
+#[ignore]
+async fn register_item_type_from_a_non_on_load_hook_reaches_durable_storage() {
+    let config_dir = setup_config_dir("register-item-on-message");
+    let _server = start_server(&config_dir, REGISTER_ITEM_ON_MESSAGE_ADDR).await;
+    wait_for_port(REGISTER_ITEM_ON_MESSAGE_ADDR).await;
+
+    let username = format!("register-item-{}", uuid::Uuid::now_v7());
+    let mut stream = connect(&config_dir, REGISTER_ITEM_ON_MESSAGE_ADDR).await;
+    send_auth(
+        &mut stream,
+        &AuthClientMessage::Register {
+            username: username.clone(),
+            password: "hunter2".to_string(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv_auth(&mut stream).await,
+        AuthServerMessage::Authenticated { .. }
+    ));
+    select_realm(&mut stream, _server.realm_id).await;
+    select_or_create_character(&mut stream, &username).await;
+
+    loop {
+        if let ServerMessage::Joined { .. } = recv_world(&mut stream).await {
+            break;
+        }
+    }
+    loop {
+        match recv_world(&mut stream).await {
+            ServerMessage::PluginMessage { .. } => break,
+            ServerMessage::Moved { .. } => {}
+            other => panic!("expected the join greeting, got {other:?}"),
+        }
+    }
+
+    // A fresh, disposable item_type this test owns — the test-plugin
+    // fixture's `on_message` handler calls `register-item-type` for
+    // whatever item_type follows this prefix (`crates/plugin-host/tests/
+    // fixtures/test-plugin/src/lib.rs`'s own `on_message`).
+    let item_type = format!("on-message-item-{}", uuid::Uuid::now_v7());
+    stream
+        .send(gateway::Envelope::new(
+            1000,
+            format!("register-item:{item_type}").into_bytes(),
+        ))
+        .await
+        .unwrap();
+    loop {
+        match recv_world(&mut stream).await {
+            ServerMessage::PluginMessage { body } => {
+                assert_eq!(body, format!("register-item:{item_type}:true"), "{body}");
+                break;
+            }
+            ServerMessage::Moved { .. } => {}
+            other => panic!("expected the register-item-type confirmation, got {other:?}"),
+        }
+    }
+
+    // The confirmation above only proves the sandboxed call itself
+    // succeeded (queued + applied to the in-memory cache) — the actual
+    // point of this test is the *durable* write, which
+    // `drain_and_apply_plugin_effects` applies asynchronously right
+    // after `on_message` returns, inside the same world-actor command
+    // handling, but after this client has already been sent its reply.
+    // Poll rather than assert immediately, same "give the actor a moment"
+    // pattern this file already uses elsewhere for post-action DB checks.
+    let pg_config = common::config::PostgresConfig::from_env().expect("WZ_POSTGRES_* env vars set");
+    let pool = common::pool::postgres_pool(&pg_config, common::pool::PoolOptions::default())
+        .await
+        .expect("failed to connect to Postgres to verify the item catalog");
+    let store = content::ItemCatalogStore::new(pool);
+
+    let mut found = None;
+    for _ in 0..20 {
+        if let Some(entry) = store.get(&item_type).await.unwrap() {
+            found = Some(entry);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let entry = found.unwrap_or_else(|| {
+        panic!("item_type {item_type:?} never reached durable storage after register-item-type")
+    });
+    assert_eq!(entry.display_name, "On-Message Registered Item");
+    assert_eq!(entry.tags, vec!["tradeable".to_string()]);
 }

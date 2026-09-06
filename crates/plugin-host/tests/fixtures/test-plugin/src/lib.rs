@@ -213,6 +213,28 @@ impl Guest for Plugin {
             let _ = worldzero::plugin::host::report_respawn(&sender_entity_id);
             return;
         }
+        // #287 — proves `register-item-type` called from a hook *other*
+        // than `on_load` still reaches durable storage: `on_load`'s own
+        // registration is drained/persisted by `plugin_startup::load_plugin`
+        // itself, before this plugin is ever handed back, which wouldn't
+        // exercise `world_actor::drain_and_apply_plugin_effects`'s own
+        // drain of this same queue for every other hook call. `item-type`
+        // is caller-supplied (not fixed) so a real test can register a
+        // fresh, disposable one rather than colliding with `on_load`'s
+        // own `fixture-test-item`.
+        if let Some(item_type) = body.strip_prefix("register-item:") {
+            let result = worldzero::plugin::host::register_item_type(
+                item_type,
+                "On-Message Registered Item",
+                &["tradeable".to_string()],
+                "{}",
+            );
+            let _ = worldzero::plugin::host::send_message(
+                &sender_entity_id,
+                &format!("register-item:{item_type}:{}", result.is_ok()),
+            );
+            return;
+        }
         let _ = worldzero::plugin::host::send_message(
             &sender_entity_id,
             &format!("on-message {message_type}: {body}"),

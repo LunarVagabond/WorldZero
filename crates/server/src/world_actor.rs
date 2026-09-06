@@ -364,6 +364,11 @@ pub fn spawn_world_actor(
     // `sessions` field) — an entity stays reachable across a
     // `ZoneChanged` zone-hop without this needing to know it happened.
     global_sessions: Sessions,
+    // #287 — the durable write path `drain_and_apply_plugin_effects`
+    // persists a mid-session `register-item-type` call through, the same
+    // store `plugin_startup::load_plugin` already uses for `on_load`-time
+    // registrations.
+    item_catalog_store: std::sync::Arc<content::ItemCatalogStore>,
     on_tick: impl Fn(&Zone, Vec<(EntityId, MovementOutcome)>) + Send + 'static,
 ) -> WorldHandle {
     let (tx, mut rx) = mpsc::unbounded_channel::<WorldCommand>();
@@ -444,7 +449,7 @@ pub fn spawn_world_actor(
                                 tracing::warn!(plugin = %runtime.name, error = %e, "plugin on_tick hook failed");
                             }
                             drain_and_apply_plugin_effects(
-                                runtime, &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &currency_schema, &plugin_state_store, &global_sessions,
+                                runtime, &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &currency_schema, &plugin_state_store, &global_sessions, &item_catalog_store,
                             ).await;
                         }
                     }
@@ -499,7 +504,7 @@ pub fn spawn_world_actor(
                             }
                             spawn_requested_npcs(runtime, &mut zone, &zone_id);
                             drain_and_apply_plugin_effects(
-                                runtime, &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &currency_schema, &plugin_state_store, &global_sessions,
+                                runtime, &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &currency_schema, &plugin_state_store, &global_sessions, &item_catalog_store,
                             ).await;
                         }
                         WorldCommand::ChatCommand { command, args, sender_entity_id } => {
@@ -523,14 +528,14 @@ pub fn spawn_world_actor(
                             // below exercises exactly this path.
                             spawn_requested_npcs(runtime, &mut zone, &zone_id);
                             drain_and_apply_plugin_effects(
-                                runtime, &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &currency_schema, &plugin_state_store, &global_sessions,
+                                runtime, &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &currency_schema, &plugin_state_store, &global_sessions, &item_catalog_store,
                             ).await;
                         }
                         WorldCommand::PlayerJoin { entity_id } => {
                             let entity_id_str = entity_id.to_string();
                             let mut plugins = plugins.lock().await;
                             fire_hook(
-                                &mut plugins, "on-player-join-zone", &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &currency_schema, &plugin_state_store, &global_sessions,
+                                &mut plugins, "on-player-join-zone", &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &currency_schema, &plugin_state_store, &global_sessions, &item_catalog_store,
                                 |plugin| plugin.on_player_join_zone(&zone_id, &entity_id_str),
                             ).await;
                         }
@@ -538,7 +543,7 @@ pub fn spawn_world_actor(
                             let entity_id_str = entity_id.to_string();
                             let mut plugins = plugins.lock().await;
                             fire_hook(
-                                &mut plugins, "on-player-leave-zone", &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &currency_schema, &plugin_state_store, &global_sessions,
+                                &mut plugins, "on-player-leave-zone", &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &currency_schema, &plugin_state_store, &global_sessions, &item_catalog_store,
                                 |plugin| plugin.on_player_leave_zone(&zone_id, &entity_id_str),
                             ).await;
                             let _ = reply.send(());
@@ -552,7 +557,7 @@ pub fn spawn_world_actor(
                             let target_str = target.to_string();
                             let mut plugins = plugins.lock().await;
                             fire_hook(
-                                &mut plugins, "on-damage-calc", &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &currency_schema, &plugin_state_store, &global_sessions,
+                                &mut plugins, "on-damage-calc", &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &currency_schema, &plugin_state_store, &global_sessions, &item_catalog_store,
                                 |plugin| plugin.on_damage_calc(&zone_id, &attacker_str, &target_str, &stat_key, 0),
                             ).await;
                         }
@@ -560,7 +565,7 @@ pub fn spawn_world_actor(
                             let entity_id_str = entity_id.to_string();
                             let mut plugins = plugins.lock().await;
                             fire_hook(
-                                &mut plugins, "on-item-use", &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &currency_schema, &plugin_state_store, &global_sessions,
+                                &mut plugins, "on-item-use", &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &currency_schema, &plugin_state_store, &global_sessions, &item_catalog_store,
                                 |plugin| plugin.on_item_use(&zone_id, &entity_id_str, &item_type),
                             ).await;
                         }
@@ -573,7 +578,7 @@ pub fn spawn_world_actor(
                             let actor_str = actor.to_string();
                             let mut plugins = plugins.lock().await;
                             fire_hook(
-                                &mut plugins, "on-npc-interact", &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &currency_schema, &plugin_state_store, &global_sessions,
+                                &mut plugins, "on-npc-interact", &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &currency_schema, &plugin_state_store, &global_sessions, &item_catalog_store,
                                 |plugin| plugin.on_npc_interact(&zone_id, &npc_str, &actor_str),
                             ).await;
                         }
@@ -581,7 +586,7 @@ pub fn spawn_world_actor(
                             let entity_id_str = entity_id.to_string();
                             let mut plugins = plugins.lock().await;
                             fire_hook(
-                                &mut plugins, "on-item-drop", &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &currency_schema, &plugin_state_store, &global_sessions,
+                                &mut plugins, "on-item-drop", &mut zone, &character_store, &entity_characters, &npc_stats, &attribute_schema, &currency_schema, &plugin_state_store, &global_sessions, &item_catalog_store,
                                 |plugin| plugin.on_item_drop(&zone_id, &entity_id_str, &item_type, quantity),
                             ).await;
                         }
@@ -664,6 +669,7 @@ async fn drain_and_apply_plugin_effects(
     currency_schema: &CurrencySchema,
     plugin_state_store: &crate::plugin_state::PluginStateStore,
     global_sessions: &Sessions,
+    item_catalog_store: &content::ItemCatalogStore,
 ) {
     let zone_id = zone.manifest.id.clone();
     let moves = runtime.drain_pending_moves();
@@ -720,6 +726,22 @@ async fn drain_and_apply_plugin_effects(
             tracing::warn!(entity_id, error = %e, "plugin on_respawn hook failed");
         }
     }
+    // #287 — `register-item-type` requests made by *this* hook call (from
+    // any hook, not just `on_load`, which `plugin_startup::load_plugin`
+    // already drains and persists itself before the plugin is ever handed
+    // back) — persisted through the exact same `ItemCatalogStore::register`
+    // path, so a mid-session registration reaches durable storage instead
+    // of only ever being visible via this process's own `item_catalog_cache`.
+    for entry in runtime.drain_pending_item_registrations() {
+        if let Err(e) = item_catalog_store.register(&entry).await {
+            tracing::warn!(
+                plugin = %runtime.name,
+                item_type = %entry.item_type,
+                error = %e,
+                "plugin register-item-type failed to persist"
+            );
+        }
+    }
 }
 
 /// Fires `hook_name` on every plugin that declared it in `plugin.toml`'s
@@ -743,6 +765,7 @@ async fn fire_hook(
     currency_schema: &CurrencySchema,
     plugin_state_store: &crate::plugin_state::PluginStateStore,
     global_sessions: &Sessions,
+    item_catalog_store: &content::ItemCatalogStore,
     mut call: impl FnMut(&mut plugin_host::LoadedPlugin) -> common::Result<()>,
 ) {
     for runtime in plugins.iter_mut() {
@@ -762,6 +785,7 @@ async fn fire_hook(
             currency_schema,
             plugin_state_store,
             global_sessions,
+            item_catalog_store,
         )
         .await;
     }
