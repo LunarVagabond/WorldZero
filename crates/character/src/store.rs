@@ -368,6 +368,67 @@ impl CharacterStore {
         Ok(new_value)
     }
 
+    /// Same as [`Self::get_stat`], but locks the character row
+    /// (`FOR UPDATE`) and reads within an already-open transaction —
+    /// used by `crafting::CharacterStore::craft_item` (#289) to check a
+    /// `grants` entry's `below` ceiling against the character's current
+    /// value before deciding whether to apply the delta at all.
+    pub(crate) async fn get_stat_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        character_id: CharacterId,
+        key: &str,
+    ) -> Result<i64> {
+        let stats: serde_json::Value =
+            sqlx::query_scalar("SELECT stats FROM characters WHERE id = $1 FOR UPDATE")
+                .bind(character_id.as_uuid())
+                .fetch_one(&mut **tx)
+                .await
+                .map_err(|e| Error::wrap("character", "failed to read character stats", e))?;
+        let stored = stats.as_object().cloned().unwrap_or_default();
+        self.schema.resolve_read(&stored, key)
+    }
+
+    /// Like [`Self::apply_stat_delta`], but clamped to `key`'s declared
+    /// bounds (via [`AttributeSchema::clamp`]) instead of rejected, and
+    /// run against an already-open transaction — used by
+    /// `crafting::CharacterStore::craft_item` (#289) so a `grants` delta
+    /// commits atomically with the craft's item changes. Clamping (not
+    /// rejecting) is deliberate here: a capped growth stat like
+    /// profession XP already at its max must never fail the craft that
+    /// produced the delta, it should just stop growing. Locks the
+    /// character row (`FOR UPDATE`) for the read, same as the item rows
+    /// `craft_item` already locks within its own transaction.
+    pub(crate) async fn apply_stat_delta_clamped_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        character_id: CharacterId,
+        key: &str,
+        delta: i64,
+    ) -> Result<i64> {
+        let stats: serde_json::Value =
+            sqlx::query_scalar("SELECT stats FROM characters WHERE id = $1 FOR UPDATE")
+                .bind(character_id.as_uuid())
+                .fetch_one(&mut **tx)
+                .await
+                .map_err(|e| Error::wrap("character", "failed to read character stats", e))?;
+        let stored = stats.as_object().cloned().unwrap_or_default();
+        let current = self.schema.resolve_read(&stored, key)?;
+        let new_value = self.schema.clamp(key, current.saturating_add(delta))?;
+
+        sqlx::query(
+            "UPDATE characters SET stats = jsonb_set(stats, $2, to_jsonb($3::bigint), true), updated_at = now() WHERE id = $1",
+        )
+        .bind(character_id.as_uuid())
+        .bind(vec![key.to_string()])
+        .bind(new_value)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| Error::wrap("character", "failed to write stat", e))?;
+
+        Ok(new_value)
+    }
+
     /// Falls back to the schema's declared default when the key is absent
     /// from the stored `stats` blob.
     pub async fn get_stat(&self, character_id: CharacterId, key: &str) -> Result<i64> {

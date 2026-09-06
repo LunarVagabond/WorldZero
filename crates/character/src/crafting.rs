@@ -12,6 +12,7 @@
 
 use common::id::CharacterId;
 use common::{Error, Result};
+use rand::RngExt;
 use sqlx::Row;
 
 use crate::crafting_schema::Recipe;
@@ -42,15 +43,21 @@ impl CharacterStore {
     /// transaction opens, so an ungated craft never even attempts the
     /// input check.
     ///
-    /// On success, every declared `grants` delta (#289) is applied via
-    /// `apply_stat_delta` — the same write path `equipment_schema.rs`'s
-    /// `stat_deltas` application already uses, so `stats.schema.yaml`'s
-    /// declared bounds are enforced for real. This happens *after* the
-    /// craft's own transaction commits, not inside it — same "best-effort,
-    /// not fully transactional" stance `equipment.rs`'s own doc comment
-    /// already takes for its stat-delta application: if a grant is
-    /// rejected (an out-of-bounds delta), the craft itself has already
-    /// gone through and isn't rolled back.
+    /// Every declared `grants` delta (#289) is applied *inside* the same
+    /// transaction as the craft's item changes, via
+    /// `apply_stat_delta_clamped_tx` — clamped to `stat`'s declared
+    /// bounds rather than rejected (unlike `equipment_schema.rs`'s
+    /// `stat_deltas`, which uses the rejecting `apply_stat_delta`): a
+    /// capped growth stat like profession XP already at its max must
+    /// never fail the craft that produced it, it should just stop
+    /// growing. Clamping is what makes this safe to run atomically —
+    /// with a rejecting write, "already at cap" would roll back the
+    /// whole craft, silently blocking a recipe forever once its grant
+    /// stat maxes out. A grant with a `below` ceiling is skipped
+    /// entirely (no delta, not even a clamped one) if the character's
+    /// current stat value has already reached it; a grant with a
+    /// `chance` is independently rolled per grant entry, skipped
+    /// entirely on a miss.
     pub async fn craft_item(
         &self,
         character_id: CharacterId,
@@ -180,17 +187,29 @@ impl CharacterStore {
         .get("quantity");
         results.push((recipe.output.item_type.clone(), output_quantity));
 
-        tx.commit()
-            .await
-            .map_err(|e| Error::wrap("character", "failed to commit craft", e))?;
-
         let mut stat_changes = Vec::with_capacity(recipe.grants.len());
         for grant in &recipe.grants {
+            if let Some(below) = grant.below {
+                let current = self.get_stat_tx(&mut tx, character_id, &grant.stat).await?;
+                if current >= below {
+                    continue;
+                }
+            }
+            if let Some(chance) = grant.chance
+                && !rand::rng().random_bool(chance)
+            {
+                continue;
+            }
+
             let new_value = self
-                .apply_stat_delta(character_id, &grant.stat, grant.amount)
+                .apply_stat_delta_clamped_tx(&mut tx, character_id, &grant.stat, grant.amount)
                 .await?;
             stat_changes.push((grant.stat.clone(), new_value));
         }
+
+        tx.commit()
+            .await
+            .map_err(|e| Error::wrap("character", "failed to commit craft", e))?;
 
         Ok(CraftOutcome {
             item_changes: results,
@@ -270,6 +289,8 @@ stats:
             grants: vec![crate::crafting_schema::StatGrant {
                 stat: "profession.blacksmithing_xp".to_string(),
                 amount: 10,
+                below: None,
+                chance: None,
             }],
             ..dagger_recipe()
         }
@@ -594,5 +615,190 @@ stats:
                 .unwrap(),
             10
         );
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn crafting_grant_clamps_at_the_stats_declared_max_instead_of_failing_the_craft() {
+        let schema = AttributeSchema::from_yaml(
+            r#"
+schema_version: 1
+stats:
+  - key: profession.blacksmithing_xp
+    type: int
+    default: 10
+    max: 15
+"#,
+        )
+        .unwrap();
+        let (store, character_id) = store_with_character_and_schema(schema).await;
+        store
+            .grant_item(character_id, "wolf-fang", 3)
+            .await
+            .unwrap();
+        store.grant_item(character_id, "iron-ore", 2).await.unwrap();
+
+        // Starting at 10, +10 would overflow the declared max of 15 — the
+        // grant must clamp to 15, not reject the whole craft.
+        let recipe = Recipe {
+            grants: vec![crate::crafting_schema::StatGrant {
+                stat: "profession.blacksmithing_xp".to_string(),
+                amount: 10,
+                below: None,
+                chance: None,
+            }],
+            ..dagger_recipe()
+        };
+
+        let outcome = store.craft_item(character_id, &recipe).await.unwrap();
+        assert_eq!(
+            outcome.stat_changes,
+            vec![("profession.blacksmithing_xp".to_string(), 15)]
+        );
+        assert_eq!(
+            store
+                .get_stat(character_id, "profession.blacksmithing_xp")
+                .await
+                .unwrap(),
+            15
+        );
+        // The craft itself still went through — clamping doesn't block it.
+        assert_eq!(
+            store
+                .item_quantity(character_id, "wolf-fang-dagger")
+                .await
+                .unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn crafting_grant_with_a_below_ceiling_is_skipped_once_the_ceiling_is_reached() {
+        let schema = AttributeSchema::from_yaml(
+            r#"
+schema_version: 1
+stats:
+  - key: profession.blacksmithing_xp
+    type: int
+    default: 5
+"#,
+        )
+        .unwrap();
+        let (store, character_id) = store_with_character_and_schema(schema).await;
+        store
+            .grant_item(character_id, "wolf-fang", 3)
+            .await
+            .unwrap();
+        store.grant_item(character_id, "iron-ore", 2).await.unwrap();
+
+        // Character is already at 5, and `below: 5` means the grant only
+        // applies while strictly under that ceiling — it must be skipped
+        // entirely (no delta at all, not even a clamped one), while the
+        // craft itself still succeeds.
+        let recipe = Recipe {
+            grants: vec![crate::crafting_schema::StatGrant {
+                stat: "profession.blacksmithing_xp".to_string(),
+                amount: 10,
+                below: Some(5),
+                chance: None,
+            }],
+            ..dagger_recipe()
+        };
+
+        let outcome = store.craft_item(character_id, &recipe).await.unwrap();
+        assert!(
+            outcome.stat_changes.is_empty(),
+            "{:?}",
+            outcome.stat_changes
+        );
+        assert_eq!(
+            store
+                .get_stat(character_id, "profession.blacksmithing_xp")
+                .await
+                .unwrap(),
+            5
+        );
+        assert_eq!(
+            store
+                .item_quantity(character_id, "wolf-fang-dagger")
+                .await
+                .unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn crafting_grant_with_chance_one_always_applies() {
+        let (store, character_id) =
+            store_with_character_and_schema(schema_with_profession_stats()).await;
+        store
+            .grant_item(character_id, "wolf-fang", 3)
+            .await
+            .unwrap();
+        store.grant_item(character_id, "iron-ore", 2).await.unwrap();
+
+        let recipe = Recipe {
+            grants: vec![crate::crafting_schema::StatGrant {
+                stat: "profession.blacksmithing_xp".to_string(),
+                amount: 10,
+                below: None,
+                chance: Some(1.0),
+            }],
+            ..dagger_recipe()
+        };
+
+        let outcome = store.craft_item(character_id, &recipe).await.unwrap();
+        assert_eq!(
+            outcome.stat_changes,
+            vec![("profession.blacksmithing_xp".to_string(), 10)]
+        );
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn crafting_grant_with_a_chance_applies_only_probabilistically() {
+        let schema = AttributeSchema::from_yaml(
+            r#"
+schema_version: 1
+stats:
+  - key: profession.blacksmithing_xp
+    type: int
+    default: 0
+"#,
+        )
+        .unwrap();
+        let (store, character_id) = store_with_character_and_schema(schema).await;
+
+        let recipe = Recipe {
+            grants: vec![crate::crafting_schema::StatGrant {
+                stat: "profession.blacksmithing_xp".to_string(),
+                amount: 1,
+                below: None,
+                chance: Some(0.5),
+            }],
+            ..dagger_recipe()
+        };
+
+        const TRIALS: i64 = 40;
+        for _ in 0..TRIALS {
+            store
+                .grant_item(character_id, "wolf-fang", 3)
+                .await
+                .unwrap();
+            store.grant_item(character_id, "iron-ore", 2).await.unwrap();
+            store.craft_item(character_id, &recipe).await.unwrap();
+        }
+
+        let xp = store
+            .get_stat(character_id, "profession.blacksmithing_xp")
+            .await
+            .unwrap();
+        // Each of TRIALS independent crafts applies its +1 grant with
+        // probability 0.5 — a wide band (not an exact value, which would
+        // be flaky) is enough to prove `chance` is actually gating the
+        // grant instead of always (or never) applying it.
+        assert!(xp > 5 && xp < TRIALS - 5, "xp = {xp}");
     }
 }

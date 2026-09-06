@@ -531,6 +531,7 @@ name = "character"
 version = "0.1.0"
 dependencies = [
  "common",
+ "rand 0.10.2",
  "serde",
  "serde_json",
  "serde_yaml",

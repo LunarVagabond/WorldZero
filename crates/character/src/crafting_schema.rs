@@ -60,14 +60,31 @@ pub struct StatRequirement {
 }
 
 /// A `grants` entry (#289) — applied as a delta to a declared stat on a
-/// successful craft, via the exact same write path
-/// (`CharacterStore::apply_stat_delta`) `equipment_schema.rs`'s
-/// `stat_deltas` application already uses, so `stats.schema.yaml`'s
-/// declared min/max bounds are enforced for real.
+/// successful craft, clamped to `stat`'s declared bounds
+/// (`CharacterStore::apply_stat_delta_clamped_tx`) rather than rejected,
+/// so a capped growth stat (e.g. profession XP already at max) never
+/// fails the craft that produced it.
+///
+/// Two optional fields let a dev express common profession-system asks
+/// without any new core concept of "profession" or "level":
+/// - `below`: the grant only applies if the character's *current* value
+///   for `stat` (before this grant) is strictly less than `below`. Lets
+///   a recipe stop granting XP past a dev-chosen point (e.g. "this
+///   recipe no longer teaches you anything once you've outleveled it")
+///   that's independent of `stat`'s own declared max — a recipe can cut
+///   off XP well below the stat's real ceiling.
+/// - `chance`: the probability (in `(0.0, 1.0]`) that this grant applies
+///   at all on an otherwise-successful craft. `None` (the field omitted)
+///   means always — the recipe author didn't ask for randomness, so
+///   none is added.
 #[derive(Debug, Clone, Deserialize)]
 pub struct StatGrant {
     pub stat: String,
     pub amount: i64,
+    #[serde(default)]
+    pub below: Option<i64>,
+    #[serde(default)]
+    pub chance: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -239,6 +256,19 @@ impl CraftingSchema {
                         format!(
                             "crafting.schema.yaml: recipe \"{}\" declares a grants entry for \
                              unknown stat \"{}\"",
+                            recipe.key, grant.stat
+                        ),
+                    ));
+                }
+                if let Some(chance) = grant.chance
+                    && !(chance > 0.0 && chance <= 1.0)
+                {
+                    return Err(Error::new(
+                        "character",
+                        format!(
+                            "crafting.schema.yaml: recipe \"{}\" declares a grants entry for \
+                             \"{}\" with chance {chance}, which must be greater than 0.0 and at \
+                             most 1.0 — omit `chance` entirely for a grant that always applies",
                             recipe.key, grant.stat
                         ),
                     ));
@@ -688,5 +718,123 @@ recipes:
         assert!(message.contains("recipe \"dagger\""), "{message}");
         assert!(message.contains("profession.does_not_exist"), "{message}");
         assert!(message.contains("grants"), "{message}");
+    }
+
+    #[test]
+    fn a_grants_entry_declares_below_and_chance_and_they_parse() {
+        let s = CraftingSchema::from_yaml(
+            r#"
+schema_version: 1
+recipes:
+  - key: wolf-fang-dagger
+    category: blacksmithing
+    inputs:
+      - item_type: wolf-fang
+        amount: 3
+      - item_type: iron-ore
+        amount: 2
+    output:
+      item_type: wolf-fang-dagger
+      amount: 1
+    grants:
+      - stat: profession.blacksmithing_xp
+        amount: 10
+        below: 500
+        chance: 0.5
+"#,
+            &attribute_schema(),
+            &known_item_types(),
+        )
+        .unwrap();
+        let recipe = s.resolve("wolf-fang-dagger").unwrap();
+        assert_eq!(recipe.grants[0].below, Some(500));
+        assert_eq!(recipe.grants[0].chance, Some(0.5));
+    }
+
+    #[test]
+    fn below_and_chance_default_to_none_when_omitted() {
+        let recipe = schema().resolve("wolf-fang-dagger").unwrap().clone();
+        assert!(recipe.grants.is_empty() || recipe.grants[0].below.is_none());
+    }
+
+    #[test]
+    fn a_grants_chance_of_zero_is_rejected_at_load_time() {
+        let result = CraftingSchema::from_yaml(
+            r#"
+schema_version: 1
+recipes:
+  - key: dagger
+    category: blacksmithing
+    inputs:
+      - item_type: iron-ore
+        amount: 1
+    output:
+      item_type: dagger
+      amount: 1
+    grants:
+      - stat: profession.blacksmithing_xp
+        amount: 1
+        chance: 0.0
+"#,
+            &attribute_schema(),
+            &known_item_types(),
+        );
+        let err = result.unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("recipe \"dagger\""), "{message}");
+        assert!(message.contains("chance"), "{message}");
+    }
+
+    #[test]
+    fn a_grants_chance_above_one_is_rejected_at_load_time() {
+        let result = CraftingSchema::from_yaml(
+            r#"
+schema_version: 1
+recipes:
+  - key: dagger
+    category: blacksmithing
+    inputs:
+      - item_type: iron-ore
+        amount: 1
+    output:
+      item_type: dagger
+      amount: 1
+    grants:
+      - stat: profession.blacksmithing_xp
+        amount: 1
+        chance: 1.5
+"#,
+            &attribute_schema(),
+            &known_item_types(),
+        );
+        let err = result.unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("recipe \"dagger\""), "{message}");
+        assert!(message.contains("chance"), "{message}");
+    }
+
+    #[test]
+    fn a_grants_chance_of_exactly_one_is_accepted() {
+        let result = CraftingSchema::from_yaml(
+            r#"
+schema_version: 1
+recipes:
+  - key: dagger
+    category: blacksmithing
+    inputs:
+      - item_type: iron-ore
+        amount: 1
+    output:
+      item_type: dagger
+      amount: 1
+    grants:
+      - stat: profession.blacksmithing_xp
+        amount: 1
+        chance: 1.0
+"#,
+            &attribute_schema(),
+            &known_item_types(),
+        );
+        assert!(result.is_ok(), "{result:?}");
     }
 }

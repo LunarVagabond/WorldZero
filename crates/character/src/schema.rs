@@ -90,6 +90,25 @@ impl AttributeSchema {
         Ok(())
     }
 
+    /// Clamps `value` into `key`'s declared bounds — a no-op for any
+    /// bound the schema doesn't declare. Unlike [`Self::validate_write`],
+    /// never rejects an out-of-range value; it saturates instead. Still
+    /// rejects an unknown `key` the same way `validate_write` does.
+    /// Used by crafting `grants` (#289): a capped growth stat (e.g.
+    /// profession XP already at its declared max) must never fail the
+    /// craft that produced the delta, it should just stop growing.
+    pub fn clamp(&self, key: &str, value: i64) -> Result<i64> {
+        let decl = self.declaration(key)?;
+        let mut value = value;
+        if let Some(min) = decl.min {
+            value = value.max(min);
+        }
+        if let Some(max) = decl.max {
+            value = value.min(max);
+        }
+        Ok(value)
+    }
+
     /// Produces the `stats` blob a character should have after moving to
     /// a realm whose declared schema is `self` (#53's transfer flow),
     /// given `stored` — the character's current stats, possibly declared
@@ -200,6 +219,29 @@ stats:
         // values, never the exact min/max themselves.
         assert!(example_schema().validate_write("hp", 0).is_ok());
         assert!(example_schema().validate_write("hp", 100).is_ok());
+    }
+
+    #[test]
+    fn clamp_saturates_at_declared_bounds_instead_of_rejecting() {
+        let schema = example_schema();
+        assert_eq!(schema.clamp("hp", 999).unwrap(), 100);
+        assert_eq!(schema.clamp("hp", -1).unwrap(), 0);
+        assert_eq!(schema.clamp("hp", 50).unwrap(), 50);
+    }
+
+    #[test]
+    fn clamp_with_no_declared_bounds_returns_the_value_unchanged() {
+        assert_eq!(
+            example_schema()
+                .clamp("reputation.ironclad_guild", 1_000_000)
+                .unwrap(),
+            1_000_000
+        );
+    }
+
+    #[test]
+    fn clamp_of_an_unknown_key_is_rejected() {
+        assert!(example_schema().clamp("stamina", 10).is_err());
     }
 
     #[test]
