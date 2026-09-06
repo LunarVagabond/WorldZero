@@ -36,16 +36,20 @@ public partial class Main : Node
         var uiLayer = new CanvasLayer { Name = "UI" };
         AddChild(uiLayer);
 
-        _loginPanel = new LoginPanel { Name = "LoginPanel" };
+        // #307: one shared Theme, assigned to each top-level panel
+        // individually — `uiLayer` is a CanvasLayer, not a Control, so
+        // there's no single ancestor to set `.Theme` on once for every
+        // panel to inherit from.
+        _loginPanel = new LoginPanel { Name = "LoginPanel", Theme = AppTheme.Instance };
         uiLayer.AddChild(_loginPanel);
 
-        _realmSelectPanel = new RealmSelectPanel { Name = "RealmSelectPanel", Visible = false };
+        _realmSelectPanel = new RealmSelectPanel { Name = "RealmSelectPanel", Visible = false, Theme = AppTheme.Instance };
         uiLayer.AddChild(_realmSelectPanel);
 
-        _characterSelectPanel = new CharacterSelectPanel { Name = "CharacterSelectPanel", Visible = false };
+        _characterSelectPanel = new CharacterSelectPanel { Name = "CharacterSelectPanel", Visible = false, Theme = AppTheme.Instance };
         uiLayer.AddChild(_characterSelectPanel);
 
-        _hud = new Hud { Name = "Hud", Visible = false };
+        _hud = new Hud { Name = "Hud", Visible = false, Theme = AppTheme.Instance };
         uiLayer.AddChild(_hud);
 
         GameState.Instance.ConnectionStateChanged += OnConnectionStateChanged;

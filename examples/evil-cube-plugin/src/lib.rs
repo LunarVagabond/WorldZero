@@ -9,14 +9,16 @@
 //! convention, since `StatChanged` (#211) is never sent for an
 //! NPC-targeted stat write (no owning connection to push to).
 //!
-//! Also backs the test grounds' admin panel: a handful of
+//! Also backs the test grounds' admin/QA panel: a handful of
 //! `caller-role`-gated chat commands (`docs/specs/Auth_Spec.md`'s
 //! "Account roles" — the real, backend-enforced mechanism; there is no
-//! core wire concept of "admin" beyond this) plus an
+//! core wire concept of "admin" beyond this), gated on either the real
+//! `admin` role or the lighter-weight `qa` role (#307 — same tooling,
+//! without needing the real admin designation on a test account) plus an
 //! `on-player-join-zone` announcement of the caller's own roles (an
 //! ad-hoc `PluginMessage` convention, same shape as the `cube:`
-//! convention, since nothing in core tells a *client* its own roles
-//! either — `caller-role` is plugin-facing only).
+//! convention — now a fallback: #248 added a real `roles` field to
+//! `Authenticated` that the client reads first).
 //!
 //! Build with `rustup target add wasm32-wasip2` then
 //! `cargo build --manifest-path examples/evil-cube-plugin/Cargo.toml
@@ -38,6 +40,9 @@ const CUBE_ENTITY_ID_KEY: &str = "evil-cube-entity-id";
 const MAX_HP: i64 = 50;
 const HIT_DAMAGE: i64 = 10;
 const ADMIN_ROLE: &str = "admin";
+/// #307: a lighter-weight way to grant a test account the same tooling
+/// `admin` gets, without using the real admin designation everywhere.
+const QA_ROLE: &str = "qa";
 
 fn read_tracked_hp(zone_id: &str) -> i64 {
     match host::plugin_state_get(&PluginStateScope::Zone(zone_id.to_string()), HP_STATE_KEY) {
@@ -86,16 +91,16 @@ fn cube_convention_dead(entity_id: &str) -> String {
     format!("cube:{entity_id}:dead")
 }
 
-fn is_admin(entity_id: &str) -> bool {
+fn is_qa_or_admin(entity_id: &str) -> bool {
     host::caller_role(entity_id)
-        .map(|roles| roles.iter().any(|r| r == ADMIN_ROLE))
+        .map(|roles| roles.iter().any(|r| r == ADMIN_ROLE || r == QA_ROLE))
         .unwrap_or(false)
 }
 
 fn deny_admin(sender_entity_id: &str, command: &str) {
     let _ = host::send_message(
         sender_entity_id,
-        &format!("admin:denied:{command} (your account has no \"admin\" role)"),
+        &format!("admin:denied:{command} (your account has no \"admin\" or \"qa\" role)"),
     );
 }
 
@@ -235,7 +240,7 @@ impl Guest for Plugin {
     fn on_chat_command(zone_id: String, command: String, args: String, sender_entity_id: String) {
         match command.as_str() {
             "killcube" => {
-                if !is_admin(&sender_entity_id) {
+                if !is_qa_or_admin(&sender_entity_id) {
                     deny_admin(&sender_entity_id, &command);
                     return;
                 }
@@ -252,7 +257,7 @@ impl Guest for Plugin {
                 let _ = host::send_message(&sender_entity_id, &format!("admin:killcube:done ({cube_id})"));
             }
             "respawncube" => {
-                if !is_admin(&sender_entity_id) {
+                if !is_qa_or_admin(&sender_entity_id) {
                     deny_admin(&sender_entity_id, &command);
                     return;
                 }
@@ -272,7 +277,7 @@ impl Guest for Plugin {
                 let _ = host::send_message(&sender_entity_id, &format!("admin:respawncube:done ({cube_id})"));
             }
             "grant" => {
-                if !is_admin(&sender_entity_id) {
+                if !is_qa_or_admin(&sender_entity_id) {
                     deny_admin(&sender_entity_id, &command);
                     return;
                 }
@@ -295,7 +300,7 @@ impl Guest for Plugin {
                 }
             }
             "grantcurrency" => {
-                if !is_admin(&sender_entity_id) {
+                if !is_qa_or_admin(&sender_entity_id) {
                     deny_admin(&sender_entity_id, &command);
                     return;
                 }
@@ -314,6 +319,35 @@ impl Guest for Plugin {
                     }
                     Err(e) => {
                         let _ = host::send_message(&sender_entity_id, &format!("admin:grantcurrency:failed ({e})"));
+                    }
+                }
+            }
+            // #307: a real, unrestricted teleport — `host::teleport_entity`
+            // skips `validate_movement` entirely (see its own doc
+            // comment), gated on `admin` capability at the host-function
+            // level regardless of what role check happens here.
+            "teleport" => {
+                if !is_qa_or_admin(&sender_entity_id) {
+                    deny_admin(&sender_entity_id, &command);
+                    return;
+                }
+                let mut parts = args.split_whitespace();
+                let (Some(x_str), Some(y_str), Some(z_str)) =
+                    (parts.next(), parts.next(), parts.next())
+                else {
+                    let _ = host::send_message(&sender_entity_id, "admin:teleport:usage /teleport <x> <y> <z>");
+                    return;
+                };
+                let (Ok(x), Ok(y), Ok(z)) = (x_str.parse::<f64>(), y_str.parse::<f64>(), z_str.parse::<f64>()) else {
+                    let _ = host::send_message(&sender_entity_id, "admin:teleport:x/y/z must be numbers");
+                    return;
+                };
+                match host::teleport_entity(&sender_entity_id, x, y, z) {
+                    Ok(()) => {
+                        let _ = host::send_message(&sender_entity_id, &format!("admin:teleport:done ({x}, {y}, {z})"));
+                    }
+                    Err(e) => {
+                        let _ = host::send_message(&sender_entity_id, &format!("admin:teleport:failed ({e})"));
                     }
                 }
             }

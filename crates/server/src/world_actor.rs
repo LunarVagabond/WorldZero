@@ -673,6 +673,7 @@ async fn drain_and_apply_plugin_effects(
 ) {
     let zone_id = zone.manifest.id.clone();
     let moves = runtime.drain_pending_moves();
+    let teleports = runtime.drain_pending_teleports();
     let stat_deltas = runtime.drain_pending_stat_deltas();
     let item_grants = runtime.drain_pending_item_grants();
     let item_removals = runtime.drain_pending_item_removals();
@@ -681,6 +682,7 @@ async fn drain_and_apply_plugin_effects(
     let acquired = apply_plugin_pending_effects(
         zone,
         moves,
+        teleports,
         stat_deltas,
         item_grants,
         item_removals,
@@ -811,6 +813,7 @@ async fn fire_hook(
 async fn apply_plugin_pending_effects(
     zone: &mut Zone,
     pending_moves: Vec<(String, f64, f64, f64)>,
+    pending_teleports: Vec<(String, f64, f64, f64)>,
     pending_stat_deltas: Vec<(String, String, i64)>,
     pending_item_grants: Vec<(String, String, i64)>,
     pending_item_removals: Vec<(String, String, i64)>,
@@ -845,6 +848,18 @@ async fn apply_plugin_pending_effects(
                 tracing::warn!(
                     entity_id,
                     "plugin requested a move for an invalid entity id"
+                )
+            }
+        }
+    }
+
+    for (entity_id, x, y, z) in pending_teleports {
+        match entity_id.parse::<EntityId>() {
+            Ok(entity_id) => zone.request_teleport(entity_id, (x, y, z)),
+            Err(_) => {
+                tracing::warn!(
+                    entity_id,
+                    "plugin requested a teleport for an invalid entity id"
                 )
             }
         }

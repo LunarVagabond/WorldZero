@@ -21,6 +21,8 @@ public partial class CharacterSelectPanel : Control
     private Label _statusLabel = null!;
     private string[] _archetypeKeys = System.Array.Empty<string>();
     private CharacterList? _lastList;
+    private ConfirmationDialog _deleteConfirm = null!;
+    private string? _pendingDeleteCharacterId;
 
     public override void _Ready()
     {
@@ -45,6 +47,7 @@ public partial class CharacterSelectPanel : Control
         nc.OnCharacterOptions += HandleCharacterOptions;
         nc.OnCharacterCreated += created => nc.SendSelectCharacter(created.CharacterId);
         nc.OnCharacterError += HandleCharacterError;
+        nc.OnCharacterDeleted += _ => NetworkClient.Instance.SendListCharacters();
     }
 
     private static void BuildTwoClientWarning(Control parent)
@@ -59,13 +62,13 @@ public partial class CharacterSelectPanel : Control
         // client's "Auto" button did nothing. Made loud and explicit.
         UiHelpers.AddWrappingLabel(parent,
             "Testing with two clients? Each one needs a DIFFERENT account — click Register on each, don't Login/Resume the same account twice.")
-            .Modulate = new Color(0.9f, 0.85f, 0.4f);
+            .Modulate = AppTheme.Warning;
     }
 
     private void BuildStatusLabel(Control parent)
     {
         _statusLabel = UiHelpers.AddWrappingLabel(parent);
-        _statusLabel.Modulate = new Color(1f, 0.35f, 0.35f);
+        _statusLabel.Modulate = AppTheme.Error;
     }
 
     private void BuildExistingCharactersSection(Control parent)
@@ -77,6 +80,16 @@ public partial class CharacterSelectPanel : Control
         var selectButton = new Button { Text = "Select highlighted" };
         selectButton.Pressed += OnSelectHighlighted;
         section.AddChild(selectButton);
+
+        // #307: permanent, no undo — behind a real confirmation dialog
+        // rather than a bare button, since a mis-click here can't be
+        // taken back (DeleteCharacter's own doc comment: no soft-delete).
+        var deleteButton = new Button { Text = "Delete highlighted" };
+        _deleteConfirm = new ConfirmationDialog { DialogText = "Permanently delete this character? This cannot be undone." };
+        _deleteConfirm.Confirmed += OnDeleteConfirmed;
+        section.AddChild(_deleteConfirm);
+        deleteButton.Pressed += OnDeletePressed;
+        section.AddChild(deleteButton);
     }
 
     private void BuildCreateCharacterSection(Control parent)
@@ -189,6 +202,29 @@ public partial class CharacterSelectPanel : Control
         }
         var characterId = _lastList.Characters[selected[0]].CharacterId;
         NetworkClient.Instance.SendSelectCharacter(characterId);
+    }
+
+    private void OnDeletePressed()
+    {
+        var selected = _characterList.GetSelectedItems();
+        if (selected.Length == 0 || _lastList is null)
+        {
+            _statusLabel.Text = "Highlight a character first.";
+            return;
+        }
+        var character = _lastList.Characters[selected[0]];
+        _pendingDeleteCharacterId = character.CharacterId;
+        _deleteConfirm.DialogText = $"Permanently delete \"{character.Name}\"? This cannot be undone.";
+        _deleteConfirm.PopupCentered();
+    }
+
+    private void OnDeleteConfirmed()
+    {
+        if (_pendingDeleteCharacterId is { } characterId)
+        {
+            NetworkClient.Instance.SendDeleteCharacter(characterId);
+            _pendingDeleteCharacterId = null;
+        }
     }
 
     private void OnCreatePressed()

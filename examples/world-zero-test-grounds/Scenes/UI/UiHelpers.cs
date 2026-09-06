@@ -60,7 +60,7 @@ public static class UiHelpers
 
         if (!string.IsNullOrEmpty(title))
         {
-            var header = new Label { Text = title, Modulate = new Color(0.75f, 0.85f, 1f) };
+            var header = new Label { Text = title, Modulate = AppTheme.Accent };
             header.AddThemeFontSizeOverride("font_size", 16);
             box.AddChild(header);
             box.AddChild(new HSeparator());

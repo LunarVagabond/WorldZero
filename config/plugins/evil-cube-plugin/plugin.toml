@@ -3,14 +3,16 @@
 # PROMPT.md §7.2) and its admin panel (caller-role-gated chat commands).
 [plugin]
 name = "evil-cube-plugin"
-host_api_version = "0.15.0"
+host_api_version = "0.16.0"
 # report-death/report-respawn gated by combat, spawn-npc by spawning,
-# send-message by messaging, grant-item/modify-currency by economy
+# send-message by messaging, grant-item/modify-currency by economy,
+# teleport-entity by admin (#307's deliberately separate, unrestricted
+# capability — see plugin_host::manifest::CAPABILITY_ADMIN's doc comment)
 # (docs/specs/Plugin_API.md's "Capability gating"). caller-role is
 # ungated regardless of declared capabilities.
-capabilities = ["combat", "spawning", "messaging", "economy"]
+capabilities = ["combat", "spawning", "messaging", "economy", "admin"]
 message_types = []
-chat_commands = ["killcube", "respawncube", "grant", "grantcurrency"]
+chat_commands = ["killcube", "respawncube", "grant", "grantcurrency", "teleport"]
 # Every hook actually implemented meaningfully — undeclared hooks are
 # never called by the host at all (server::plugin_startup::PluginRuntime::wants),
 # regardless of whether the Guest impl below has real logic for them.

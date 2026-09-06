@@ -35,7 +35,7 @@ fn manifest() -> PluginManifest {
         r#"
 [plugin]
 name = "test-plugin"
-host_api_version = "0.15.0"
+host_api_version = "0.16.0"
 capabilities = ["spawning", "movement", "combat", "economy", "messaging"]
 message_types = [1000]
 "#,
@@ -53,7 +53,7 @@ fn restricted_manifest() -> PluginManifest {
         r#"
 [plugin]
 name = "test-plugin"
-host_api_version = "0.15.0"
+host_api_version = "0.16.0"
 capabilities = ["messaging"]
 message_types = [1000]
 "#,
@@ -72,6 +72,8 @@ struct RecordingCallbacks {
     stat_deltas: Arc<Mutex<Vec<(String, String, i64)>>>,
     character_stat_deltas: Arc<Mutex<Vec<(String, String, i64)>>>,
     moves: RecordedMoves,
+    /// `(entity_id, x, y, z)` recorded via `teleport-entity` (#307).
+    teleports: RecordedMoves,
     item_grants: Arc<Mutex<Vec<(String, String, i64)>>>,
     item_removals: Arc<Mutex<Vec<(String, String, i64)>>>,
     currency_deltas: Arc<Mutex<Vec<(String, String, i64)>>>,
@@ -149,6 +151,14 @@ impl HostCallbacks for RecordingCallbacks {
 
     fn move_entity(&mut self, entity_id: &str, x: f64, y: f64, z: f64) -> Result<(), String> {
         self.moves
+            .lock()
+            .unwrap()
+            .push((entity_id.to_string(), x, y, z));
+        Ok(())
+    }
+
+    fn teleport_entity(&mut self, entity_id: &str, x: f64, y: f64, z: f64) -> Result<(), String> {
+        self.teleports
             .lock()
             .unwrap()
             .push((entity_id.to_string(), x, y, z));

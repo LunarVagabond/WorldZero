@@ -48,7 +48,7 @@ public partial class LoginPanel : Control
     {
         UiHelpers.AddWrappingLabel(parent,
             "Running a second client on this machine? Register a NEW account below for it — the server hard-blocks selecting the same character from two connections at once, so reusing this one's default credentials will get the other client stuck.")
-            .Modulate = new Color(0.9f, 0.85f, 0.4f);
+            .Modulate = AppTheme.Warning;
     }
 
     private void BuildConnectionSection(Control parent)
@@ -108,7 +108,7 @@ public partial class LoginPanel : Control
     private void BuildStatusLabel(Control parent)
     {
         _statusLabel = UiHelpers.AddWrappingLabel(parent);
-        _statusLabel.Modulate = new Color(1f, 0.35f, 0.35f);
+        _statusLabel.Modulate = AppTheme.Error;
     }
 
     private void RefreshSavedSessions()

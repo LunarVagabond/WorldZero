@@ -12,6 +12,7 @@ public partial class PartyPanel : Control
 {
     private LineEdit _targetEdit = null!;
     private Label _pendingInviteLabel = null!;
+    private Label _membersLabel = null!;
     private string? _pendingInviteFrom;
 
     public override void _Ready()
@@ -45,9 +46,20 @@ public partial class PartyPanel : Control
         respondRow.AddChild(declineButton);
 
         box.AddChild(new HSeparator());
+        var joinLayerButton = new Button { Text = "Join their layer" };
+        joinLayerButton.Pressed += () => NetworkClient.Instance.SendJoinGroupLayer(_targetEdit.Text.Trim());
+        box.AddChild(joinLayerButton);
+        UiHelpers.AddWrappingLabel(box, "Target must be a fellow party member already spawned in your current zone.")
+            .Modulate = AppTheme.Warning;
+
+        box.AddChild(new HSeparator());
         var leaveButton = new Button { Text = "Leave party" };
         leaveButton.Pressed += () => NetworkClient.Instance.SendPartyLeave();
         box.AddChild(leaveButton);
+
+        box.AddChild(new HSeparator());
+        UiHelpers.AddWrappingLabel(box, "Members:");
+        _membersLabel = UiHelpers.AddWrappingLabel(box, "(no party)");
 
         var nc = NetworkClient.Instance;
         nc.OnPartyInviteReceived += msg =>
@@ -59,6 +71,7 @@ public partial class PartyPanel : Control
         {
             GameState.Instance.PartyMembers.Clear();
             GameState.Instance.PartyMembers.AddRange(msg.Members);
+            _membersLabel.Text = msg.Members.Count == 0 ? "(no party)" : string.Join("\n", msg.Members);
         };
     }
 }

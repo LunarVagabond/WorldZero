@@ -123,6 +123,20 @@ interface host {
     /// this to make it happen.
     move-entity: func(entity-id: string, x: f64, y: f64, z: f64) -> result<_, string>;
 
+    /// Places `entity-id` at `(x, y, z)` directly, applied on the zone's
+    /// next tick same as `move-entity`, but **skipping
+    /// `world::movement::validate_movement` entirely** — no speed cap, no
+    /// collision check, no navmesh containment. This is deliberately a
+    /// real, unrestricted teleport, gated on the `admin` capability
+    /// (#307) rather than `movement`'s: it exists for admin/QA tooling
+    /// (a plugin's own caller-role-gated chat command, e.g.
+    /// `/teleport x y z`), not for ordinary gameplay movement — a plugin
+    /// wanting normal NPC-patrol-style movement should use `move-entity`,
+    /// which stays validated. Broadcasts the same way a successful move
+    /// does (`seq: 0`, same plugin-originated convention `move-entity`
+    /// uses) so every connected client sees the jump.
+    teleport-entity: func(entity-id: string, x: f64, y: f64, z: f64) -> result<_, string>;
+
     /// Grants `quantity` of `item-type` to `entity-id` — queued and
     /// applied through `character::CharacterStore::grant_item` on the
     /// zone's next drain, same "validated write, never a direct storage

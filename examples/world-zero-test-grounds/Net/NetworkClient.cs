@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using Godot;
 using Google.Protobuf;
 using WorldZeroTestGrounds.State;
@@ -49,6 +50,7 @@ public partial class NetworkClient : Node
     public event Action<WChar.CharacterSelected>? OnCharacterSelected;
     public event Action<WChar.CharacterOptions>? OnCharacterOptions;
     public event Action<string>? OnCharacterError;
+    public event Action<WChar.CharacterDeleted>? OnCharacterDeleted;
 
     // --- Chat (message_type 100) ---
     public event Action<WChat.Joined>? OnChatJoined;
@@ -76,6 +78,15 @@ public partial class NetworkClient : Node
     public event Action<WSession.StatChanged>? OnStatChanged;
     public event Action<WSession.ItemChanged>? OnItemChanged;
     public event Action<WSession.CurrencyChanged>? OnCurrencyChanged;
+    // #307: item/equipment/trade flows that previously had no client UI at
+    // all — every one of these wire messages already existed server-side.
+    public event Action<WSession.ItemMoved>? OnItemMoved;
+    public event Action<WSession.EquipmentChanged>? OnEquipmentChanged;
+    public event Action<WSession.TradeRequestReceived>? OnTradeRequestReceived;
+    public event Action<WSession.TradeRequestDeclined>? OnTradeRequestDeclined;
+    public event Action<WSession.TradeStateChanged>? OnTradeStateChanged;
+    public event Action<WSession.TradeCancelled>? OnTradeCancelled;
+    public event Action? OnTradeCompleted;
 
     public event Action<string>? OnDisconnected;
 
@@ -221,7 +232,13 @@ public partial class NetworkClient : Node
         switch (msg.KindCase)
         {
             case WAuth.ServerMessage.KindOneofCase.Authenticated:
-                GameState.Instance.LogEvent("auth", $"Authenticated account={msg.Authenticated.AccountId} username={msg.Authenticated.Username}");
+                GameState.Instance.LogEvent("auth", $"Authenticated account={msg.Authenticated.AccountId} username={msg.Authenticated.Username} roles=[{string.Join(",", msg.Authenticated.Roles)}]");
+                // #248's real `roles` field on Authenticated — the
+                // ad-hoc evil-cube-plugin `roles:` PluginMessage
+                // convention below is now a fallback for a plugin that
+                // still only announces roles that way, not the primary
+                // source (core has a structured answer to this now).
+                GameState.Instance.SetRoles(msg.Authenticated.Roles);
                 OnAuthenticated?.Invoke(msg.Authenticated);
                 break;
             case WAuth.ServerMessage.KindOneofCase.Error:
@@ -309,6 +326,10 @@ public partial class NetworkClient : Node
                 GameState.Instance.LogEvent("character", $"CharacterOptions ({msg.CharacterOptions.Archetypes.Count} archetypes)");
                 OnCharacterOptions?.Invoke(msg.CharacterOptions);
                 break;
+            case WChar.ServerMessage.KindOneofCase.CharacterDeleted:
+                GameState.Instance.LogEvent("character", $"CharacterDeleted {msg.CharacterDeleted.CharacterId}");
+                OnCharacterDeleted?.Invoke(msg.CharacterDeleted);
+                break;
             case WChar.ServerMessage.KindOneofCase.Error:
                 GameState.Instance.LogEvent("character", $"Error: {msg.Error.Message}");
                 OnCharacterError?.Invoke(msg.Error.Message);
@@ -342,6 +363,13 @@ public partial class NetworkClient : Node
         var m = new WChar.ClientMessage { SelectCharacter = new WChar.SelectCharacter { CharacterId = characterId } };
         _connection!.Send(MessageType.Character, m.ToByteArray());
         GameState.Instance.LogEvent("character", $"-> SelectCharacter {characterId}");
+    }
+
+    public void SendDeleteCharacter(string characterId)
+    {
+        var m = new WChar.ClientMessage { DeleteCharacter = new WChar.DeleteCharacter { CharacterId = characterId } };
+        _connection!.Send(MessageType.Character, m.ToByteArray());
+        GameState.Instance.LogEvent("character", $"-> DeleteCharacter {characterId}");
     }
 
     // --- Chat dispatch ---
@@ -503,6 +531,55 @@ public partial class NetworkClient : Node
                 _isUdpBound = true;
                 GameState.Instance.LogEvent("net", "UDP/DTLS bound — movement now travels over UDP");
                 break;
+            case WSession.ServerMessage.KindOneofCase.ItemMoved:
+                GameState.Instance.LogEvent("items", $"ItemMoved {msg.ItemMoved.ItemType} -> slot {(msg.ItemMoved.HasSlotIndex ? msg.ItemMoved.SlotIndex.ToString() : "unsorted")}");
+                OnItemMoved?.Invoke(msg.ItemMoved);
+                break;
+            case WSession.ServerMessage.KindOneofCase.EquipmentChanged:
+                GameState.Instance.LogEvent("equipment", $"EquipmentChanged {msg.EquipmentChanged.Slot} -> {(string.IsNullOrEmpty(msg.EquipmentChanged.ItemType) ? "(empty)" : msg.EquipmentChanged.ItemType)}");
+                if (string.IsNullOrEmpty(msg.EquipmentChanged.ItemType))
+                {
+                    GameState.Instance.EquippedItems.Remove(msg.EquipmentChanged.Slot);
+                }
+                else
+                {
+                    GameState.Instance.EquippedItems[msg.EquipmentChanged.Slot] = msg.EquipmentChanged.ItemType;
+                }
+                OnEquipmentChanged?.Invoke(msg.EquipmentChanged);
+                break;
+            case WSession.ServerMessage.KindOneofCase.TradeRequestReceived:
+                GameState.Instance.LogEvent("trade", $"TradeRequestReceived from={msg.TradeRequestReceived.FromEntityId}");
+                GameState.Instance.PendingTradeRequestFromEntityId = msg.TradeRequestReceived.FromEntityId;
+                OnTradeRequestReceived?.Invoke(msg.TradeRequestReceived);
+                break;
+            case WSession.ServerMessage.KindOneofCase.TradeRequestDeclined:
+                GameState.Instance.LogEvent("trade", $"TradeRequestDeclined by={msg.TradeRequestDeclined.ByEntityId}");
+                OnTradeRequestDeclined?.Invoke(msg.TradeRequestDeclined);
+                break;
+            case WSession.ServerMessage.KindOneofCase.TradeStateChanged:
+                var t = msg.TradeStateChanged;
+                GameState.Instance.LogEvent("trade", $"TradeStateChanged with={t.OtherEntityId} yourConfirmed={t.YourConfirmed} theirConfirmed={t.TheirConfirmed}");
+                GameState.Instance.PendingTradeRequestFromEntityId = null;
+                GameState.Instance.ActiveTrade = new TradeState(
+                    t.OtherEntityId,
+                    t.YourItems.Select(i => (i.ItemType, i.Quantity)).ToList(),
+                    t.YourCurrency.Select(c => (c.CurrencyKey, c.Amount)).ToList(),
+                    t.YourConfirmed,
+                    t.TheirItems.Select(i => (i.ItemType, i.Quantity)).ToList(),
+                    t.TheirCurrency.Select(c => (c.CurrencyKey, c.Amount)).ToList(),
+                    t.TheirConfirmed);
+                OnTradeStateChanged?.Invoke(t);
+                break;
+            case WSession.ServerMessage.KindOneofCase.TradeCancelled:
+                GameState.Instance.LogEvent("trade", $"TradeCancelled by={msg.TradeCancelled.ByEntityId}");
+                GameState.Instance.ActiveTrade = null;
+                OnTradeCancelled?.Invoke(msg.TradeCancelled);
+                break;
+            case WSession.ServerMessage.KindOneofCase.TradeCompleted:
+                GameState.Instance.LogEvent("trade", "TradeCompleted");
+                GameState.Instance.ActiveTrade = null;
+                OnTradeCompleted?.Invoke();
+                break;
         }
     }
 
@@ -653,5 +730,88 @@ public partial class NetworkClient : Node
         var m = new WSession.ClientMessage { CraftItem = new WSession.CraftItem { RecipeKey = recipeKey } };
         _connection!.Send(MessageType.Session, m.ToByteArray());
         GameState.Instance.LogEvent("crafting", $"-> CraftItem {recipeKey}");
+    }
+
+    // --- Item/equipment (#307) ---
+
+    public void SendDropItem(string itemType, long quantity)
+    {
+        var m = new WSession.ClientMessage { DropItem = new WSession.DropItem { ItemType = itemType, Quantity = quantity } };
+        _connection!.Send(MessageType.Session, m.ToByteArray());
+        GameState.Instance.LogEvent("items", $"-> DropItem {itemType} x{quantity}");
+    }
+
+    public void SendMoveItemToSlot(string itemType, int slotIndex)
+    {
+        var m = new WSession.ClientMessage { MoveItemToSlot = new WSession.MoveItemToSlot { ItemType = itemType, SlotIndex = slotIndex } };
+        _connection!.Send(MessageType.Session, m.ToByteArray());
+        GameState.Instance.LogEvent("items", $"-> MoveItemToSlot {itemType} -> {slotIndex}");
+    }
+
+    public void SendEquipItem(string itemType)
+    {
+        var m = new WSession.ClientMessage { EquipItem = new WSession.EquipItem { ItemType = itemType } };
+        _connection!.Send(MessageType.Session, m.ToByteArray());
+        GameState.Instance.LogEvent("equipment", $"-> EquipItem {itemType}");
+    }
+
+    public void SendUnequipItem(string slot)
+    {
+        var m = new WSession.ClientMessage { UnequipItem = new WSession.UnequipItem { Slot = slot } };
+        _connection!.Send(MessageType.Session, m.ToByteArray());
+        GameState.Instance.LogEvent("equipment", $"-> UnequipItem {slot}");
+    }
+
+    // --- Group layer (#307) ---
+
+    public void SendJoinGroupLayer(string otherEntityId)
+    {
+        var m = new WSession.ClientMessage { JoinGroupLayer = new WSession.JoinGroupLayer { OtherEntityId = otherEntityId } };
+        _connection!.Send(MessageType.Session, m.ToByteArray());
+        GameState.Instance.LogEvent("party", $"-> JoinGroupLayer {otherEntityId}");
+    }
+
+    // --- Trade (#307) ---
+
+    public void SendTradeRequest(string targetEntityId)
+    {
+        var m = new WSession.ClientMessage { TradeRequest = new WSession.TradeRequest { TargetEntityId = targetEntityId } };
+        _connection!.Send(MessageType.Session, m.ToByteArray());
+        GameState.Instance.LogEvent("trade", $"-> TradeRequest {targetEntityId}");
+    }
+
+    public void SendTradeRequestResponse(bool accept)
+    {
+        var m = new WSession.ClientMessage { TradeRequestResponse = new WSession.TradeRequestResponse { Accept = accept } };
+        _connection!.Send(MessageType.Session, m.ToByteArray());
+        GameState.Instance.LogEvent("trade", $"-> TradeRequestResponse accept={accept}");
+    }
+
+    public void SendTradeOfferItem(string itemType, long quantity)
+    {
+        var m = new WSession.ClientMessage { TradeOfferItem = new WSession.TradeOfferItem { ItemType = itemType, Quantity = quantity } };
+        _connection!.Send(MessageType.Session, m.ToByteArray());
+        GameState.Instance.LogEvent("trade", $"-> TradeOfferItem {itemType} x{quantity}");
+    }
+
+    public void SendTradeOfferCurrency(string currencyKey, long amount)
+    {
+        var m = new WSession.ClientMessage { TradeOfferCurrency = new WSession.TradeOfferCurrency { CurrencyKey = currencyKey, Amount = amount } };
+        _connection!.Send(MessageType.Session, m.ToByteArray());
+        GameState.Instance.LogEvent("trade", $"-> TradeOfferCurrency {currencyKey} x{amount}");
+    }
+
+    public void SendTradeConfirm()
+    {
+        var m = new WSession.ClientMessage { TradeConfirm = new WSession.TradeConfirm() };
+        _connection!.Send(MessageType.Session, m.ToByteArray());
+        GameState.Instance.LogEvent("trade", "-> TradeConfirm");
+    }
+
+    public void SendTradeCancel()
+    {
+        var m = new WSession.ClientMessage { TradeCancel = new WSession.TradeCancel() };
+        _connection!.Send(MessageType.Session, m.ToByteArray());
+        GameState.Instance.LogEvent("trade", "-> TradeCancel");
     }
 }

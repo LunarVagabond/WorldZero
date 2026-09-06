@@ -6,7 +6,8 @@ namespace WorldZeroTestGrounds.Scenes.UI;
 // The bottom dock — full width, not full-height-on-the-right (the
 // original layout overwhelmed the screen with whatever panel was
 // active). A single-selection tab strip (Debug/Chat/Party/Guild/Craft/
-// Inventory, plus Admin once your account announces the `admin` role):
+// Inventory/Equipment/Trade, plus Admin once your account announces the
+// `admin` or `qa` role — #307's lighter-weight test-account role):
 // only one subsystem's contents are ever visible at a time, and the
 // active tab's output gets the whole dock width rather than splitting
 // it with every other panel side by side (the previous
@@ -41,6 +42,8 @@ public partial class Hud : Control
         AddTab("Craft", new CraftingPanel());
         _inventoryTab = new InventoryPanel();
         AddTab("Inventory", _inventoryTab);
+        AddTab("Equipment", new EquipmentPanel());
+        AddTab("Trade", new TradePanel());
 
         GameState.Instance.RolesChanged += OnRolesChanged;
         OnRolesChanged();
@@ -74,7 +77,10 @@ public partial class Hud : Control
 
     private void OnRolesChanged()
     {
-        bool shouldShow = GameState.Instance.IsAdmin;
+        // #307: `qa` is a lighter-weight way to grant a test account the
+        // same tooling `admin` gets, without using the real admin
+        // designation — same tab either way, gated on either role.
+        bool shouldShow = GameState.Instance.IsAdmin || GameState.Instance.IsQa;
         bool alreadyShown = _adminTab is not null;
         if (shouldShow == alreadyShown)
         {
