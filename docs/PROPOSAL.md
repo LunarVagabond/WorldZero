@@ -339,7 +339,7 @@ What ships in core vs. what's left to the operator, stated explicitly so this do
 - **A minimal admin/introspection API** — active zones, loaded plugin versions, connected player counts, recent transfer audit entries ([Realm & Character Policy Model](#realm--character-policy-model)). An API, not a bundled dashboard product.
 
 **Explicitly left to the operator/community:**
-- Any full dashboard UI — a reference Grafana dashboard JSON is a reasonable Phase 5 documentation deliverable, but building/maintaining a dashboard product is out of scope.
+- Any full dashboard UI, including a bundled reference Grafana dashboard — documented Prometheus metric names are the deliverable (#68); building/maintaining a dashboard artifact is out of scope.
 - Alerting rules and pipelines.
 - Log aggregation infrastructure (ship structured logs in a standard format; don't ship an ELK stack).
 - Player-behavior/business analytics beyond the basic counts above — that's a downstream concern for whoever operates the game, not the framework's job.
@@ -397,7 +397,7 @@ Dynamic layer assignment, open vs. bound realm configuration, cross-realm charac
 Ticket/cash-gated character transfer between bound realms, audit trail, admin tooling.
 
 **Phase 5 — Plugin ecosystem maturity**
-Expanded host API surface, plugin packaging/distribution story, reference observability dashboards, documentation and examples aimed at lowering the barrier for a solo developer.
+Expanded host API surface, plugin packaging/distribution story, documentation and examples aimed at lowering the barrier for a solo developer.
 
 **Ongoing, from Phase 1 onward:** documentation quality, example game(s) built on the framework as a dogfooding proof point, and community onboarding — these are not "later," they're what makes the project actually get used.
 
@@ -419,9 +419,9 @@ This reframes what "done" means for Phase 1 — not just "the core loop works," 
 
 - Not a game engine — no rendering, no client-side physics, no asset pipeline.
 - Not an authoring tool — content is authored in existing tools (Tiled, glTF-producing 3D tools) and imported.
-- Not a matchmaking-only or lobby-based multiplayer backend — the target is persistent, shared, authoritative worlds, which is a different (harder) problem than session-based multiplayer.
+- Not, initially, a matchmaking-only or lobby-based multiplayer backend — the target is persistent, shared, authoritative worlds, which is a different (harder) problem than session-based multiplayer. A thin matchmaking primitive (#177) is a plausible later stretch goal once the persistent-world core is solid, not a v0/v1 commitment — see #177 for the decision record.
 - Not, at least initially, a hosted SaaS — this ships as self-hostable OSS first; a managed offering is a possible later sustainability path, not the initial product.
-- Not a dashboard/observability product — core ships metrics, logs, and traces; visualization is left to standard tooling ([Observability & Operations](#observability--operations)).
+- Not a dashboard/observability product — core ships metrics, logs, and traces; visualization is left to standard tooling ([Observability & Operations](#observability--operations)). This is about *metrics visualization* specifically (not competing with Grafana), not about an admin/operator control surface for realms and servers — see #131 for that distinction.
 
 ---
 
