@@ -20,11 +20,14 @@ that). This README only covers running *this* project.
 
 ## What's built
 
-- `Net/` — the raw TCP+TLS socket layer: `Envelope.cs` (length-delimited
-  framing, byte-for-byte matched against `world_zero/crates/gateway/src/envelope.rs`),
-  `GameConnection.cs` (socket + background read loop), `NetworkClient.cs` (the
-  autoload that decodes every envelope by `message_type` and dispatches typed
-  C# events).
+- `Net/` — the socket layer: `Envelope.cs` (both framings, byte-for-byte
+  matched against `world_zero/crates/gateway/src/envelope.rs` — length-delimited
+  for TCP, bare-datagram for UDP), `GameConnection.cs` (the TCP+TLS socket +
+  background read loop), `DtlsConnection.cs` (#295's optional UDP/DTLS
+  movement channel — BouncyCastle's `Org.BouncyCastle.Tls` DTLS client
+  against a real `UdpClient`, since .NET has no built-in DTLS), `NetworkClient.cs`
+  (the autoload that decodes every envelope by `message_type` — from either
+  socket — and dispatches typed C# events).
 - `Protos/` — the five real `.proto` files copied verbatim from `world_zero`
   (auth/realm/character/chat/session), with `csharp_namespace` options added
   for C# codegen. Regenerated at build time via `Grpc.Tools`' bundled `protoc`
@@ -83,6 +86,16 @@ This client uses choice **(b)**: it disables certificate validation entirely
 in `GameConnection.cs` (`RemoteCertificateValidationCallback` always accepts).
 This is only acceptable because it's a disposable local-dev tool talking to
 `localhost` — don't reuse this networking code against anything else.
+
+## UDP/DTLS (optional, #295)
+
+Once connected and joined, this client also opens a second connection to
+`WZ_TEST_SERVER_PORT + 1` and sends `BindUdp { session_token }` — see
+`Net/DtlsConnection.cs`. Same trust model as TLS above: it accepts the
+server's DTLS certificate unconditionally rather than pinning it
+(`AcceptAnyServerAuthentication`). If the handshake fails (no listener,
+firewalled, etc.) this client just logs it and keeps moving over TCP —
+the UDP path is a pure latency optimization, never required.
 
 ## Setup
 

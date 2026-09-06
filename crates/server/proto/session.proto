@@ -61,6 +61,13 @@
 // single `currency_balance` column, so a currency's identity has to be
 // on the wire too, not just its resulting value.
 //
+// #295 adds `BindUdp` (client) / `UdpBound` (server) — the association
+// handshake a client sends over the UDP/DTLS channel (`gateway::udp`,
+// never TCP) to tie it back to this same connection's already-
+// authenticated `session_token`. See `BindUdp`'s own comment and
+// docs/specs/Networking_Spec.md's "DTLS (UDP channel)" section for the
+// full design.
+//
 // #216 adds `CraftItem` (client) -- implementing #215's crafting
 // decision: resolves recipe_key against the dev-declared
 // crafting.schema.yaml (character::CraftingSchema) and, if every
@@ -107,6 +114,7 @@ message ClientMessage {
     TradeOfferCurrency trade_offer_currency = 28;
     TradeConfirm trade_confirm = 29;
     TradeCancel trade_cancel = 30;
+    BindUdp bind_udp = 31;
   }
 }
 
@@ -413,6 +421,21 @@ message TradeConfirm {
 message TradeCancel {
 }
 
+// Associates this connection's already-authenticated session with a UDP/
+// DTLS association (#295) — sent as the first datagram over the UDP
+// channel after its own DTLS handshake completes, naming the
+// `session_token` this same connection already received over TCP in
+// `auth::gateway_protocol::ServerMessage::Authenticated`. Never sent over
+// TCP. `session_token` is the only piece of identity a UDP datagram ever
+// carries — the server resolves it back to this connection's entity_id
+// and, from then on, routes every WORLD_MESSAGE_TYPE message for this
+// entity (both directions) over UDP instead of TCP. An unknown/expired
+// token is silently ignored (no `Error` — nothing durable to have gone
+// wrong on the UDP side to report against).
+message BindUdp {
+  string session_token = 1;
+}
+
 message RosterEntry {
   string entity_id = 1;
   string entity_type = 2;
@@ -449,6 +472,7 @@ message ServerMessage {
     TradeStateChanged trade_state_changed = 24;
     TradeCancelled trade_cancelled = 25;
     TradeCompleted trade_completed = 26;
+    UdpBound udp_bound = 27;
   }
 }
 
@@ -698,4 +722,12 @@ message TradeCancelled {
 // preceded by ordinary ItemChanged/CurrencyChanged pushes for everything
 // that actually changed on this connection's own character.
 message TradeCompleted {
+}
+
+// Confirms a BindUdp succeeded (#295) — sent back over the same UDP
+// datagram path, never TCP. From this point on, this connection's
+// WORLD_MESSAGE_TYPE traffic (both directions) travels over UDP instead
+// of TCP; everything else (chat, party/guild/trade, realm, auth) is
+// unaffected and always stays on TCP.
+message UdpBound {
 }

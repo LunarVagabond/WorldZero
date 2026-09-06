@@ -12,6 +12,10 @@
   <ItemGroup>
     <PackageReference Include="Google.Protobuf" Version="3.28.3" />
     <PackageReference Include="Grpc.Tools" Version="2.66.0" PrivateAssets="All" />
+    <!-- .NET has no built-in DTLS (SslStream is TCP-only) — BouncyCastle's
+         Org.BouncyCastle.Tls namespace is the standard choice for DTLS in
+         .NET (#295: the optional UDP/DTLS movement channel, Net/DtlsConnection.cs). -->
+    <PackageReference Include="BouncyCastle.Cryptography" Version="2.6.2" />
   </ItemGroup>
 
   <ItemGroup>

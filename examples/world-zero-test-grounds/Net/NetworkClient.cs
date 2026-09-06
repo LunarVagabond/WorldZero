@@ -24,7 +24,15 @@ public partial class NetworkClient : Node
     private GameConnection? _connection;
     private uint _nextMoveSeq = 1;
 
+    // #295: the optional UDP/DTLS movement channel, opened once this
+    // connection has joined a zone (see `DispatchSession`'s `Joined`
+    // case) and has a `session_token` to bind with. `null`/`_isUdpBound
+    // == false` just means Move/Ping stay on TCP — never a hard failure.
+    private DtlsConnection? _udp;
+    private bool _isUdpBound;
+
     public bool IsSocketConnected => _connection?.IsConnected ?? false;
+    public bool IsUdpBound => _isUdpBound;
 
     // --- Auth (message_type 1) ---
     public event Action<WAuth.Authenticated>? OnAuthenticated;
@@ -98,6 +106,9 @@ public partial class NetworkClient : Node
     public void Disconnect()
     {
         _connection?.Disconnect();
+        _udp?.Disconnect();
+        _udp = null;
+        _isUdpBound = false;
         GameState.Instance.SetConnectionState(ConnectionState.Disconnected);
     }
 
@@ -119,6 +130,56 @@ public partial class NetworkClient : Node
         {
             Dispatch(frame.MessageType, frame.Payload);
         }
+
+        // #295: UDP frames are decoded/dispatched exactly like TCP ones —
+        // `Dispatch` only ever looks at the header's `messageType`, never
+        // which socket it arrived on.
+        if (_udp is not null)
+        {
+            while (_udp.DisconnectReasons.TryDequeue(out var reason))
+            {
+                GameState.Instance.LogEvent("net", $"UDP channel dropped, falling back to TCP for movement: {reason}");
+                _isUdpBound = false;
+            }
+            while (_udp.Incoming.TryDequeue(out var frame))
+            {
+                Dispatch(frame.MessageType, frame.Payload);
+            }
+        }
+    }
+
+    // #295: opens the optional UDP/DTLS channel and sends `BindUdp` once
+    // this connection has both a `session_token` (from `Authenticated`)
+    // and has actually joined a zone — called once from `DispatchSession`'s
+    // `Joined` case. A failure here (no listener, firewalled, etc.) just
+    // means Move/Ping stay on TCP; it's never treated as a connection error.
+    private async void TryBindUdp()
+    {
+        if (_udp is not null || _connection is null)
+        {
+            return;
+        }
+        var sessionToken = GameState.Instance.SessionToken;
+        if (string.IsNullOrEmpty(sessionToken))
+        {
+            return;
+        }
+
+        var udp = new DtlsConnection();
+        try
+        {
+            await udp.ConnectAsync(EnvConfig.Instance.ServerHost, EnvConfig.Instance.ServerPort + 1);
+        }
+        catch (Exception ex)
+        {
+            GameState.Instance.LogEvent("net", $"UDP/DTLS handshake failed, staying TCP-only for movement: {ex.Message}");
+            return;
+        }
+        _udp = udp;
+
+        var m = new WSession.ClientMessage { BindUdp = new WSession.BindUdp { SessionToken = sessionToken } };
+        _udp.Send(MessageType.Session, m.ToByteArray());
+        GameState.Instance.LogEvent("net", "-> BindUdp (UDP/DTLS)");
     }
 
     private void Dispatch(ushort messageType, byte[] payload)
@@ -352,6 +413,7 @@ public partial class NetworkClient : Node
             case WSession.ServerMessage.KindOneofCase.Joined:
                 GameState.Instance.LogEvent("session", $"Joined entity={msg.Joined.EntityId} at ({msg.Joined.X:F1},{msg.Joined.Y:F1}) roster={msg.Joined.Roster.Count} tick={msg.Joined.Tick}");
                 OnJoined?.Invoke(msg.Joined);
+                TryBindUdp();
                 break;
             case WSession.ServerMessage.KindOneofCase.EntitySpawned:
                 GameState.Instance.LogEvent("session", $"EntitySpawned {msg.EntitySpawned.EntityType} {msg.EntitySpawned.EntityId} at ({msg.EntitySpawned.X:F1},{msg.EntitySpawned.Y:F1})");
@@ -437,6 +499,10 @@ public partial class NetworkClient : Node
                 GameState.Instance.OwnCurrency[msg.CurrencyChanged.CurrencyKey] = msg.CurrencyChanged.Balance;
                 OnCurrencyChanged?.Invoke(msg.CurrencyChanged);
                 break;
+            case WSession.ServerMessage.KindOneofCase.UdpBound:
+                _isUdpBound = true;
+                GameState.Instance.LogEvent("net", "UDP/DTLS bound — movement now travels over UDP");
+                break;
         }
     }
 
@@ -444,8 +510,24 @@ public partial class NetworkClient : Node
     {
         seq = _nextMoveSeq++;
         var m = new WSession.ClientMessage { Move = new WSession.Move { X = x, Y = y, Seq = seq } };
-        _connection!.Send(MessageType.Session, m.ToByteArray());
+        SendWorldMessage(m.ToByteArray(), udpEligible: true);
         GameState.Instance.LogEvent("session", $"-> Move ({x:F1},{y:F1}) seq={seq}", quiet: true);
+    }
+
+    // #295: Move/Ping are the only WORLD_MESSAGE_TYPE requests the server
+    // ever accepts over UDP (see `session.rs`'s `inbound_udp_rx` handling)
+    // — everything else in this file keeps sending straight over
+    // `_connection`/TCP, bound or not.
+    private void SendWorldMessage(byte[] payload, bool udpEligible)
+    {
+        if (udpEligible && _isUdpBound && _udp is not null)
+        {
+            _udp.Send(MessageType.Session, payload);
+        }
+        else
+        {
+            _connection!.Send(MessageType.Session, payload);
+        }
     }
 
     public void SendAttack(string targetEntityId, string statKey)
@@ -472,7 +554,7 @@ public partial class NetworkClient : Node
     public void SendPing(long clientSentAtMillis)
     {
         var m = new WSession.ClientMessage { Ping = new WSession.Ping { ClientSentAt = clientSentAtMillis } };
-        _connection!.Send(MessageType.Session, m.ToByteArray());
+        SendWorldMessage(m.ToByteArray(), udpEligible: true);
     }
 
     public void SendPartyInvite(string targetEntityId, string partyType = "")

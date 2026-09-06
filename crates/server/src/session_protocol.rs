@@ -202,6 +202,12 @@ pub enum ClientMessage {
     /// Cancels this connection's own active trade session, if any, at
     /// any point before execution (#278). A no-op if there's none.
     TradeCancel {},
+    /// Associates this connection's already-authenticated session with a
+    /// UDP/DTLS association (#295) — sent as the first datagram over the
+    /// UDP channel, naming the `session_token` this connection already
+    /// received over TCP in `Authenticated`. Never sent over TCP; see
+    /// `docs/specs/Networking_Spec.md`'s "DTLS (UDP channel)" section.
+    BindUdp { session_token: String },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -444,6 +450,11 @@ pub enum ServerMessage {
     /// (#278) — preceded by ordinary `ItemChanged`/`CurrencyChanged`
     /// pushes for everything that actually changed.
     TradeCompleted {},
+    /// Confirms a `BindUdp` succeeded (#295) — sent back over the same
+    /// UDP datagram path, never TCP. From this point on this
+    /// connection's `WORLD_MESSAGE_TYPE` traffic (both directions)
+    /// travels over UDP instead of TCP.
+    UdpBound {},
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -651,6 +662,9 @@ impl From<&ClientMessage> for proto::ClientMessage {
             }),
             ClientMessage::TradeConfirm {} => Kind::TradeConfirm(proto::TradeConfirm {}),
             ClientMessage::TradeCancel {} => Kind::TradeCancel(proto::TradeCancel {}),
+            ClientMessage::BindUdp { session_token } => Kind::BindUdp(proto::BindUdp {
+                session_token: session_token.clone(),
+            }),
         };
         proto::ClientMessage { kind: Some(kind) }
     }
@@ -774,6 +788,9 @@ impl TryFrom<proto::ClientMessage> for ClientMessage {
             }),
             Some(Kind::TradeConfirm(proto::TradeConfirm {})) => Ok(ClientMessage::TradeConfirm {}),
             Some(Kind::TradeCancel(proto::TradeCancel {})) => Ok(ClientMessage::TradeCancel {}),
+            Some(Kind::BindUdp(proto::BindUdp { session_token })) => {
+                Ok(ClientMessage::BindUdp { session_token })
+            }
             None => Err(Error::new(
                 "server",
                 "gateway world message has no kind set",
@@ -974,6 +991,7 @@ impl From<&ServerMessage> for proto::ServerMessage {
                 })
             }
             ServerMessage::TradeCompleted {} => Kind::TradeCompleted(proto::TradeCompleted {}),
+            ServerMessage::UdpBound {} => Kind::UdpBound(proto::UdpBound {}),
         };
         proto::ServerMessage { kind: Some(kind) }
     }
@@ -1185,6 +1203,7 @@ impl TryFrom<proto::ServerMessage> for ServerMessage {
             Some(Kind::TradeCompleted(proto::TradeCompleted {})) => {
                 Ok(ServerMessage::TradeCompleted {})
             }
+            Some(Kind::UdpBound(proto::UdpBound {})) => Ok(ServerMessage::UdpBound {}),
             None => Err(Error::new(
                 "server",
                 "gateway world message has no kind set",
@@ -1458,6 +1477,25 @@ mod tests {
         assert!(matches!(
             ServerMessage::from_envelope(&envelope).unwrap(),
             ServerMessage::TradeCompleted {}
+        ));
+    }
+
+    #[test]
+    fn bind_udp_and_udp_bound_round_trip_through_an_envelope() {
+        let envelope = ClientMessage::BindUdp {
+            session_token: "some-token".to_string(),
+        }
+        .into_envelope()
+        .unwrap();
+        assert!(matches!(
+            ClientMessage::from_envelope(&envelope).unwrap(),
+            ClientMessage::BindUdp { session_token } if session_token == "some-token"
+        ));
+
+        let envelope = ServerMessage::UdpBound {}.into_envelope().unwrap();
+        assert!(matches!(
+            ServerMessage::from_envelope(&envelope).unwrap(),
+            ServerMessage::UdpBound {}
         ));
     }
 

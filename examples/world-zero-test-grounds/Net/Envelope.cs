@@ -57,6 +57,30 @@ public static class Envelope
         return (messageType, payload);
     }
 
+    // UDP framing (#295, `Net/DtlsConnection.cs`) — the envelope *is* the
+    // datagram payload, no length prefix, mirroring
+    // `world_zero/crates/gateway/src/envelope.rs`'s
+    // `encode_datagram`/`decode_datagram`: a UDP datagram already has a
+    // natural boundary, so there's nothing to buffer/reassemble across
+    // reads the way the TCP framing above has to.
+    public static byte[] WriteDatagram(ushort messageType, ReadOnlySpan<byte> payload)
+    {
+        byte[] datagram = new byte[2 + payload.Length];
+        BinaryPrimitives.WriteUInt16BigEndian(datagram.AsSpan(0, 2), messageType);
+        payload.CopyTo(datagram.AsSpan(2));
+        return datagram;
+    }
+
+    public static (ushort MessageType, byte[] Payload) ReadDatagram(ReadOnlySpan<byte> datagram)
+    {
+        if (datagram.Length < 2)
+        {
+            throw new IOException($"datagram too short: {datagram.Length} bytes, need at least 2");
+        }
+        ushort messageType = BinaryPrimitives.ReadUInt16BigEndian(datagram[..2]);
+        return (messageType, datagram[2..].ToArray());
+    }
+
     private static bool ReadExact(Stream stream, Span<byte> buffer)
     {
         int total = 0;
