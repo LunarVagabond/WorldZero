@@ -261,6 +261,15 @@ items:
       attack: 10
 "#,
             &attribute_schema(),
+            &["iron-helmet", "cloth-cap", "iron-sword"]
+                .into_iter()
+                .map(|item_type| {
+                    (
+                        item_type.to_string(),
+                        ["equippable".to_string()].into_iter().collect(),
+                    )
+                })
+                .collect(),
         )
         .unwrap()
     }

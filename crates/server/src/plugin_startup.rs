@@ -16,6 +16,7 @@
 //! own doc comments have the auto-join side). Still no `on_tick` (see
 //! docs/specs/Plugin_API.md, "Beyond this v0 slice").
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -37,6 +38,23 @@ type PendingStateWrites = Arc<Mutex<Vec<(PluginStateScope, String, Vec<u8>)>>>;
 /// is authoritative), queued for the caller's own drain — see
 /// `PluginCallbacks`'s `pending_moves` field.
 type PendingMoves = Arc<Mutex<Vec<(String, f64, f64, f64)>>>;
+
+/// `item_type -> content::ItemCatalogEntry` (#287) — the in-memory mirror
+/// of `content::ItemCatalogStore`'s current rows, shared process-wide
+/// (`main` hydrates it from the DB once, before any plugin's `on_load`
+/// runs) and kept current by every `register-item-type` call since —
+/// backs `get-item`'s synchronous read, same "no live DB read/write from
+/// inside a sandboxed call" discipline `PluginStateCache`/`EntityRoles`
+/// already follow.
+pub type ItemCatalogCache = Arc<Mutex<HashMap<String, content::ItemCatalogEntry>>>;
+
+/// `(item_type, display_name, tags, metadata)` requested via
+/// `register-item-type` since the last drain — queued for the caller's
+/// own drain into `content::ItemCatalogStore::register` (the actual
+/// Postgres write; `PluginCallbacks::register_item_type` already applied
+/// it to `item_catalog_cache` immediately, for same-process
+/// `get-item` visibility, before this queue is ever drained).
+type PendingItemRegistrations = Arc<Mutex<Vec<content::ItemCatalogEntry>>>;
 
 /// `HostCallbacks` used for the plugin's whole lifetime — both the
 /// one-time `on_load` call at startup and every later `on_message` call
@@ -107,6 +125,12 @@ pub struct PluginCallbacks {
     /// applied immediately" shape `plugin_state_cache`'s `entity` scope
     /// already uses (there's nothing to durably persist here either).
     blocked_zone_channels: BlockedZoneChannels,
+    /// Backs `register-item-type`/`get-item` (#287) — see
+    /// [`ItemCatalogCache`]'s own doc comment.
+    item_catalog_cache: ItemCatalogCache,
+    /// `register-item-type` requests since the last drain — see
+    /// [`PendingItemRegistrations`].
+    pending_item_registrations: PendingItemRegistrations,
 }
 
 impl HostCallbacks for PluginCallbacks {
@@ -306,6 +330,58 @@ impl HostCallbacks for PluginCallbacks {
             .insert(category.to_string());
         Ok(())
     }
+
+    fn register_item_type(
+        &mut self,
+        item_type: &str,
+        display_name: &str,
+        tags: Vec<String>,
+        metadata: &str,
+    ) -> std::result::Result<(), String> {
+        let metadata: serde_json::Value = serde_json::from_str(metadata)
+            .map_err(|e| format!("register-item-type metadata is not valid JSON: {e}"))?;
+        let entry = content::ItemCatalogEntry {
+            item_type: item_type.to_string(),
+            display_name: display_name.to_string(),
+            tags,
+            metadata,
+        };
+        let problems = content::items::validate_entry(&entry);
+        if !problems.is_empty() {
+            return Err(format!(
+                "register-item-type: item {item_type:?} is invalid: {}",
+                problems.join("; ")
+            ));
+        }
+
+        // Applied to the in-memory cache immediately — a `get-item` call
+        // later in the same `on_load` (this plugin's, or another loaded
+        // plugin's) sees it right away — same "cache first, durable
+        // write queued" shape `plugin_state_set` already uses above.
+        self.item_catalog_cache
+            .lock()
+            .unwrap()
+            .insert(entry.item_type.clone(), entry.clone());
+        self.pending_item_registrations.lock().unwrap().push(entry);
+        Ok(())
+    }
+
+    fn get_item(
+        &mut self,
+        item_type: &str,
+    ) -> std::result::Result<Option<plugin_host::ItemCatalogEntry>, String> {
+        Ok(self
+            .item_catalog_cache
+            .lock()
+            .unwrap()
+            .get(item_type)
+            .map(|entry| plugin_host::ItemCatalogEntry {
+                item_type: entry.item_type.clone(),
+                display_name: entry.display_name.clone(),
+                tags: entry.tags.clone(),
+                metadata: entry.metadata.to_string(),
+            }))
+    }
 }
 
 /// A plugin kept alive past startup: the live instance, which
@@ -351,6 +427,7 @@ pub struct PluginRuntime {
     pending_state_writes: PendingStateWrites,
     pending_deaths: Arc<Mutex<Vec<String>>>,
     pending_respawns: Arc<Mutex<Vec<String>>>,
+    pending_item_registrations: PendingItemRegistrations,
 }
 
 impl PluginRuntime {
@@ -416,6 +493,20 @@ impl PluginRuntime {
         std::mem::take(&mut self.pending_respawns.lock().unwrap())
     }
 
+    /// Entries requested via `register-item-type` since the last drain,
+    /// in call order (#287) — `load_plugin` already drains and persists
+    /// whatever was requested during `on_load` itself before this
+    /// `PluginRuntime` is ever handed back (see that function's own doc
+    /// comment for why); `world_actor::drain_and_apply_plugin_effects`
+    /// drains and persists this queue for every *later* call (from
+    /// `on_tick`, `on_interact`, a chat command, or any other hook), the
+    /// same "drain after every hook call, regardless of which hook made
+    /// the request" discipline every other `pending_*` queue on this
+    /// struct already gets.
+    pub fn drain_pending_item_registrations(&self) -> Vec<content::ItemCatalogEntry> {
+        std::mem::take(&mut self.pending_item_registrations.lock().unwrap())
+    }
+
     /// Whether this plugin declared `hook` in `plugin.toml`'s `hooks`
     /// list — the gate `world_actor`'s dispatch checks before calling
     /// any hook except `on-message`/`on-chat-command` (#152).
@@ -445,7 +536,11 @@ impl PluginRuntime {
 /// keeping it running; dropping it tears it down — plus the spawn-table
 /// ids it requested via `spawn-npc` during `on_load`, in call order (any
 /// requested during a later hook call are left for the caller to drain
-/// via `PluginRuntime::drain_pending_spawns`).
+/// via `PluginRuntime::drain_pending_spawns`), plus the item catalog
+/// entries it requested via `register-item-type` during `on_load` (#287)
+/// — unlike the spawn-table ids, the caller is expected to actually
+/// persist these (`content::ItemCatalogStore::register`) right away, not
+/// just log them; see this function's own body comment for why.
 ///
 /// Called once per plugin **per zone-service** it's attached to (#152) —
 /// every zone gets its own live instance (its own `wasmtime::Store`),
@@ -457,6 +552,7 @@ impl PluginRuntime {
 /// "compiling/loading is the expensive part, the engine itself is cheap
 /// to share." A zone with multiple plugins attached previously created a
 /// separate `wasmtime::Engine` per plugin; #152 fixed that.
+#[allow(clippy::too_many_arguments)]
 pub fn load_plugin(
     manifest: &PluginManifest,
     wasm_path: &Path,
@@ -465,7 +561,8 @@ pub fn load_plugin(
     entity_roles: EntityRoles,
     plugin_state_cache: PluginStateCache,
     blocked_zone_channels: BlockedZoneChannels,
-) -> Result<(PluginRuntime, Vec<String>)> {
+    item_catalog_cache: ItemCatalogCache,
+) -> Result<(PluginRuntime, Vec<String>, Vec<content::ItemCatalogEntry>)> {
     let name = manifest.plugin.name.clone();
     let message_types = manifest.plugin.message_types.clone();
     let chat_commands = manifest.plugin.chat_commands.clone();
@@ -481,6 +578,7 @@ pub fn load_plugin(
     let pending_state_writes = Arc::new(Mutex::new(Vec::new()));
     let pending_deaths = Arc::new(Mutex::new(Vec::new()));
     let pending_respawns = Arc::new(Mutex::new(Vec::new()));
+    let pending_item_registrations = Arc::new(Mutex::new(Vec::new()));
     let callbacks = PluginCallbacks {
         pending_spawns: pending_spawns.clone(),
         pending_stat_deltas: pending_stat_deltas.clone(),
@@ -496,6 +594,8 @@ pub fn load_plugin(
         pending_deaths: pending_deaths.clone(),
         pending_respawns: pending_respawns.clone(),
         blocked_zone_channels,
+        item_catalog_cache,
+        pending_item_registrations: pending_item_registrations.clone(),
     };
 
     // A plugin's compiled component always exports every hook function in
@@ -524,6 +624,17 @@ pub fn load_plugin(
     }
 
     let on_load_spawns = std::mem::take(&mut *pending_spawns.lock().unwrap());
+    // Drained here, synchronously with `on_load` itself, rather than left
+    // for the caller to pick up later like `on_load_spawns` above — #287's
+    // whole point is that a plugin-registered item type is visible to
+    // `crafting.schema.yaml`/`equipment.schema.yaml`'s own load-time
+    // validation, which `main` runs right after every plugin has loaded;
+    // that only works if the registration has already reached
+    // `content::ItemCatalogStore` (not just this process's in-memory
+    // cache, which `register_item_type` already updated) by the time
+    // this function returns.
+    let on_load_item_registrations =
+        std::mem::take(&mut *pending_item_registrations.lock().unwrap());
     let runtime = PluginRuntime {
         name,
         plugin,
@@ -541,6 +652,120 @@ pub fn load_plugin(
         pending_state_writes,
         pending_deaths,
         pending_respawns,
+        pending_item_registrations,
     };
-    Ok((runtime, on_load_spawns))
+    Ok((runtime, on_load_spawns, on_load_item_registrations))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #287's actual acceptance criterion, exercised without `wasmtime`/
+    /// Postgres: a plugin's `register-item-type` call (through the real
+    /// `PluginCallbacks::register_item_type` — the same code
+    /// `plugin_host::PluginState`'s `HostInterface` impl calls from
+    /// inside the sandboxed guest call) lands in `item_catalog_cache`
+    /// immediately, and `character::CraftingSchema` — given a
+    /// `KnownItemTypes` built from that same cache, exactly the shape
+    /// `server::main` builds after every plugin's `on_load` runs — then
+    /// accepts a recipe referencing the newly-registered item_type. This
+    /// is the real production data flow (`PluginCallbacks` ->
+    /// `item_catalog_cache` -> `character::KnownItemTypes` ->
+    /// `CraftingSchema::from_yaml`), just without the wasm boundary
+    /// itself (covered separately, real end to end, by
+    /// `plugin-host`'s `plugin_sandbox.rs`::
+    /// `a_plugin_registers_an_item_type_and_reads_it_back_via_get_item`).
+    #[test]
+    fn a_plugin_registered_item_type_makes_crafting_schema_accept_a_recipe_referencing_it() {
+        let item_catalog_cache: ItemCatalogCache = Arc::new(Mutex::new(HashMap::new()));
+        let mut callbacks = PluginCallbacks {
+            pending_spawns: Arc::new(Mutex::new(Vec::new())),
+            pending_stat_deltas: Arc::new(Mutex::new(Vec::new())),
+            pending_character_stat_deltas: Arc::new(Mutex::new(Vec::new())),
+            pending_moves: Arc::new(Mutex::new(Vec::new())),
+            pending_item_grants: Arc::new(Mutex::new(Vec::new())),
+            pending_item_removals: Arc::new(Mutex::new(Vec::new())),
+            pending_currency_deltas: Arc::new(Mutex::new(Vec::new())),
+            entity_roles: Arc::new(Mutex::new(HashMap::new())),
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            plugin_state_cache: Arc::new(Mutex::new(HashMap::new())),
+            pending_state_writes: Arc::new(Mutex::new(Vec::new())),
+            pending_deaths: Arc::new(Mutex::new(Vec::new())),
+            pending_respawns: Arc::new(Mutex::new(Vec::new())),
+            blocked_zone_channels: Arc::new(Mutex::new(HashMap::new())),
+            item_catalog_cache: item_catalog_cache.clone(),
+            pending_item_registrations: Arc::new(Mutex::new(Vec::new())),
+        };
+
+        // Before registering: a crafting.schema.yaml recipe naming this
+        // item_type is rejected, same as any other unknown item_type.
+        let known_item_types_before: character::KnownItemTypes = HashMap::new();
+        let recipe_yaml = r#"
+schema_version: 1
+recipes:
+  - key: plugin-forged-blade
+    category: plugin-blacksmithing
+    inputs:
+      - item_type: iron-ore
+        amount: 1
+    output:
+      item_type: plugin-forged-blade
+      amount: 1
+"#;
+        assert!(
+            character::CraftingSchema::from_yaml(recipe_yaml, &known_item_types_before).is_err()
+        );
+
+        // The plugin registers both item_types this recipe needs, each
+        // tagged appropriately (`craftable_output` on the output only,
+        // matching `CraftingSchema::from_yaml`'s own check).
+        callbacks
+            .register_item_type("iron-ore", "Iron Ore", vec![], "{}")
+            .expect("register-item-type should succeed");
+        callbacks
+            .register_item_type(
+                "plugin-forged-blade",
+                "Plugin-Forged Blade",
+                vec!["craftable_output".to_string()],
+                "{}",
+            )
+            .expect("register-item-type should succeed");
+
+        // `get-item` answers from the same cache `register-item-type`
+        // just wrote into.
+        let looked_up = callbacks
+            .get_item("plugin-forged-blade")
+            .expect("get-item should succeed")
+            .expect("plugin-forged-blade should now be registered");
+        assert_eq!(looked_up.display_name, "Plugin-Forged Blade");
+
+        // The exact `KnownItemTypes` shape `server::main` builds from
+        // `item_catalog_cache` after every plugin's `on_load` runs.
+        let known_item_types_after: character::KnownItemTypes = item_catalog_cache
+            .lock()
+            .unwrap()
+            .values()
+            .map(|entry| {
+                (
+                    entry.item_type.clone(),
+                    entry.tags.iter().cloned().collect(),
+                )
+            })
+            .collect();
+
+        // Now the same recipe loads successfully — the plugin-registered
+        // item_type is indistinguishable from a dev-authored one to
+        // `CraftingSchema`.
+        let schema =
+            character::CraftingSchema::from_yaml(recipe_yaml, &known_item_types_after).unwrap();
+        assert_eq!(
+            schema
+                .resolve("plugin-forged-blade")
+                .unwrap()
+                .output
+                .item_type,
+            "plugin-forged-blade"
+        );
+    }
 }

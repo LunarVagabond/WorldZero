@@ -35,7 +35,7 @@ fn manifest() -> PluginManifest {
         r#"
 [plugin]
 name = "test-plugin"
-host_api_version = "0.14.0"
+host_api_version = "0.15.0"
 capabilities = ["spawning", "movement", "combat", "economy", "messaging"]
 message_types = [1000]
 "#,
@@ -53,7 +53,7 @@ fn restricted_manifest() -> PluginManifest {
         r#"
 [plugin]
 name = "test-plugin"
-host_api_version = "0.14.0"
+host_api_version = "0.15.0"
 capabilities = ["messaging"]
 message_types = [1000]
 "#,
@@ -84,6 +84,11 @@ struct RecordingCallbacks {
     /// for the capability-gating coverage instead), but this fake needs
     /// a real implementation to satisfy `HostCallbacks` regardless.
     blocked_zone_channels: Arc<Mutex<Vec<(String, String)>>>,
+    /// A minimal in-memory catalog for `register-item-type`/`get-item`
+    /// (#287) — the fixture's own `on_load` registers into this (see
+    /// `a_plugin_registers_an_item_type_and_reads_it_back_via_get_item`
+    /// below).
+    item_catalog: Arc<Mutex<HashMap<String, plugin_host::ItemCatalogEntry>>>,
 }
 
 /// A plain string discriminating [`PluginStateScope`] variants for this
@@ -244,6 +249,32 @@ impl HostCallbacks for RecordingCallbacks {
             .unwrap()
             .push((entity_id.to_string(), category.to_string()));
         Ok(())
+    }
+
+    fn register_item_type(
+        &mut self,
+        item_type: &str,
+        display_name: &str,
+        tags: Vec<String>,
+        metadata: &str,
+    ) -> Result<(), String> {
+        self.item_catalog.lock().unwrap().insert(
+            item_type.to_string(),
+            plugin_host::ItemCatalogEntry {
+                item_type: item_type.to_string(),
+                display_name: display_name.to_string(),
+                tags,
+                metadata: metadata.to_string(),
+            },
+        );
+        Ok(())
+    }
+
+    fn get_item(
+        &mut self,
+        item_type: &str,
+    ) -> Result<Option<plugin_host::ItemCatalogEntry>, String> {
+        Ok(self.item_catalog.lock().unwrap().get(item_type).cloned())
     }
 }
 
@@ -573,6 +604,65 @@ fn a_plugin_remembers_and_recalls_state_through_the_real_sandbox_boundary() {
     let messages = callbacks.messages.lock().unwrap();
     assert_eq!(messages.len(), 2);
     assert!(messages[1].1.contains("the sky is blue"), "{messages:?}");
+}
+
+/// #287 — the fixture's `on_load` calls `register-item-type` for
+/// `"fixture-test-item"` then reads it back via `get-item`, exercising
+/// both new host functions through the real sandbox boundary (not just
+/// `RecordingCallbacks` in isolation) — the actual "a plugin registering
+/// a new item type" acceptance criterion, at the WIT/wasmtime layer.
+/// `server::plugin_startup`'s own tests cover the "crafting/equipment can
+/// then reference it" half: `character::CraftingSchema`/`EquipmentSchema`
+/// validate against whatever `content::ItemCatalogStore::all_item_types`
+/// (or, in those unit tests, a hand-built `KnownItemTypes`) contains,
+/// with no way to tell a plugin-registered entry from a `make
+/// items`-authored one.
+#[test]
+#[ignore]
+fn a_plugin_registers_an_item_type_and_reads_it_back_via_get_item() {
+    let wasm_path = fixture_dir().join("target/wasm32-wasip2/release/test_plugin.wasm");
+    let callbacks = RecordingCallbacks::default();
+
+    let host = PluginHost::new();
+    let mut plugin = host
+        .load(&manifest(), &wasm_path, Box::new(callbacks.clone()))
+        .expect("failed to load the well-behaved test plugin");
+    plugin.on_load().expect("on_load should succeed");
+
+    let catalog = callbacks.item_catalog.lock().unwrap();
+    let entry = catalog
+        .get("fixture-test-item")
+        .expect("on_load should have registered fixture-test-item");
+    assert_eq!(entry.display_name, "Fixture Test Item");
+    assert_eq!(entry.tags, vec!["tradeable".to_string()]);
+    assert!(
+        entry.metadata.contains("registered from on_load"),
+        "{entry:?}"
+    );
+}
+
+/// The capability-gated counterpart: `restricted_manifest` doesn't
+/// declare `economy`, so `register-item-type` (gated the same as
+/// `grant-item`/`remove-item`/`modify-currency`) is rejected — the
+/// fixture's `on_load` swallows the `Err` (`let _ =`), so nothing panics,
+/// but the catalog stays empty.
+#[test]
+#[ignore]
+fn a_plugin_lacking_the_economy_capability_cannot_register_an_item_type() {
+    let wasm_path = fixture_dir().join("target/wasm32-wasip2/release/test_plugin.wasm");
+    let callbacks = RecordingCallbacks::default();
+
+    let host = PluginHost::new();
+    let mut plugin = host
+        .load(
+            &restricted_manifest(),
+            &wasm_path,
+            Box::new(callbacks.clone()),
+        )
+        .expect("failed to load the well-behaved test plugin");
+    plugin.on_load().expect("on_load should succeed");
+
+    assert!(callbacks.item_catalog.lock().unwrap().is_empty());
 }
 
 #[test]

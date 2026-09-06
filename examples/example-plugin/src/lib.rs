@@ -26,7 +26,37 @@ use crate::exports::worldzero::plugin::hooks::Guest;
 struct Plugin;
 
 impl Guest for Plugin {
-    fn on_load() {}
+    // #287 — exercises the plugin-facing item catalog extension surface:
+    // `register-item-type` writes into the same `content::ItemCatalogStore`
+    // table (and through the same validation) `make items`/a dev's
+    // `crafting.schema.yaml`/`equipment.schema.yaml` use, and `get-item`
+    // reads it straight back to confirm it actually landed — the "sanctioned
+    // door in" for a plugin that wants to introduce its own item type
+    // without forking core (docs/specs/Plugin_API.md's "register-item-type").
+    // "wolf-plush" is deliberately not one of the config-example items —
+    // it only exists because this plugin registered it.
+    fn on_load() {
+        let _ = worldzero::plugin::host::register_item_type(
+            "wolf-plush",
+            "Wolf Plush",
+            &["tradeable".to_string()],
+            "{}",
+        );
+
+        // Read it back — proves `get-item` actually answers from the
+        // same catalog `register-item-type` just wrote into, not a
+        // stale/empty cache.
+        match worldzero::plugin::host::get_item("wolf-plush") {
+            Ok(Some(entry)) => {
+                debug_assert_eq!(entry.item_type, "wolf-plush");
+            }
+            Ok(None) => {
+                // Shouldn't happen — the register-item-type call just
+                // above should have made this visible immediately.
+            }
+            Err(_) => {}
+        }
+    }
 
     fn on_unload() {}
 

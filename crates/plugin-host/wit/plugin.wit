@@ -37,7 +37,14 @@
 // a host-function call, since it has no corresponding host function to
 // gate. See
 // docs/specs/Plugin_API.md, "Beyond this v0 slice" for what still isn't
-// here. #218 adds a `currency-key` parameter to `modify-currency` — a
+// here. #287 adds `register-item-type`/`get-item` and the
+// `item-catalog-entry` record — the plugin-facing extension surface onto
+// the central item catalog (`content::ItemCatalogStore`, #283's
+// decision): a plugin registers its own item types through the same
+// store/validation path `make items` uses, so `crafting.schema.yaml`/
+// `equipment.schema.yaml`/`DropItem` can reference a plugin-declared
+// item exactly like a dev-authored one. #218 adds a `currency-key`
+// parameter to `modify-currency` — a
 // dev-declared multi-currency system (`currency.schema.yaml`,
 // #217's decision) replaces the old implicit single balance, so a
 // currency's identity now has to cross this boundary too. #168 adds
@@ -55,7 +62,7 @@
 // and/or lands as a new world, rather than silently changing what
 // `plugin` means underneath existing compiled plugins.
 
-package worldzero:plugin@0.14.0;
+package worldzero:plugin@0.15.0;
 
 /// What the host exposes for a plugin to call out to — nothing crosses
 /// this boundary that isn't listed here (docs/PROPOSAL.md, "Plugin
@@ -234,6 +241,56 @@ interface host {
     /// connected (a plugin may reasonably call this from a hook that
     /// fires mid-disconnect, e.g. `on-player-leave-zone`).
     block-zone-channel: func(entity-id: string, category: string) -> result<_, string>;
+
+    /// One entry from the central item catalog (#287,
+    /// docs/specs/Data_Model_Spec.md, "The item catalog") — the same
+    /// shape `get-item` reads back, whether the entry was authored via
+    /// `make items` or a previous `register-item-type` call (from this
+    /// plugin or another one). `metadata` is a JSON object encoded as a
+    /// string (`"{}"` for "no metadata"), not a nested WIT record — the
+    /// catalog's `metadata` column is deliberately schema-less (narrow,
+    /// per-item-arbitrary data, e.g. an icon ref or flavor text), so
+    /// there is no fixed shape to give it a real WIT record for.
+    record item-catalog-entry {
+        item-type: string,
+        display-name: string,
+        tags: list<string>,
+        metadata: string,
+    }
+
+    /// Registers (or updates) `item-type` in the shared item catalog
+    /// (#287) — the same `content::ItemCatalogStore` and validation path
+    /// `make items` (the CLI) writes through, so a plugin-declared item
+    /// is indistinguishable to `crafting.schema.yaml`/
+    /// `equipment.schema.yaml`'s load-time validation (or to `DropItem`'s
+    /// own catalog check) from a dev-authored one. Intended to be called
+    /// from `on-load`, before the host validates those schemas against
+    /// the catalog — see `docs/specs/Plugin_API.md`'s "register-item-type"
+    /// section for the exact startup ordering this relies on — but not
+    /// restricted to `on-load`; a later call still updates the catalog,
+    /// it just arrives too late to satisfy a schema validated at startup.
+    /// `tags` is the same open list `content::items::validate_entry`
+    /// checks (no closed enum); `metadata` is a JSON object encoded as a
+    /// string (pass `"{}"` for none) — rejected if it doesn't parse as a
+    /// JSON object. Upserts: calling this again for an already-known
+    /// `item-type` overwrites its `display-name`/`tags`/`metadata`.
+    /// Requires the `economy` capability (grouped with
+    /// `grant-item`/`remove-item`/`modify-currency`: it's an economy
+    /// concept, and — unlike `get-item` — a write).
+    register-item-type: func(item-type: string, display-name: string, tags: list<string>, metadata: string) -> result<_, string>;
+
+    /// Reads one catalog entry by `item-type` (#287) — `none` if no such
+    /// item type is registered, not an error. Answered from an in-memory
+    /// cache hydrated once at startup and kept current by every
+    /// `register-item-type` call since (this plugin's own, and any other
+    /// loaded plugin's), never a live DB read from inside this sandboxed
+    /// call — same "no synchronous DB query from inside a host call"
+    /// constraint `caller-role`/`plugin-state-get` already document.
+    /// Ungated: read-only, and — unlike every gated function above —
+    /// doesn't reach across an entity boundary, so it needs no
+    /// capability, same reasoning `caller-role` and `plugin-state-get`
+    /// already document for staying ungated.
+    get-item: func(item-type: string) -> result<option<item-catalog-entry>, string>;
 }
 
 /// What the host calls into the plugin for — a plugin only receives the

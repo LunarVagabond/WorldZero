@@ -21,7 +21,15 @@ use std::path::Path;
 use common::{Error, Result};
 use serde::Deserialize;
 
+use crate::item_catalog_ref::{self, KnownItemTypes};
 use crate::schema::AttributeSchema;
+
+/// The catalog tag ([`content::items::TAG_EQUIPPABLE`] in the `content`
+/// crate — duplicated here as a plain string, same reasoning
+/// `crate::crafting_schema::TAG_CRAFTABLE_OUTPUT` documents) every
+/// declared `items[].item_type` must carry — the "this item participates
+/// in equipment" cross-check #287 asks for, on top of plain existence.
+const TAG_EQUIPPABLE: &str = "equippable";
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct EquipmentItem {
@@ -43,8 +51,18 @@ impl EquipmentSchema {
     /// Parses and validates `input` against `attribute_schema` — every
     /// declared item's `slot` must be one of `slots`, every `stat_deltas`
     /// key must be a real declared stat, and `item_type` is unique across
-    /// `items` (one item_type maps to exactly one slot).
-    pub fn from_yaml(input: &str, attribute_schema: &AttributeSchema) -> Result<Self> {
+    /// `items` (one item_type maps to exactly one slot). `known_item_types`
+    /// (#287) is every `item_type` currently declared in the central
+    /// item catalog (`content::ItemCatalogStore::all_item_types`) —
+    /// every equippable `item_type` this schema declares must be in it,
+    /// or loading fails loudly, naming the item/item_type at fault, same
+    /// discipline `crate::crafting_schema::CraftingSchema` applies to its
+    /// own item_type references.
+    pub fn from_yaml(
+        input: &str,
+        attribute_schema: &AttributeSchema,
+        known_item_types: &KnownItemTypes,
+    ) -> Result<Self> {
         let schema: Self = serde_yaml::from_str(input)
             .map_err(|e| Error::wrap("character", "failed to parse equipment.schema.yaml", e))?;
 
@@ -87,6 +105,36 @@ impl EquipmentSchema {
                 ));
             }
 
+            if !known_item_types.contains_key(&item.item_type) {
+                return Err(Error::new(
+                    "character",
+                    format!(
+                        "equipment.schema.yaml: item_type {:?} is not declared in the item \
+                         catalog — register it first with `make items ARGS=\"create {} \
+                         <display name>\"` (or from a plugin's on_load via register-item-type)",
+                        item.item_type, item.item_type
+                    ),
+                ));
+            }
+            // #287 — existence alone isn't enough: the catalog and this
+            // schema must agree on what *kind* of thing the item is. An
+            // item that exists but was never tagged `equippable` (e.g. a
+            // craftable_output ingredient someone typo'd into
+            // equipment.schema.yaml) is a load-time error, not a silent
+            // pass.
+            if !item_catalog_ref::has_tag(known_item_types, &item.item_type, TAG_EQUIPPABLE) {
+                return Err(Error::new(
+                    "character",
+                    format!(
+                        "equipment.schema.yaml: item_type {:?} exists in the item catalog but \
+                         isn't tagged {TAG_EQUIPPABLE:?} — add that tag with `make items \
+                         ARGS=\"create {} <display name> {TAG_EQUIPPABLE}\"` (or via \
+                         register-item-type) if this item really is meant to be equippable",
+                        item.item_type, item.item_type
+                    ),
+                ));
+            }
+
             for stat_key in item.stat_deltas.keys() {
                 if !attribute_schema.declares(stat_key) {
                     return Err(Error::new(
@@ -103,19 +151,27 @@ impl EquipmentSchema {
         Ok(schema)
     }
 
-    pub fn from_file(path: &Path, attribute_schema: &AttributeSchema) -> Result<Self> {
+    pub fn from_file(
+        path: &Path,
+        attribute_schema: &AttributeSchema,
+        known_item_types: &KnownItemTypes,
+    ) -> Result<Self> {
         let contents = std::fs::read_to_string(path).map_err(|e| {
             Error::wrap("character", format!("failed to read {}", path.display()), e)
         })?;
-        Self::from_yaml(&contents, attribute_schema)
+        Self::from_yaml(&contents, attribute_schema, known_item_types)
     }
 
     /// Reads `equipment.schema.yaml` from the dev's config directory
     /// (`common::config::config_dir` — `WZ_CONFIG_DIR` or `./config`).
-    pub fn from_config_dir(attribute_schema: &AttributeSchema) -> Result<Self> {
+    pub fn from_config_dir(
+        attribute_schema: &AttributeSchema,
+        known_item_types: &KnownItemTypes,
+    ) -> Result<Self> {
         Self::from_file(
             &common::config::config_dir().join("equipment.schema.yaml"),
             attribute_schema,
+            known_item_types,
         )
     }
 
@@ -156,6 +212,17 @@ stats:
         .unwrap()
     }
 
+    /// Every test item is also declared equippable somewhere in
+    /// `schema()`'s own items list, so all three carry `equippable` —
+    /// the tag `from_yaml`'s cross-check requires (#287).
+    fn known_item_types() -> KnownItemTypes {
+        let equippable: HashSet<String> = [TAG_EQUIPPABLE].into_iter().map(String::from).collect();
+        ["iron-helmet", "iron-sword", "cloth-cap"]
+            .into_iter()
+            .map(|item_type| (item_type.to_string(), equippable.clone()))
+            .collect()
+    }
+
     fn schema() -> EquipmentSchema {
         EquipmentSchema::from_yaml(
             r#"
@@ -176,6 +243,7 @@ items:
     slot: head
 "#,
             &attribute_schema(),
+            &known_item_types(),
         )
         .unwrap()
     }
@@ -210,7 +278,8 @@ items:
         assert!(
             EquipmentSchema::from_yaml(
                 "schema_version: 1\nslots: []\nitems: []",
-                &attribute_schema()
+                &attribute_schema(),
+                &known_item_types(),
             )
             .is_err()
         );
@@ -221,6 +290,7 @@ items:
         let result = EquipmentSchema::from_yaml(
             "schema_version: 1\nslots: [head, head]\nitems: []",
             &attribute_schema(),
+            &known_item_types(),
         );
         assert!(result.is_err());
     }
@@ -238,6 +308,7 @@ items:
     slot: head
 "#,
             &attribute_schema(),
+            &known_item_types(),
         );
         assert!(result.is_err());
     }
@@ -253,6 +324,7 @@ items:
     slot: weapon
 "#,
             &attribute_schema(),
+            &known_item_types(),
         );
         let err = result.unwrap_err();
         assert!(
@@ -274,8 +346,75 @@ items:
       stamina: 5
 "#,
             &attribute_schema(),
+            &known_item_types(),
         );
         let err = result.unwrap_err();
         assert!(err.to_string().contains("unknown stat"), "{err}");
+    }
+
+    // #287 — the actual point of this ticket: an equippable item_type
+    // must be a real catalog entry, or loading fails loudly, naming the
+    // item_type at fault.
+    #[test]
+    fn an_unknown_item_type_is_rejected() {
+        let result = EquipmentSchema::from_yaml(
+            r#"
+schema_version: 1
+slots: [head]
+items:
+  - item_type: mythril-helmet
+    slot: head
+"#,
+            &attribute_schema(),
+            &known_item_types(),
+        );
+        let err = result.unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("\"mythril-helmet\""), "{message}");
+        assert!(
+            message.contains("not declared in the item catalog"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn an_empty_catalog_rejects_every_item() {
+        let result = EquipmentSchema::from_yaml(
+            r#"
+schema_version: 1
+slots: [head]
+items:
+  - item_type: iron-helmet
+    slot: head
+"#,
+            &attribute_schema(),
+            &KnownItemTypes::new(),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn an_item_that_exists_but_lacks_the_equippable_tag_is_rejected() {
+        // Exists, but never tagged equippable — e.g. a craftable_output
+        // ingredient someone typo'd into equipment.schema.yaml.
+        let known: KnownItemTypes = [("iron-helmet".to_string(), HashSet::new())]
+            .into_iter()
+            .collect();
+        let result = EquipmentSchema::from_yaml(
+            r#"
+schema_version: 1
+slots: [head]
+items:
+  - item_type: iron-helmet
+    slot: head
+"#,
+            &attribute_schema(),
+            &known,
+        );
+        let err = result.unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("\"iron-helmet\""), "{message}");
+        assert!(message.contains(TAG_EQUIPPABLE), "{message}");
+        assert!(message.contains("isn't tagged"), "{message}");
     }
 }

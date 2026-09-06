@@ -24,7 +24,7 @@ use serde::Deserialize;
 /// (`wit/plugin.wit`) — a plugin manifest declaring a different
 /// `host_api_version` is refused at load time rather than instantiated
 /// against an interface it didn't actually target.
-pub const HOST_API_VERSION: &str = "0.14.0";
+pub const HOST_API_VERSION: &str = "0.15.0";
 
 /// `message_type` values below this are core-reserved (auth, chat, world
 /// — see docs/specs/Networking_Spec.md's catalog); a plugin declaring one
@@ -389,7 +389,7 @@ capabilities = ["economy", "combat"]
             r#"
 [plugin]
 name = "example-plugin"
-host_api_version = "0.14.0"
+host_api_version = "0.15.0"
 "#,
         )
         .unwrap();
@@ -416,7 +416,7 @@ host_api_version = "99.0.0"
             r#"
 [plugin]
 name = "example-plugin"
-host_api_version = "0.14.0"
+host_api_version = "0.15.0"
 message_types = [1000, 1001]
 "#,
         )
@@ -432,7 +432,7 @@ message_types = [1000, 1001]
             r#"
 [plugin]
 name = "example-plugin"
-host_api_version = "0.14.0"
+host_api_version = "0.15.0"
 message_types = [200]
 "#,
         )
@@ -448,7 +448,7 @@ message_types = [200]
             r#"
 [plugin]
 name = "example-plugin"
-host_api_version = "0.14.0"
+host_api_version = "0.15.0"
 message_types = [1000, 1000]
 "#,
         )
@@ -464,7 +464,7 @@ message_types = [1000, 1000]
             r#"
 [plugin]
 name = "example-plugin"
-host_api_version = "0.14.0"
+host_api_version = "0.15.0"
 chat_commands = ["roll", "whisper"]
 "#,
         )
@@ -480,7 +480,7 @@ chat_commands = ["roll", "whisper"]
             r#"
 [plugin]
 name = "example-plugin"
-host_api_version = "0.14.0"
+host_api_version = "0.15.0"
 chat_commands = [""]
 "#,
         )
@@ -496,7 +496,7 @@ chat_commands = [""]
             r#"
 [plugin]
 name = "example-plugin"
-host_api_version = "0.14.0"
+host_api_version = "0.15.0"
 chat_commands = ["/roll"]
 "#,
         )
@@ -512,7 +512,7 @@ chat_commands = ["/roll"]
             r#"
 [plugin]
 name = "example-plugin"
-host_api_version = "0.14.0"
+host_api_version = "0.15.0"
 chat_commands = ["roll", "roll"]
 "#,
         )
@@ -528,7 +528,7 @@ chat_commands = ["roll", "roll"]
             r#"
 [plugin]
 name = "example-plugin"
-host_api_version = "0.14.0"
+host_api_version = "0.15.0"
 capabilities = ["spawning", "movement", "combat", "economy"]
 "#,
         )
@@ -543,7 +543,7 @@ capabilities = ["spawning", "movement", "combat", "economy"]
             r#"
 [plugin]
 name = "example-plugin"
-host_api_version = "0.14.0"
+host_api_version = "0.15.0"
 capabilities = ["telekinesis"]
 "#,
         )
@@ -559,7 +559,7 @@ capabilities = ["telekinesis"]
             r#"
 [plugin]
 name = "example-plugin"
-host_api_version = "0.14.0"
+host_api_version = "0.15.0"
 capabilities = ["economy", "economy"]
 "#,
         )
@@ -575,7 +575,7 @@ capabilities = ["economy", "economy"]
             r#"
 [plugin]
 name = "example-plugin"
-host_api_version = "0.14.0"
+host_api_version = "0.15.0"
 "#,
         )
         .unwrap();
@@ -590,7 +590,7 @@ host_api_version = "0.14.0"
             r#"
 [plugin]
 name = "example-plugin"
-host_api_version = "0.14.0"
+host_api_version = "0.15.0"
 hooks = ["on-load", "on-chat-command"]
 "#,
         )
@@ -605,7 +605,7 @@ hooks = ["on-load", "on-chat-command"]
             r#"
 [plugin]
 name = "example-plugin"
-host_api_version = "0.14.0"
+host_api_version = "0.15.0"
 hooks = ["on-teleport"]
 "#,
         )
@@ -621,7 +621,7 @@ hooks = ["on-teleport"]
             r#"
 [plugin]
 name = "example-plugin"
-host_api_version = "0.14.0"
+host_api_version = "0.15.0"
 hooks = ["on-load", "on-load"]
 "#,
         )
@@ -637,7 +637,7 @@ hooks = ["on-load", "on-load"]
             r#"
 [plugin]
 name = "example-plugin"
-host_api_version = "0.14.0"
+host_api_version = "0.15.0"
 "#,
         )
         .unwrap();
@@ -660,7 +660,7 @@ host_api_version = "0.14.0"
             r#"
 [plugin]
 name = {name:?}
-host_api_version = "0.14.0"
+host_api_version = "0.15.0"
 message_types = [{message_types}]
 chat_commands = [{chat_commands}]
 "#

@@ -12,8 +12,38 @@ use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use crate::bindings::Plugin as PluginBindings;
 use crate::bindings::worldzero::plugin::host::Host as HostInterface;
+use crate::bindings::worldzero::plugin::host::ItemCatalogEntry as WitItemCatalogEntry;
 use crate::bindings::worldzero::plugin::host::PluginStateScope as WitPluginStateScope;
 use crate::manifest::PluginManifest;
+
+/// Mirrors `wit/plugin.wit`'s `item-catalog-entry` record (#287) — kept
+/// as our own type rather than exposing the `wasmtime`-generated one
+/// directly, same reasoning as `PluginStateScope` above: implementors of
+/// `HostCallbacks` (`server`) shouldn't need to depend on `plugin-host`'s
+/// private `bindings` module. `metadata` stays a JSON-object-encoded
+/// string at this boundary too, not a parsed `serde_json::Value` —
+/// `plugin-host` has no `serde_json` dependency of its own, and the
+/// catalog's `metadata` column is opaque to the host either way (see
+/// `content::items::ItemCatalogEntry` for the parsed form `server`
+/// actually stores it as).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ItemCatalogEntry {
+    pub item_type: String,
+    pub display_name: String,
+    pub tags: Vec<String>,
+    pub metadata: String,
+}
+
+impl From<ItemCatalogEntry> for WitItemCatalogEntry {
+    fn from(entry: ItemCatalogEntry) -> Self {
+        WitItemCatalogEntry {
+            item_type: entry.item_type,
+            display_name: entry.display_name,
+            tags: entry.tags,
+            metadata: entry.metadata,
+        }
+    }
+}
 
 /// Mirrors `wit/plugin.wit`'s `plugin-state-scope` variant — kept as our
 /// own type rather than exposing the `wasmtime`-generated one directly,
@@ -166,6 +196,28 @@ pub trait HostCallbacks: Send + 'static {
         entity_id: &str,
         category: &str,
     ) -> std::result::Result<(), String>;
+
+    /// Registers/updates an item catalog entry (`wit/plugin.wit`'s
+    /// `register-item-type`, #287) — queued/applied through
+    /// `content::ItemCatalogStore::register`, the same validation path
+    /// `make items` writes through. `metadata` is a JSON-object-encoded
+    /// string (`"{}"` for none).
+    fn register_item_type(
+        &mut self,
+        item_type: &str,
+        display_name: &str,
+        tags: Vec<String>,
+        metadata: &str,
+    ) -> std::result::Result<(), String>;
+
+    /// Reads one item catalog entry (`wit/plugin.wit`'s `get-item`) —
+    /// same "answer from an in-memory cache, never a live DB read from
+    /// inside a sandboxed call" constraint as `caller_role`/
+    /// `plugin_state_get`.
+    fn get_item(
+        &mut self,
+        item_type: &str,
+    ) -> std::result::Result<Option<ItemCatalogEntry>, String>;
 }
 
 /// Which capability (`manifest::KNOWN_CAPABILITIES`) a host function
@@ -191,7 +243,9 @@ fn required_capability(function: &str) -> Option<&'static str> {
         | "apply-stat-delta-for-character"
         | "report-death"
         | "report-respawn" => Some(CAPABILITY_COMBAT),
-        "grant-item" | "remove-item" | "modify-currency" => Some(CAPABILITY_ECONOMY),
+        "grant-item" | "remove-item" | "modify-currency" | "register-item-type" => {
+            Some(CAPABILITY_ECONOMY)
+        }
         // Grouped with `send-message` rather than a new capability
         // (#186): chat is a messaging concern, and this is the same
         // "reaches across an entity boundary" test every other gated
@@ -351,6 +405,25 @@ impl HostCallbacks for CapabilityGatedCallbacks {
         self.check("block-zone-channel")?;
         self.inner.block_zone_channel(entity_id, category)
     }
+
+    fn register_item_type(
+        &mut self,
+        item_type: &str,
+        display_name: &str,
+        tags: Vec<String>,
+        metadata: &str,
+    ) -> std::result::Result<(), String> {
+        self.check("register-item-type")?;
+        self.inner
+            .register_item_type(item_type, display_name, tags, metadata)
+    }
+
+    fn get_item(
+        &mut self,
+        item_type: &str,
+    ) -> std::result::Result<Option<ItemCatalogEntry>, String> {
+        self.inner.get_item(item_type)
+    }
 }
 
 struct PluginState {
@@ -474,6 +547,24 @@ impl HostInterface for PluginState {
         category: String,
     ) -> std::result::Result<(), String> {
         self.callbacks.block_zone_channel(&entity_id, &category)
+    }
+
+    fn register_item_type(
+        &mut self,
+        item_type: String,
+        display_name: String,
+        tags: Vec<String>,
+        metadata: String,
+    ) -> std::result::Result<(), String> {
+        self.callbacks
+            .register_item_type(&item_type, &display_name, tags, &metadata)
+    }
+
+    fn get_item(
+        &mut self,
+        item_type: String,
+    ) -> std::result::Result<Option<WitItemCatalogEntry>, String> {
+        Ok(self.callbacks.get_item(&item_type)?.map(Into::into))
     }
 }
 
@@ -985,6 +1076,18 @@ mod tests {
         }
         fn block_zone_channel(&mut self, _: &str, _: &str) -> std::result::Result<(), String> {
             Ok(())
+        }
+        fn register_item_type(
+            &mut self,
+            _: &str,
+            _: &str,
+            _: Vec<String>,
+            _: &str,
+        ) -> std::result::Result<(), String> {
+            Ok(())
+        }
+        fn get_item(&mut self, _: &str) -> std::result::Result<Option<ItemCatalogEntry>, String> {
+            Ok(None)
         }
     }
 

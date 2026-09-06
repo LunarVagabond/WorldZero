@@ -16,6 +16,16 @@ use std::path::Path;
 use common::{Error, Result};
 use serde::Deserialize;
 
+use crate::item_catalog_ref::{self, KnownItemTypes};
+
+/// The catalog tag ([`content::items::TAG_CRAFTABLE_OUTPUT`] in the
+/// `content` crate — duplicated here as a plain string rather than a
+/// shared constant, since `character` doesn't depend on `content`; see
+/// `crate::item_catalog_ref`'s own doc comment for why) every recipe's
+/// declared `output.item_type` must carry — the "this item participates
+/// in crafting" cross-check #287 asks for, on top of plain existence.
+const TAG_CRAFTABLE_OUTPUT: &str = "craftable_output";
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct CraftingInput {
     pub item_type: String,
@@ -47,7 +57,16 @@ pub struct CraftingSchema {
 }
 
 impl CraftingSchema {
-    pub fn from_yaml(input: &str) -> Result<Self> {
+    /// Parses and validates `input` — `known_item_types` (#287) is every
+    /// `item_type` currently declared in the central item catalog
+    /// (`content::ItemCatalogStore::all_item_types`, populated from both
+    /// `make items`-authored rows and any plugin's `register-item-type`
+    /// call during `on_load`); every `item_type` this schema's recipes
+    /// reference (as an input or an output) must be in it, or loading
+    /// fails loudly, naming the specific recipe/field/item_type at
+    /// fault, same as every other cross-reference this loader already
+    /// checks (`recipe.key` uniqueness, positive amounts).
+    pub fn from_yaml(input: &str, known_item_types: &KnownItemTypes) -> Result<Self> {
         let schema: Self = serde_yaml::from_str(input)
             .map_err(|e| Error::wrap("character", "failed to parse crafting.schema.yaml", e))?;
 
@@ -90,6 +109,18 @@ impl CraftingSchema {
                         ),
                     ));
                 }
+                if !known_item_types.contains_key(&input.item_type) {
+                    return Err(Error::new(
+                        "character",
+                        format!(
+                            "crafting.schema.yaml: recipe \"{}\" input item_type {:?} is not \
+                             declared in the item catalog — register it first with \
+                             `make items ARGS=\"create {} <display name>\"` (or from a plugin's \
+                             on_load via register-item-type)",
+                            recipe.key, input.item_type, input.item_type
+                        ),
+                    ));
+                }
             }
 
             if recipe.output.amount <= 0 {
@@ -101,22 +132,59 @@ impl CraftingSchema {
                     ),
                 ));
             }
+            if !known_item_types.contains_key(&recipe.output.item_type) {
+                return Err(Error::new(
+                    "character",
+                    format!(
+                        "crafting.schema.yaml: recipe \"{}\" output item_type {:?} is not \
+                         declared in the item catalog — register it first with \
+                         `make items ARGS=\"create {} <display name>\"` (or from a plugin's \
+                         on_load via register-item-type)",
+                        recipe.key, recipe.output.item_type, recipe.output.item_type
+                    ),
+                ));
+            }
+            // #287 — existence alone isn't enough: the catalog and this
+            // schema must agree on what *kind* of thing the output is.
+            // An item that exists but was never tagged `craftable_output`
+            // (e.g. a drop-only trophy someone typo'd into a recipe) is a
+            // load-time error, not a silent pass.
+            if !item_catalog_ref::has_tag(
+                known_item_types,
+                &recipe.output.item_type,
+                TAG_CRAFTABLE_OUTPUT,
+            ) {
+                return Err(Error::new(
+                    "character",
+                    format!(
+                        "crafting.schema.yaml: recipe \"{}\" output item_type {:?} exists in the \
+                         item catalog but isn't tagged {TAG_CRAFTABLE_OUTPUT:?} — add that tag \
+                         with `make items ARGS=\"create {} <display name> {TAG_CRAFTABLE_OUTPUT}\"` \
+                         (or via register-item-type) if this item really is meant to be a \
+                         craftable output",
+                        recipe.key, recipe.output.item_type, recipe.output.item_type
+                    ),
+                ));
+            }
         }
 
         Ok(schema)
     }
 
-    pub fn from_file(path: &Path) -> Result<Self> {
+    pub fn from_file(path: &Path, known_item_types: &KnownItemTypes) -> Result<Self> {
         let contents = std::fs::read_to_string(path).map_err(|e| {
             Error::wrap("character", format!("failed to read {}", path.display()), e)
         })?;
-        Self::from_yaml(&contents)
+        Self::from_yaml(&contents, known_item_types)
     }
 
     /// Reads `crafting.schema.yaml` from the dev's config directory
     /// (`common::config::config_dir` — `WZ_CONFIG_DIR` or `./config`).
-    pub fn from_config_dir() -> Result<Self> {
-        Self::from_file(&common::config::config_dir().join("crafting.schema.yaml"))
+    pub fn from_config_dir(known_item_types: &KnownItemTypes) -> Result<Self> {
+        Self::from_file(
+            &common::config::config_dir().join("crafting.schema.yaml"),
+            known_item_types,
+        )
     }
 
     pub fn resolve(&self, key: &str) -> Result<&Recipe> {
@@ -129,7 +197,32 @@ impl CraftingSchema {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
+
+    /// `wolf-fang`/`iron-ore`/`herb` are plain inputs (no tag required of
+    /// an input by this loader); `wolf-fang-dagger`/`healing-tonic`/
+    /// `dagger` are also every test recipe's declared *output*, so they
+    /// carry `craftable_output` — the tag `from_yaml`'s output check
+    /// requires (#287).
+    fn known_item_types() -> KnownItemTypes {
+        let tagged_output: HashSet<String> = [TAG_CRAFTABLE_OUTPUT]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        [
+            ("wolf-fang", HashSet::new()),
+            ("iron-ore", HashSet::new()),
+            ("herb", HashSet::new()),
+            ("wolf-fang-dagger", tagged_output.clone()),
+            ("healing-tonic", tagged_output.clone()),
+            ("dagger", tagged_output),
+        ]
+        .into_iter()
+        .map(|(item_type, tags)| (item_type.to_string(), tags))
+        .collect()
+    }
 
     fn schema() -> CraftingSchema {
         CraftingSchema::from_yaml(
@@ -155,6 +248,7 @@ recipes:
       item_type: healing-tonic
       amount: 1
 "#,
+            &known_item_types(),
         )
         .unwrap()
     }
@@ -176,7 +270,10 @@ recipes:
 
     #[test]
     fn an_empty_recipes_list_is_rejected() {
-        assert!(CraftingSchema::from_yaml("schema_version: 1\nrecipes: []").is_err());
+        assert!(
+            CraftingSchema::from_yaml("schema_version: 1\nrecipes: []", &known_item_types())
+                .is_err()
+        );
     }
 
     #[test]
@@ -202,6 +299,7 @@ recipes:
       item_type: dagger
       amount: 1
 "#,
+            &known_item_types(),
         );
         assert!(result.is_err());
     }
@@ -219,6 +317,7 @@ recipes:
       item_type: dagger
       amount: 1
 "#,
+            &known_item_types(),
         );
         assert!(result.is_err());
     }
@@ -238,6 +337,7 @@ recipes:
       item_type: dagger
       amount: 1
 "#,
+            &known_item_types(),
         );
         assert!(result.is_err());
     }
@@ -257,7 +357,113 @@ recipes:
       item_type: dagger
       amount: 0
 "#,
+            &known_item_types(),
         );
         assert!(result.is_err());
+    }
+
+    // #287 — the actual point of this ticket: an item_type a recipe
+    // references (as an input or an output) must be a real catalog
+    // entry, or loading fails loudly, naming the recipe/field/item_type.
+    #[test]
+    fn an_unknown_input_item_type_is_rejected() {
+        let result = CraftingSchema::from_yaml(
+            r#"
+schema_version: 1
+recipes:
+  - key: dagger
+    category: blacksmithing
+    inputs:
+      - item_type: unobtainium
+        amount: 1
+    output:
+      item_type: dagger
+      amount: 1
+"#,
+            &known_item_types(),
+        );
+        let err = result.unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("recipe \"dagger\""), "{message}");
+        assert!(message.contains("\"unobtainium\""), "{message}");
+        assert!(
+            message.contains("not declared in the item catalog"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_output_item_type_is_rejected() {
+        let result = CraftingSchema::from_yaml(
+            r#"
+schema_version: 1
+recipes:
+  - key: dagger
+    category: blacksmithing
+    inputs:
+      - item_type: iron-ore
+        amount: 1
+    output:
+      item_type: unobtainium-dagger
+      amount: 1
+"#,
+            &known_item_types(),
+        );
+        let err = result.unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("recipe \"dagger\""), "{message}");
+        assert!(message.contains("\"unobtainium-dagger\""), "{message}");
+        assert!(
+            message.contains("not declared in the item catalog"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn an_empty_catalog_rejects_every_recipe() {
+        let result = CraftingSchema::from_yaml(
+            r#"
+schema_version: 1
+recipes:
+  - key: dagger
+    category: blacksmithing
+    inputs:
+      - item_type: iron-ore
+        amount: 1
+    output:
+      item_type: dagger
+      amount: 1
+"#,
+            &KnownItemTypes::new(),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn an_output_item_type_that_exists_but_lacks_the_craftable_output_tag_is_rejected() {
+        let mut known = known_item_types();
+        // Exists, but never tagged as a craftable output — e.g. a
+        // `drop_only` trophy someone typo'd into a recipe.
+        known.insert("dagger".to_string(), HashSet::new());
+        let result = CraftingSchema::from_yaml(
+            r#"
+schema_version: 1
+recipes:
+  - key: dagger
+    category: blacksmithing
+    inputs:
+      - item_type: iron-ore
+        amount: 1
+    output:
+      item_type: dagger
+      amount: 1
+"#,
+            &known,
+        );
+        let err = result.unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("\"dagger\""), "{message}");
+        assert!(message.contains(TAG_CRAFTABLE_OUTPUT), "{message}");
+        assert!(message.contains("isn't tagged"), "{message}");
     }
 }

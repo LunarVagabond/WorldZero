@@ -11,6 +11,7 @@ pub mod currency_schema;
 pub mod equipment;
 pub mod equipment_schema;
 pub mod inventory;
+pub mod item_catalog_ref;
 pub mod party;
 pub mod party_schema;
 pub mod schema;
@@ -25,6 +26,7 @@ pub use crafting_schema::{CraftingInput, CraftingOutput, CraftingSchema, Recipe}
 pub use currency_schema::{Currency, CurrencyDenomination, CurrencySchema};
 pub use equipment::{EquipOutcome, UnequipOutcome};
 pub use equipment_schema::{EquipmentItem, EquipmentSchema};
+pub use item_catalog_ref::KnownItemTypes;
 pub use party::PartyStore;
 pub use party_schema::{PartySchema, PartyType};
 pub use schema::{AttributeSchema, StatDeclaration, StatType};

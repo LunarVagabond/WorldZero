@@ -3,12 +3,13 @@
 # or config/stats.schema.yaml). See docs/specs/Plugin_API.md.
 [plugin]
 name = "example-plugin"
-host_api_version = "0.14.0"
+host_api_version = "0.15.0"
 # This plugin calls spawn-npc, send-message, move-entity,
-# apply-stat-delta, and grant-item — all five gated capabilities
-# (docs/specs/Plugin_API.md's "Capability gating") — so it declares all
-# five. A real third-party plugin an operator trusts less would
-# typically declare fewer.
+# apply-stat-delta, grant-item, and register-item-type — all gated
+# behind these five capabilities (docs/specs/Plugin_API.md's
+# "Capability gating") — so it declares all five. A real third-party
+# plugin an operator trusts less would typically declare fewer.
+# get-item is ungated (read-only, docs/specs/Plugin_API.md's "get-item").
 capabilities = ["spawning", "movement", "combat", "economy", "messaging"]
 # 1000: echoed back by on-message below (docs/specs/Networking_Spec.md's
 # plugin-declared floor is >= 1000) — send this message_type over the
@@ -21,6 +22,7 @@ chat_commands = ["wave"]
 # on-message/on-chat-command route on message_types/chat_commands above
 # instead and don't need to appear here too.
 hooks = [
+    "on-load",
     "on-zone-loaded",
     "on-player-join-zone",
     "on-player-leave-zone",

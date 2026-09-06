@@ -285,6 +285,159 @@ async fn main() {
         "loaded zone manifest(s)"
     );
 
+    // #287 — the central item catalog: owned by `content`, the single
+    // source of truth `crafting.schema.yaml`/`equipment.schema.yaml`
+    // (loaded further below) and `DropItem` (`session.rs`) all validate
+    // their own `item_type` references against, replacing three
+    // independent, cross-unvalidated declarations of the same opaque
+    // string.
+    let item_catalog_store = Arc::new(content::ItemCatalogStore::new(pool.clone()));
+
+    // Every in-memory container a loaded plugin's `on_load` might touch —
+    // moved up here, ahead of every schema load below, specifically so
+    // plugin loading (right after) can run *before* `crafting_schema`/
+    // `equipment_schema` validate their `item_type` references against
+    // the catalog: a plugin's own `register-item-type` call needs to
+    // land before that validation runs, or a schema referencing a
+    // plugin-declared item type would fail startup for no real reason.
+    // These are otherwise unchanged from their previous declaration
+    // spot further down main (still used the same way there).
+    let entity_roles: EntityRoles = Arc::new(Mutex::new(HashMap::new()));
+    // Backs `block-zone-channel` (#186) — see `BlockedZoneChannels`'s own
+    // doc comment. Constructed unconditionally, same as `entity_roles`:
+    // cheap to keep even with chat disabled, since a plugin can call
+    // `block-zone-channel` regardless of `WZ_SERVICE_CHAT_ENABLED`.
+    let blocked_zone_channels: BlockedZoneChannels = Arc::new(Mutex::new(HashMap::new()));
+    // Every connected entity's outgoing channel, process-wide, regardless
+    // of which zone it's currently in (#152) — backs the plugin
+    // `send-message` host function, since a plugin instance is shared
+    // across every zone now and needs to reach a target entity no matter
+    // where they are. Distinct from each zone's own `Sessions` (used for
+    // that zone's broadcast/roster) — see `session::SessionDeps`'s own
+    // doc comment on this field.
+    let global_sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
+    // Shared process-wide (#149) — every connection's character-scope
+    // state and every zone's zone-scope state lands in this one cache.
+    // Not namespaced per plugin even with #152's multi-plugin support: a
+    // known, separate gap (docs/specs/Plugin_API.md's "Beyond this v0
+    // slice") — every plugin shares the same zone-scope bucket for a
+    // given zone. See `plugin_state`'s module doc.
+    let plugin_state_cache: plugin_state::PluginStateCache = Arc::new(Mutex::new(HashMap::new()));
+
+    // In-memory mirror of `item_catalog_store`'s current rows, hydrated
+    // once here — before any plugin's `on_load` runs — from whatever
+    // `make items`/a previous run already put in the table. Backs
+    // `get-item`'s synchronous read and `register-item-type`'s
+    // immediate-visibility write (`plugin_startup::PluginCallbacks`),
+    // same "no live DB read/write from inside a sandboxed call"
+    // discipline `plugin_state_cache`/`entity_roles` already follow.
+    let item_catalog_cache: plugin_startup::ItemCatalogCache = Arc::new(Mutex::new(
+        item_catalog_store
+            .list()
+            .await
+            .unwrap_or_else(|e| panic!("failed to load the item catalog: {e}"))
+            .into_iter()
+            .map(|entry| (entry.item_type.clone(), entry))
+            .collect(),
+    ));
+
+    // Discovered once, up front — every manifest is validated
+    // individually and, as a whole set, for message_type/chat_command
+    // collisions before any plugin is ever instantiated (#152). Empty is
+    // the ordinary "no plugins configured" case, not an error.
+    let plugins_dir = std::env::var("WZ_PLUGINS_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| config_dir.join("plugins"));
+    let discovered_plugins = discover_plugins(&plugins_dir);
+    tracing::info!(plugin_count = discovered_plugins.len(), plugins_dir = %plugins_dir.display(), "discovered plugin(s)");
+
+    // The union across every discovered plugin's declared
+    // message_types/chat_commands — already guaranteed collision-free by
+    // `discover_plugins` — used only as `session`'s early routing filter;
+    // the zone actor itself decides which *specific* loaded plugin (if
+    // any) a given value actually belongs to.
+    let plugin_message_types: Vec<u16> = discovered_plugins
+        .iter()
+        .flat_map(|(manifest, _)| manifest.plugin.message_types.clone())
+        .collect();
+    let plugin_chat_commands: Vec<String> = discovered_plugins
+        .iter()
+        .flat_map(|(manifest, _)| manifest.plugin.chat_commands.clone())
+        .collect();
+
+    // One plugin instance, process-wide (#152) — loaded exactly once,
+    // here, before any zone exists (matching `on-load`'s "genuinely
+    // global setup only" contract, `wit/plugin.wit`'s doc comment), then
+    // shared across every zone-service via `Arc<tokio::sync::Mutex<_>>`.
+    // One `wasmtime::Engine` for the whole process too —
+    // `plugin_host::PluginHost`'s own doc comment: "compiling/loading is
+    // the expensive part, the engine itself is cheap to share."
+    let plugin_host = plugin_host::PluginHost::new();
+    let mut loaded_plugins = Vec::new();
+    for (manifest, wasm_path) in &discovered_plugins {
+        let (runtime, on_load_spawns, on_load_item_registrations) = plugin_startup::load_plugin(
+            manifest,
+            wasm_path,
+            &plugin_host,
+            global_sessions.clone(),
+            entity_roles.clone(),
+            plugin_state_cache.clone(),
+            blocked_zone_channels.clone(),
+            item_catalog_cache.clone(),
+        )
+        .unwrap_or_else(|e| {
+            panic!(
+                "failed to load plugin {:?} ({}): {e}",
+                manifest.plugin.name,
+                wasm_path.display(),
+            )
+        });
+        // `on_load` has no zone context anymore (#152) — a well-behaved
+        // plugin doesn't call `spawn-npc` from it (that belongs in
+        // `on_zone_loaded`, per-zone, below). Warn rather than silently
+        // drop if one does anyway, so a plugin author notices.
+        for spawn_table_id in on_load_spawns {
+            tracing::warn!(
+                plugin = %manifest.plugin.name,
+                spawn_table_id,
+                "plugin requested spawn-npc from on_load, which has no zone context — ignored; use on_zone_loaded instead"
+            );
+        }
+        // #287 — persisted through the same store/validation path
+        // `make items` writes through, right away: `crafting_schema`/
+        // `equipment_schema` below validate against `item_catalog_store`
+        // fresh, so a plugin-registered item needs to actually be there
+        // by now, not just sitting in `item_catalog_cache`.
+        for entry in on_load_item_registrations {
+            if let Err(e) = item_catalog_store.register(&entry).await {
+                panic!(
+                    "plugin {:?} called register-item-type for {:?} but it was rejected: {e}",
+                    manifest.plugin.name, entry.item_type
+                );
+            }
+        }
+        loaded_plugins.push(runtime);
+    }
+    let plugin_count = loaded_plugins.len();
+    let plugins = Arc::new(tokio::sync::Mutex::new(loaded_plugins));
+
+    // #287 — snapshot of every item_type/tags known to the catalog after
+    // every plugin's `on_load` has had a chance to call
+    // `register-item-type` — this is what `crafting.schema.yaml`/
+    // `equipment.schema.yaml` below validate their `item_type`
+    // references (and declared tags) against.
+    let known_item_types: character::KnownItemTypes = item_catalog_cache
+        .lock()
+        .unwrap()
+        .values()
+        .map(|entry| {
+            (
+                entry.item_type.clone(),
+                entry.tags.iter().cloned().collect(),
+            )
+        })
+        .collect();
+
     let schema_path = config_dir.join("stats.schema.yaml");
     let schema = AttributeSchema::from_file(&schema_path).unwrap_or_else(|e| {
         panic!(
@@ -319,7 +472,7 @@ async fn main() {
         });
     let crafting_schema_path = config_dir.join("crafting.schema.yaml");
     let crafting_schema =
-        character::CraftingSchema::from_file(&crafting_schema_path).unwrap_or_else(|e| {
+        character::CraftingSchema::from_file(&crafting_schema_path, &known_item_types).unwrap_or_else(|e| {
             panic!(
                 "failed to load the declared recipe schema at {} (see config/crafting.schema.example.yaml): {e}",
                 crafting_schema_path.display()
@@ -338,13 +491,14 @@ async fn main() {
     // `CharacterStore::new` shortly after) — same reasoning as
     // `archetype_schema`'s own load above.
     let equipment_schema_path = config_dir.join("equipment.schema.yaml");
-    let equipment_schema = character::EquipmentSchema::from_file(&equipment_schema_path, &schema)
-        .unwrap_or_else(|e| {
-            panic!(
-                "failed to load the declared equipment schema at {} (see config/equipment.schema.example.yaml): {e}",
-                equipment_schema_path.display()
-            )
-        });
+    let equipment_schema =
+        character::EquipmentSchema::from_file(&equipment_schema_path, &schema, &known_item_types)
+            .unwrap_or_else(|e| {
+                panic!(
+                    "failed to load the declared equipment schema at {} (see config/equipment.schema.example.yaml): {e}",
+                    equipment_schema_path.display()
+                )
+            });
     let inventory_config =
         InventoryConfig::from_env().expect("invalid WZ_INVENTORY_MAX_ITEM_TYPES");
     // #193's character-creation cap — a `server`-side policy value (like
@@ -503,12 +657,6 @@ async fn main() {
 
     let entity_characters: EntityCharacters = Arc::new(Mutex::new(HashMap::new()));
     let character_entities: CharacterEntities = Arc::new(Mutex::new(HashMap::new()));
-    let entity_roles: EntityRoles = Arc::new(Mutex::new(HashMap::new()));
-    // Backs `block-zone-channel` (#186) — see `BlockedZoneChannels`'s own
-    // doc comment. Constructed unconditionally, same as `entity_roles`:
-    // cheap to keep even with chat disabled, since a plugin can call
-    // `block-zone-channel` regardless of `WZ_SERVICE_CHAT_ENABLED`.
-    let blocked_zone_channels: BlockedZoneChannels = Arc::new(Mutex::new(HashMap::new()));
     let npc_stats: NpcStats = Arc::new(Mutex::new(HashMap::new()));
     let pending_party_invites: PendingPartyInvites = Arc::new(Mutex::new(HashMap::new()));
     let pending_guild_invites: PendingGuildInvites = Arc::new(Mutex::new(HashMap::new()));
@@ -516,90 +664,7 @@ async fn main() {
     let active_trades: ActiveTrades = Arc::new(Mutex::new(HashMap::new()));
     let entity_accounts: EntityAccounts = Arc::new(Mutex::new(HashMap::new()));
     let account_entities: AccountEntities = Arc::new(Mutex::new(HashMap::new()));
-
-    // Every connected entity's outgoing channel, process-wide, regardless
-    // of which zone it's currently in (#152) — backs the plugin
-    // `send-message` host function, since a plugin instance is shared
-    // across every zone now and needs to reach a target entity no matter
-    // where they are. Distinct from each zone's own `Sessions` (used for
-    // that zone's broadcast/roster) — see `session::SessionDeps`'s own
-    // doc comment on this field.
-    let global_sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
-
-    // Shared process-wide (#149) — every connection's character-scope
-    // state and every zone's zone-scope state lands in this one cache.
-    // Not namespaced per plugin even with #152's multi-plugin support: a
-    // known, separate gap (docs/specs/Plugin_API.md's "Beyond this v0
-    // slice") — every plugin shares the same zone-scope bucket for a
-    // given zone. See `plugin_state`'s module doc.
-    let plugin_state_cache: plugin_state::PluginStateCache = Arc::new(Mutex::new(HashMap::new()));
     let plugin_state_store = Arc::new(plugin_state::PluginStateStore::new(pool.clone()));
-
-    // Discovered once, up front — every manifest is validated
-    // individually and, as a whole set, for message_type/chat_command
-    // collisions before any plugin is ever instantiated (#152). Empty is
-    // the ordinary "no plugins configured" case, not an error.
-    let plugins_dir = std::env::var("WZ_PLUGINS_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| config_dir.join("plugins"));
-    let discovered_plugins = discover_plugins(&plugins_dir);
-    tracing::info!(plugin_count = discovered_plugins.len(), plugins_dir = %plugins_dir.display(), "discovered plugin(s)");
-
-    // The union across every discovered plugin's declared
-    // message_types/chat_commands — already guaranteed collision-free by
-    // `discover_plugins` — used only as `session`'s early routing filter;
-    // the zone actor itself decides which *specific* loaded plugin (if
-    // any) a given value actually belongs to.
-    let plugin_message_types: Vec<u16> = discovered_plugins
-        .iter()
-        .flat_map(|(manifest, _)| manifest.plugin.message_types.clone())
-        .collect();
-    let plugin_chat_commands: Vec<String> = discovered_plugins
-        .iter()
-        .flat_map(|(manifest, _)| manifest.plugin.chat_commands.clone())
-        .collect();
-
-    // One plugin instance, process-wide (#152) — loaded exactly once,
-    // here, before any zone exists (matching `on-load`'s "genuinely
-    // global setup only" contract, `wit/plugin.wit`'s doc comment), then
-    // shared across every zone-service via `Arc<tokio::sync::Mutex<_>>`.
-    // One `wasmtime::Engine` for the whole process too —
-    // `plugin_host::PluginHost`'s own doc comment: "compiling/loading is
-    // the expensive part, the engine itself is cheap to share."
-    let plugin_host = plugin_host::PluginHost::new();
-    let mut loaded_plugins = Vec::new();
-    for (manifest, wasm_path) in &discovered_plugins {
-        let (runtime, on_load_spawns) = plugin_startup::load_plugin(
-            manifest,
-            wasm_path,
-            &plugin_host,
-            global_sessions.clone(),
-            entity_roles.clone(),
-            plugin_state_cache.clone(),
-            blocked_zone_channels.clone(),
-        )
-        .unwrap_or_else(|e| {
-            panic!(
-                "failed to load plugin {:?} ({}): {e}",
-                manifest.plugin.name,
-                wasm_path.display(),
-            )
-        });
-        // `on_load` has no zone context anymore (#152) — a well-behaved
-        // plugin doesn't call `spawn-npc` from it (that belongs in
-        // `on_zone_loaded`, per-zone, below). Warn rather than silently
-        // drop if one does anyway, so a plugin author notices.
-        for spawn_table_id in on_load_spawns {
-            tracing::warn!(
-                plugin = %manifest.plugin.name,
-                spawn_table_id,
-                "plugin requested spawn-npc from on_load, which has no zone context — ignored; use on_zone_loaded instead"
-            );
-        }
-        loaded_plugins.push(runtime);
-    }
-    let plugin_count = loaded_plugins.len();
-    let plugins = Arc::new(tokio::sync::Mutex::new(loaded_plugins));
 
     // #181 — always on, independent of `WZ_SERVICE_METRICS_ENABLED`:
     // liveness/readiness need to stay reachable regardless of whether the
@@ -728,6 +793,7 @@ async fn main() {
             zone_id.clone(),
             metrics.clone(),
             global_sessions.clone(),
+            item_catalog_store.clone(),
             move |zone, outcomes| {
                 handle_tick_outcomes(
                     &registry_cell,
@@ -780,6 +846,7 @@ async fn main() {
     let layer_spawner_plugins = plugins.clone();
     let layer_spawner_global_sessions = global_sessions.clone();
     let layer_spawner_navmeshes = navmeshes.clone();
+    let layer_spawner_item_catalog_store = item_catalog_store.clone();
     let layer_spawner: zone_registry::LayerSpawner = Box::new(move |zone_id, manifest| {
         let navmesh = layer_spawner_navmeshes
             .get(zone_id)
@@ -804,6 +871,7 @@ async fn main() {
             zone_id.to_string(),
             layer_spawner_metrics.clone(),
             layer_spawner_global_sessions.clone(),
+            layer_spawner_item_catalog_store.clone(),
             move |zone, outcomes| {
                 handle_tick_outcomes(
                     &registry_cell,
@@ -854,6 +922,7 @@ async fn main() {
         archetype_schema,
         crafting_schema,
         equipment_schema,
+        item_catalog_store: item_catalog_store.clone(),
         attribute_schema: npc_attribute_schema.clone(),
         transfer_executor,
         plugins: plugins.clone(),

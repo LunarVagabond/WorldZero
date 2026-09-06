@@ -277,6 +277,13 @@ pub struct SessionDeps {
     /// `character::CharacterStore::equip_item`/`unequip_item` ever touch
     /// storage.
     pub equipment_schema: Arc<character::EquipmentSchema>,
+    /// The central item catalog (#287) — `DropItem`'s own catalog check
+    /// (below) queries this directly rather than a snapshot, unlike
+    /// `crafting_schema`/`equipment_schema`'s load-time-only validation:
+    /// a `DropItem` request arrives per-message at runtime, so a plugin
+    /// that calls `register-item-type` after startup should still be
+    /// droppable without a server restart.
+    pub item_catalog_store: Arc<content::ItemCatalogStore>,
     /// This process's own declared attribute schema (`stats.schema.yaml`)
     /// — a clone of the same instance `character_store` was built from
     /// (same "clone rather than a second file load that could drift"
@@ -1379,13 +1386,39 @@ pub async fn handle_session(framed: ServerStream, deps: Arc<SessionDeps>) -> Res
                             }
                         }
                         Ok(ClientMessage::DropItem { item_type, quantity }) => {
-                            match deps.character_store.remove_item(character_id, &item_type, quantity).await {
-                                Ok(remaining) => {
-                                    send_world(&mut sink, &ServerMessage::ItemChanged {
-                                        item_type: item_type.clone(),
-                                        quantity: remaining,
+                            // #287 — the one item-referencing client action
+                            // that previously accepted literally any string:
+                            // `character::CharacterStore::remove_item` only
+                            // ever checks against what the character
+                            // already owns, never against the catalog. A
+                            // character can't actually come to own an
+                            // item_type the catalog doesn't know about
+                            // through any *validated* path any more, but
+                            // this stays a real, named check here (not just
+                            // "can't happen") so a bad reference fails with
+                            // a clear message instead of removing/dropping
+                            // whatever the client sent.
+                            match deps.item_catalog_store.exists(&item_type).await {
+                                Ok(true) => {
+                                    match deps.character_store.remove_item(character_id, &item_type, quantity).await {
+                                        Ok(remaining) => {
+                                            send_world(&mut sink, &ServerMessage::ItemChanged {
+                                                item_type: item_type.clone(),
+                                                quantity: remaining,
+                                            }).await?;
+                                            zone.world.dispatch_item_dropped(entity_id, item_type, quantity);
+                                        }
+                                        Err(e) => {
+                                            send_world(&mut sink, &ServerMessage::Error { message: e.to_string() }).await?;
+                                        }
+                                    }
+                                }
+                                Ok(false) => {
+                                    send_world(&mut sink, &ServerMessage::Error {
+                                        message: format!(
+                                            "DropItem: item_type {item_type:?} is not in the item catalog"
+                                        ),
                                     }).await?;
-                                    zone.world.dispatch_item_dropped(entity_id, item_type, quantity);
                                 }
                                 Err(e) => {
                                     send_world(&mut sink, &ServerMessage::Error { message: e.to_string() }).await?;

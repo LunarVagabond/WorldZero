@@ -32,6 +32,27 @@ impl Guest for Plugin {
                 panic!("sandbox escape: read a file with no preopened filesystem access");
             }
         }
+
+        // #287 — exercises register-item-type/get-item through the real
+        // sandbox boundary: register a catalog entry, then read it back
+        // to prove get-item answers from the same catalog, not a stale
+        // or separate one. Harmless no-op under `restricted_manifest`
+        // (no "economy" capability, so register-item-type is rejected —
+        // `let _` just swallows the `Err`, same as every other
+        // capability-gated call this fixture makes without checking the
+        // result).
+        #[cfg(not(any(feature = "panic_on_load", feature = "escape_attempt")))]
+        {
+            let _ = worldzero::plugin::host::register_item_type(
+                "fixture-test-item",
+                "Fixture Test Item",
+                &["tradeable".to_string()],
+                r#"{"note":"registered from on_load"}"#,
+            );
+            // Read it straight back — same catalog, same call, proves
+            // get-item isn't answering from an empty/separate cache.
+            let _ = worldzero::plugin::host::get_item("fixture-test-item");
+        }
     }
 
     fn on_unload() {}
@@ -190,6 +211,28 @@ impl Guest for Plugin {
         }
         if body == "respawn" {
             let _ = worldzero::plugin::host::report_respawn(&sender_entity_id);
+            return;
+        }
+        // #287 — proves `register-item-type` called from a hook *other*
+        // than `on_load` still reaches durable storage: `on_load`'s own
+        // registration is drained/persisted by `plugin_startup::load_plugin`
+        // itself, before this plugin is ever handed back, which wouldn't
+        // exercise `world_actor::drain_and_apply_plugin_effects`'s own
+        // drain of this same queue for every other hook call. `item-type`
+        // is caller-supplied (not fixed) so a real test can register a
+        // fresh, disposable one rather than colliding with `on_load`'s
+        // own `fixture-test-item`.
+        if let Some(item_type) = body.strip_prefix("register-item:") {
+            let result = worldzero::plugin::host::register_item_type(
+                item_type,
+                "On-Message Registered Item",
+                &["tradeable".to_string()],
+                "{}",
+            );
+            let _ = worldzero::plugin::host::send_message(
+                &sender_entity_id,
+                &format!("register-item:{item_type}:{}", result.is_ok()),
+            );
             return;
         }
         let _ = worldzero::plugin::host::send_message(

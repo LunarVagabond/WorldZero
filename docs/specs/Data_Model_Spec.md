@@ -60,6 +60,48 @@ Same "fixed core schema, framework never interprets the meaning" discipline as `
 
 **Capacity is enforced but configurable.** `character::inventory::InventoryConfig::max_distinct_item_types` (default 40, override via `WZ_INVENTORY_MAX_ITEM_TYPES`) caps the number of *distinct* `item_type` stacks a character can hold — granting more of an already-owned type is never blocked by this, only a brand-new stack is. This is a soft, configurable UX limit (the classic "N inventory slots" game mechanic), not a hard architectural ceiling — same "solid default everywhere, never a wall for the dev" spirit as every other configurable bound in this crate, and consistent with `AttributeSchema`'s dev-declared per-stat bounds. Enforced with a plain read-then-write count check, not a transaction — acceptable because it's a soft limit, not a data-integrity boundary (see the module doc on `character::inventory` for the full reasoning). A valid `move_item_to_slot` target is separately bounded by `InventoryConfig::slot_count` (default 40, override via `WZ_INVENTORY_SLOT_COUNT`) — kept as its own knob rather than reusing `max_distinct_item_types`, since a dev may want more visual slots than the stack cap.
 
+## The item catalog: `item_types`/`item_drop_sources` (#287, implementing #283's decision)
+
+Before #287, `item_type` was a fully opaque string independently declared by `crafting.schema.yaml`, `equipment.schema.yaml`, and `DropItem`, with zero cross-validation between them — a typo in one never surfaced until runtime. `item_types` is the real, central catalog that closes that gap while staying as extensible as the status quo: dev-authored *content* stays file-based (`crafting.schema.yaml`/`equipment.schema.yaml`/spawn tables are untouched), but every `item_type` those files reference now has to actually exist in this table, checked at load/use time.
+
+```sql
+CREATE TABLE item_types (
+    item_type TEXT PRIMARY KEY,
+    display_name TEXT NOT NULL,
+    tags TEXT[] NOT NULL DEFAULT '{}',
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
+Named `item_types`, not `items` (the issue's working name) — `items` was already taken by the character-inventory table above (`character_id`/`item_type`/`quantity`, since #112) and Postgres tables share one namespace, so reusing the name would have collided with an unrelated, already-shipped table.
+
+Same fixed-core-plus-narrow-JSONB pattern `stats.schema.yaml`'s declared attribute schema already uses: `item_type`/`display_name`/`tags` are real columns; `metadata` is a narrow JSONB column for genuinely per-item-arbitrary data (an icon reference, flavor text) that core logic never reads a decision from. **`tags` is an open text array, not a closed enum or a lookup table** — core systems check for a handful of well-known tags (`content::items::TAG_CRAFTABLE_OUTPUT` = `"craftable_output"`, `TAG_EQUIPPABLE` = `"equippable"`, `TAG_TRADEABLE` = `"tradeable"`, `TAG_DROP_ONLY` = `"drop_only"`) but a dev, or a plugin via `register-item-type`, can add arbitrary tags of their own (`"quest_item"`, `"currency"`, ...) without a core schema change — no tag is privileged, same "no stat is privileged" philosophy the character stats JSONB decision already established.
+
+```sql
+CREATE TABLE item_drop_sources (
+    item_type TEXT NOT NULL REFERENCES item_types(item_type) ON DELETE CASCADE,
+    zone_id TEXT NOT NULL,
+    spawn_table_id TEXT NOT NULL,
+    PRIMARY KEY (item_type, zone_id, spawn_table_id)
+);
+```
+
+`item_drop_sources` is the item ↔ spawn-table many-to-many ("where does this item drop from") — a join table rather than embedding drop info on either side, since one item can drop from several spawn tables and one spawn table can drop several items. `zone_id`/`spawn_table_id` are plain strings matching a `zone.manifest.yaml`'s `id`/`spawn_tables[].id` (not a real foreign key — zone manifests are files, not database rows, same "no FK to file-declared content" pattern `realm_zones.zone_id` already uses). The shipped example zone (`config/zone.manifest.example.yaml`'s `greenwood-forest`/`wolf-pack-01`) is seeded as a real drop source for `wolf-fang` via `make quickstart` (`Makefile`'s `items link-drop-source` call) — the same item `crafting.schema.example.yaml`'s `wolf-fang-dagger` recipe already consumes.
+
+**`content::ItemCatalogStore`** (`crates/content/src/items.rs`) is the one write/read path both entry points below go through:
+
+- **`make items ARGS="create <item_type> <display_name> [tag,tag,...]"`** (`crates/content/src/bin/items.rs`) — day-to-day dev-authored catalog entries; also `ensure` (idempotent upsert), `list`, `get`, `delete`, and `link-drop-source`/`unlink-drop-source`/`drop-sources` for `item_drop_sources`.
+- **`register-item-type`** (a plugin's WIT host function, `docs/specs/Plugin_API.md`) — writes into the exact same table through the exact same validation (`content::items::validate_entry`: non-empty `item_type`/`display_name`, no duplicate/empty tags, `metadata` must be a JSON object) as the CLI. `crafting_schema`/`equipment_schema`/`DropItem` can't tell, and don't need to, whether an `item_type` came from a dev's YAML-adjacent CLI call or a plugin's `on_load`.
+
+**Load-time cross-validation.** `character::CraftingSchema::from_yaml`/`character::EquipmentSchema::from_yaml` now take a `known_item_types: &character::KnownItemTypes` parameter (`item_type -> tags`, built by `server::main` from `content::ItemCatalogStore::all_item_types`/`list` — *after* every loaded plugin's `on_load` has had a chance to call `register-item-type`, so a plugin-declared item type validates exactly like a dev-authored one) and reject, by name, any referenced `item_type` that either:
+
+- isn't in the catalog at all (a clear error naming the file, the recipe/item, and the missing `item_type`, with the exact `make items`/`register-item-type` remedy), or
+- exists but doesn't carry the tag that system expects — `crafting.schema.yaml` requires every recipe's `output.item_type` to carry `craftable_output`; `equipment.schema.yaml` requires every declared `items[].item_type` to carry `equippable`. Existence alone isn't enough: the catalog and the domain schema have to agree on what *kind* of thing the item is, or a drop-only trophy accidentally referenced as a recipe output (say) fails loudly at startup instead of silently "working."
+
+`DropItem` (the client action that removes an item from inventory, `server::session`) makes the same existence check per-request (via `content::ItemCatalogStore::exists`, not a load-time snapshot — a plugin that registers a new item type mid-session should be droppable without a server restart).
+
 ## Crafting: `crafting.schema.yaml` and the atomic craft primitive (#216/#215)
 
 A recipe is dev-declared data, not a core table — `crafting.schema.yaml` (`character::CraftingSchema`, loaded the same way `party.schema.yaml`/`guild.schema.yaml`/`character.archetypes.yaml` already are), a list of recipes each declaring:
@@ -69,7 +111,7 @@ A recipe is dev-declared data, not a core table — `crafting.schema.yaml` (`cha
 - `inputs` — a non-empty list of `{item_type, amount}`, every `amount` positive
 - `output` — a single `{item_type, amount}`, `amount` positive
 
-Validated at load (`CraftingSchema::from_yaml`): non-empty recipe list, unique recipe keys, non-empty `inputs` per recipe, positive amounts throughout — same fail-loud-at-startup discipline every other declared schema in this codebase uses.
+Validated at load (`CraftingSchema::from_yaml`): non-empty recipe list, unique recipe keys, non-empty `inputs` per recipe, positive amounts throughout, and (#287) every `item_type` referenced — as an input or the output — exists in the item catalog, with the output additionally required to carry the `craftable_output` tag (see "The item catalog" above) — same fail-loud-at-startup discipline every other declared schema in this codebase uses.
 
 **The atomic exchange.** `character::CharacterStore::craft_item` is the one write path: given a character id and a resolved `Recipe`, it runs one Postgres transaction that locks every declared input row (`FOR UPDATE`), verifies each is present in at least the declared amount, then consumes all inputs and grants the output — or, if any input is insufficient, rolls back and changes nothing at all. This is deliberately not built on `inventory.rs`'s `grant_item`/`remove_item` (each of those is its own non-transactional statement, by design — see that module's doc comment); a craft's multi-row exchange needs the all-or-nothing guarantee those two don't individually provide, same reasoning `transfer::TransferExecutor::transfer_inner` already applies to a realm move. The output's capacity check reuses `grant_item`'s own "a *new* stack past `InventoryConfig::max_distinct_item_types` is rejected" rule.
 
@@ -82,7 +124,7 @@ Same "dev declares the domain specifics, core enforces generically" pattern as c
 - `slots` — a flat, dev-defined list of slot keys (e.g. `head`, `chest`, `weapon`); core has no opinion on what slots exist or how many
 - `items` — a list of equippable entries, each naming one `item_type` (must be unique across the list — one item_type maps to exactly one slot), which single `slot` it occupies (must be one of the declared `slots`), and an optional `stat_deltas` map (keys validated against `stats.schema.yaml` at *load* time via `AttributeSchema::declares` — existence only, not bounds, since a delta isn't a resulting value)
 
-An `item_type` not listed under `items` can't be equipped at all — `EquipItem` rejects it with an `Error`.
+An `item_type` not listed under `items` can't be equipped at all — `EquipItem` rejects it with an `Error`. (#287) Every declared `items[].item_type` must also exist in the item catalog and carry the `equippable` tag (see "The item catalog" above) — checked once, at load time, alongside the existing slot/stat_deltas validation.
 
 ```sql
 CREATE TABLE equipped_items (
