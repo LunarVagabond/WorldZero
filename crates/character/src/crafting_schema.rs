@@ -7,9 +7,18 @@
 //! naming a set of `inputs` (item_type + amount) and a single `output`
 //! (item_type + amount). Core owns only the mechanical act of resolving
 //! a recipe by key and atomically consuming/granting against it
-//! (`crate::crafting::CharacterStore::craft_item`); quality rolls,
-//! success chance, and profession/skill gating are all left to the
-//! `on-craft-complete` plugin hook (#215's "Alternatives considered").
+//! (`crate::crafting::CharacterStore::craft_item`); quality rolls and
+//! success chance are left to the `on-craft-complete` plugin hook (#215's
+//! "Alternatives considered"). Profession/skill gating (#289) has two
+//! narrow, optional per-recipe primitives instead — `requires` (a recipe
+//! can name a minimum value for a declared stat, checked against the
+//! crafting character's current value) and `grants` (a successful craft
+//! can apply a delta to a declared stat, e.g. profession XP) — both
+//! expressed purely in terms of `stats.schema.yaml`'s already-declared
+//! `AttributeSchema`. A "profession" is nothing more than a dev-declared
+//! stat like `profession.blacksmithing_xp`; core adds no XP curve,
+//! level-up event, or recipe-unlock-by-level logic of its own — that's
+//! entirely the dev's own data/config built on top of these two hooks.
 
 use std::path::Path;
 
@@ -17,6 +26,7 @@ use common::{Error, Result};
 use serde::Deserialize;
 
 use crate::item_catalog_ref::{self, KnownItemTypes};
+use crate::schema::AttributeSchema;
 
 /// The catalog tag ([`content::items::TAG_CRAFTABLE_OUTPUT`] in the
 /// `content` crate — duplicated here as a plain string rather than a
@@ -38,6 +48,45 @@ pub struct CraftingOutput {
     pub amount: i64,
 }
 
+/// A `requires` entry (#289) — gates a recipe behind a minimum current
+/// value for a declared stat. Checked against the crafting character's
+/// *current* value at craft time (`crate::crafting::CharacterStore::craft_item`),
+/// not validated as a bound itself — the bound belongs to `stat`'s own
+/// declaration in `stats.schema.yaml`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct StatRequirement {
+    pub stat: String,
+    pub min: i64,
+}
+
+/// A `grants` entry (#289) — applied as a delta to a declared stat on a
+/// successful craft, clamped to `stat`'s declared bounds
+/// (`CharacterStore::apply_stat_delta_clamped_tx`) rather than rejected,
+/// so a capped growth stat (e.g. profession XP already at max) never
+/// fails the craft that produced it.
+///
+/// Two optional fields let a dev express common profession-system asks
+/// without any new core concept of "profession" or "level":
+/// - `below`: the grant only applies if the character's *current* value
+///   for `stat` (before this grant) is strictly less than `below`. Lets
+///   a recipe stop granting XP past a dev-chosen point (e.g. "this
+///   recipe no longer teaches you anything once you've outleveled it")
+///   that's independent of `stat`'s own declared max — a recipe can cut
+///   off XP well below the stat's real ceiling.
+/// - `chance`: the probability (in `(0.0, 1.0]`) that this grant applies
+///   at all on an otherwise-successful craft. `None` (the field omitted)
+///   means always — the recipe author didn't ask for randomness, so
+///   none is added.
+#[derive(Debug, Clone, Deserialize)]
+pub struct StatGrant {
+    pub stat: String,
+    pub amount: i64,
+    #[serde(default)]
+    pub below: Option<i64>,
+    #[serde(default)]
+    pub chance: Option<f64>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Recipe {
     pub key: String,
@@ -48,6 +97,14 @@ pub struct Recipe {
     pub category: String,
     pub inputs: Vec<CraftingInput>,
     pub output: CraftingOutput,
+    /// Optional stat-threshold gates (#289) — zero or more. All must be
+    /// met (current value >= `min`) or `craft_item` rejects the attempt.
+    #[serde(default)]
+    pub requires: Vec<StatRequirement>,
+    /// Optional stat deltas (#289) applied on a successful craft — zero
+    /// or more.
+    #[serde(default)]
+    pub grants: Vec<StatGrant>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -65,8 +122,18 @@ impl CraftingSchema {
     /// reference (as an input or an output) must be in it, or loading
     /// fails loudly, naming the specific recipe/field/item_type at
     /// fault, same as every other cross-reference this loader already
-    /// checks (`recipe.key` uniqueness, positive amounts).
-    pub fn from_yaml(input: &str, known_item_types: &KnownItemTypes) -> Result<Self> {
+    /// checks (`recipe.key` uniqueness, positive amounts). `attribute_schema`
+    /// (#289) is the declared `stats.schema.yaml` — every `requires`/
+    /// `grants` stat key a recipe names must be declared there
+    /// (`AttributeSchema::declares`, existence-only, same check
+    /// `equipment_schema.rs` already applies to `stat_deltas`), or loading
+    /// fails loudly, naming the recipe, the field (`requires`/`grants`),
+    /// and the unknown stat key.
+    pub fn from_yaml(
+        input: &str,
+        attribute_schema: &AttributeSchema,
+        known_item_types: &KnownItemTypes,
+    ) -> Result<Self> {
         let schema: Self = serde_yaml::from_str(input)
             .map_err(|e| Error::wrap("character", "failed to parse crafting.schema.yaml", e))?;
 
@@ -166,23 +233,72 @@ impl CraftingSchema {
                     ),
                 ));
             }
+
+            // #289 — both requires/grants stat keys must be real declared
+            // stats, checked at load time, not left to surprise a caller
+            // at craft time.
+            for req in &recipe.requires {
+                if !attribute_schema.declares(&req.stat) {
+                    return Err(Error::new(
+                        "character",
+                        format!(
+                            "crafting.schema.yaml: recipe \"{}\" declares a requires entry for \
+                             unknown stat \"{}\"",
+                            recipe.key, req.stat
+                        ),
+                    ));
+                }
+            }
+            for grant in &recipe.grants {
+                if !attribute_schema.declares(&grant.stat) {
+                    return Err(Error::new(
+                        "character",
+                        format!(
+                            "crafting.schema.yaml: recipe \"{}\" declares a grants entry for \
+                             unknown stat \"{}\"",
+                            recipe.key, grant.stat
+                        ),
+                    ));
+                }
+                if let Some(chance) = grant.chance
+                    && !(chance > 0.0 && chance <= 1.0)
+                {
+                    return Err(Error::new(
+                        "character",
+                        format!(
+                            "crafting.schema.yaml: recipe \"{}\" declares a grants entry for \
+                             \"{}\" with chance {chance}, which must be greater than 0.0 and at \
+                             most 1.0 — omit `chance` entirely for a grant that always applies",
+                            recipe.key, grant.stat
+                        ),
+                    ));
+                }
+            }
         }
 
         Ok(schema)
     }
 
-    pub fn from_file(path: &Path, known_item_types: &KnownItemTypes) -> Result<Self> {
+    pub fn from_file(
+        path: &Path,
+        attribute_schema: &AttributeSchema,
+        known_item_types: &KnownItemTypes,
+    ) -> Result<Self> {
         let contents = std::fs::read_to_string(path).map_err(|e| {
             Error::wrap("character", format!("failed to read {}", path.display()), e)
         })?;
-        Self::from_yaml(&contents, known_item_types)
+        Self::from_yaml(&contents, attribute_schema, known_item_types)
     }
 
     /// Reads `crafting.schema.yaml` from the dev's config directory
     /// (`common::config::config_dir` — `WZ_CONFIG_DIR` or `./config`).
-    pub fn from_config_dir(known_item_types: &KnownItemTypes) -> Result<Self> {
+    pub fn from_config_dir(
+        attribute_schema: &AttributeSchema,
+        known_item_types: &KnownItemTypes,
+    ) -> Result<Self> {
         Self::from_file(
             &common::config::config_dir().join("crafting.schema.yaml"),
+            attribute_schema,
             known_item_types,
         )
     }
@@ -200,6 +316,27 @@ mod tests {
     use std::collections::HashSet;
 
     use super::*;
+
+    /// Declares the two stats the `requires`/`grants` (#289) tests below
+    /// exercise — a level-shaped stat with real bounds (`requires` reads
+    /// this) and an unbounded XP-shaped stat (`grants` writes this).
+    fn attribute_schema() -> AttributeSchema {
+        AttributeSchema::from_yaml(
+            r#"
+schema_version: 1
+stats:
+  - key: profession.blacksmithing_level
+    type: int
+    default: 1
+    min: 1
+    max: 100
+  - key: profession.blacksmithing_xp
+    type: int
+    default: 0
+"#,
+        )
+        .unwrap()
+    }
 
     /// `wolf-fang`/`iron-ore`/`herb` are plain inputs (no tag required of
     /// an input by this loader); `wolf-fang-dagger`/`healing-tonic`/
@@ -248,6 +385,7 @@ recipes:
       item_type: healing-tonic
       amount: 1
 "#,
+            &attribute_schema(),
             &known_item_types(),
         )
         .unwrap()
@@ -271,8 +409,12 @@ recipes:
     #[test]
     fn an_empty_recipes_list_is_rejected() {
         assert!(
-            CraftingSchema::from_yaml("schema_version: 1\nrecipes: []", &known_item_types())
-                .is_err()
+            CraftingSchema::from_yaml(
+                "schema_version: 1\nrecipes: []",
+                &attribute_schema(),
+                &known_item_types()
+            )
+            .is_err()
         );
     }
 
@@ -299,6 +441,7 @@ recipes:
       item_type: dagger
       amount: 1
 "#,
+            &attribute_schema(),
             &known_item_types(),
         );
         assert!(result.is_err());
@@ -317,6 +460,7 @@ recipes:
       item_type: dagger
       amount: 1
 "#,
+            &attribute_schema(),
             &known_item_types(),
         );
         assert!(result.is_err());
@@ -337,6 +481,7 @@ recipes:
       item_type: dagger
       amount: 1
 "#,
+            &attribute_schema(),
             &known_item_types(),
         );
         assert!(result.is_err());
@@ -357,6 +502,7 @@ recipes:
       item_type: dagger
       amount: 0
 "#,
+            &attribute_schema(),
             &known_item_types(),
         );
         assert!(result.is_err());
@@ -380,6 +526,7 @@ recipes:
       item_type: dagger
       amount: 1
 "#,
+            &attribute_schema(),
             &known_item_types(),
         );
         let err = result.unwrap_err();
@@ -407,6 +554,7 @@ recipes:
       item_type: unobtainium-dagger
       amount: 1
 "#,
+            &attribute_schema(),
             &known_item_types(),
         );
         let err = result.unwrap_err();
@@ -434,6 +582,7 @@ recipes:
       item_type: dagger
       amount: 1
 "#,
+            &attribute_schema(),
             &KnownItemTypes::new(),
         );
         assert!(result.is_err());
@@ -458,6 +607,7 @@ recipes:
       item_type: dagger
       amount: 1
 "#,
+            &attribute_schema(),
             &known,
         );
         let err = result.unwrap_err();
@@ -465,5 +615,226 @@ recipes:
         assert!(message.contains("\"dagger\""), "{message}");
         assert!(message.contains(TAG_CRAFTABLE_OUTPUT), "{message}");
         assert!(message.contains("isn't tagged"), "{message}");
+    }
+
+    // #289 — requires/grants stat keys are validated at load time against
+    // the declared AttributeSchema, same discipline `stat_deltas` already
+    // gets in `equipment_schema.rs`.
+
+    #[test]
+    fn a_recipe_declares_requires_and_grants_and_they_parse() {
+        let s = CraftingSchema::from_yaml(
+            r#"
+schema_version: 1
+recipes:
+  - key: wolf-fang-dagger
+    category: blacksmithing
+    inputs:
+      - item_type: wolf-fang
+        amount: 3
+      - item_type: iron-ore
+        amount: 2
+    output:
+      item_type: wolf-fang-dagger
+      amount: 1
+    requires:
+      - stat: profession.blacksmithing_level
+        min: 5
+    grants:
+      - stat: profession.blacksmithing_xp
+        amount: 10
+"#,
+            &attribute_schema(),
+            &known_item_types(),
+        )
+        .unwrap();
+        let recipe = s.resolve("wolf-fang-dagger").unwrap();
+        assert_eq!(recipe.requires.len(), 1);
+        assert_eq!(recipe.requires[0].stat, "profession.blacksmithing_level");
+        assert_eq!(recipe.requires[0].min, 5);
+        assert_eq!(recipe.grants.len(), 1);
+        assert_eq!(recipe.grants[0].stat, "profession.blacksmithing_xp");
+        assert_eq!(recipe.grants[0].amount, 10);
+    }
+
+    #[test]
+    fn requires_and_grants_default_to_empty_when_omitted() {
+        let recipe = schema().resolve("wolf-fang-dagger").unwrap().clone();
+        assert!(recipe.requires.is_empty());
+        assert!(recipe.grants.is_empty());
+    }
+
+    #[test]
+    fn an_unknown_stat_key_in_requires_is_rejected_at_load_time() {
+        let result = CraftingSchema::from_yaml(
+            r#"
+schema_version: 1
+recipes:
+  - key: dagger
+    category: blacksmithing
+    inputs:
+      - item_type: iron-ore
+        amount: 1
+    output:
+      item_type: dagger
+      amount: 1
+    requires:
+      - stat: profession.does_not_exist
+        min: 1
+"#,
+            &attribute_schema(),
+            &known_item_types(),
+        );
+        let err = result.unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("recipe \"dagger\""), "{message}");
+        assert!(message.contains("profession.does_not_exist"), "{message}");
+        assert!(message.contains("requires"), "{message}");
+    }
+
+    #[test]
+    fn an_unknown_stat_key_in_grants_is_rejected_at_load_time() {
+        let result = CraftingSchema::from_yaml(
+            r#"
+schema_version: 1
+recipes:
+  - key: dagger
+    category: blacksmithing
+    inputs:
+      - item_type: iron-ore
+        amount: 1
+    output:
+      item_type: dagger
+      amount: 1
+    grants:
+      - stat: profession.does_not_exist
+        amount: 1
+"#,
+            &attribute_schema(),
+            &known_item_types(),
+        );
+        let err = result.unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("recipe \"dagger\""), "{message}");
+        assert!(message.contains("profession.does_not_exist"), "{message}");
+        assert!(message.contains("grants"), "{message}");
+    }
+
+    #[test]
+    fn a_grants_entry_declares_below_and_chance_and_they_parse() {
+        let s = CraftingSchema::from_yaml(
+            r#"
+schema_version: 1
+recipes:
+  - key: wolf-fang-dagger
+    category: blacksmithing
+    inputs:
+      - item_type: wolf-fang
+        amount: 3
+      - item_type: iron-ore
+        amount: 2
+    output:
+      item_type: wolf-fang-dagger
+      amount: 1
+    grants:
+      - stat: profession.blacksmithing_xp
+        amount: 10
+        below: 500
+        chance: 0.5
+"#,
+            &attribute_schema(),
+            &known_item_types(),
+        )
+        .unwrap();
+        let recipe = s.resolve("wolf-fang-dagger").unwrap();
+        assert_eq!(recipe.grants[0].below, Some(500));
+        assert_eq!(recipe.grants[0].chance, Some(0.5));
+    }
+
+    #[test]
+    fn below_and_chance_default_to_none_when_omitted() {
+        let recipe = schema().resolve("wolf-fang-dagger").unwrap().clone();
+        assert!(recipe.grants.is_empty() || recipe.grants[0].below.is_none());
+    }
+
+    #[test]
+    fn a_grants_chance_of_zero_is_rejected_at_load_time() {
+        let result = CraftingSchema::from_yaml(
+            r#"
+schema_version: 1
+recipes:
+  - key: dagger
+    category: blacksmithing
+    inputs:
+      - item_type: iron-ore
+        amount: 1
+    output:
+      item_type: dagger
+      amount: 1
+    grants:
+      - stat: profession.blacksmithing_xp
+        amount: 1
+        chance: 0.0
+"#,
+            &attribute_schema(),
+            &known_item_types(),
+        );
+        let err = result.unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("recipe \"dagger\""), "{message}");
+        assert!(message.contains("chance"), "{message}");
+    }
+
+    #[test]
+    fn a_grants_chance_above_one_is_rejected_at_load_time() {
+        let result = CraftingSchema::from_yaml(
+            r#"
+schema_version: 1
+recipes:
+  - key: dagger
+    category: blacksmithing
+    inputs:
+      - item_type: iron-ore
+        amount: 1
+    output:
+      item_type: dagger
+      amount: 1
+    grants:
+      - stat: profession.blacksmithing_xp
+        amount: 1
+        chance: 1.5
+"#,
+            &attribute_schema(),
+            &known_item_types(),
+        );
+        let err = result.unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("recipe \"dagger\""), "{message}");
+        assert!(message.contains("chance"), "{message}");
+    }
+
+    #[test]
+    fn a_grants_chance_of_exactly_one_is_accepted() {
+        let result = CraftingSchema::from_yaml(
+            r#"
+schema_version: 1
+recipes:
+  - key: dagger
+    category: blacksmithing
+    inputs:
+      - item_type: iron-ore
+        amount: 1
+    output:
+      item_type: dagger
+      amount: 1
+    grants:
+      - stat: profession.blacksmithing_xp
+        amount: 1
+        chance: 1.0
+"#,
+            &attribute_schema(),
+            &known_item_types(),
+        );
+        assert!(result.is_ok(), "{result:?}");
     }
 }

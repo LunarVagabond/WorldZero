@@ -700,6 +700,10 @@ mod tests {
 
         // Before registering: a crafting.schema.yaml recipe naming this
         // item_type is rejected, same as any other unknown item_type.
+        // #289's requires/grants aren't used here, so an empty declared
+        // attribute schema is enough.
+        let attribute_schema =
+            character::AttributeSchema::from_yaml("schema_version: 1\nstats: []\n").unwrap();
         let known_item_types_before: character::KnownItemTypes = HashMap::new();
         let recipe_yaml = r#"
 schema_version: 1
@@ -714,7 +718,12 @@ recipes:
       amount: 1
 "#;
         assert!(
-            character::CraftingSchema::from_yaml(recipe_yaml, &known_item_types_before).is_err()
+            character::CraftingSchema::from_yaml(
+                recipe_yaml,
+                &attribute_schema,
+                &known_item_types_before
+            )
+            .is_err()
         );
 
         // The plugin registers both item_types this recipe needs, each
@@ -757,8 +766,12 @@ recipes:
         // Now the same recipe loads successfully — the plugin-registered
         // item_type is indistinguishable from a dev-authored one to
         // `CraftingSchema`.
-        let schema =
-            character::CraftingSchema::from_yaml(recipe_yaml, &known_item_types_after).unwrap();
+        let schema = character::CraftingSchema::from_yaml(
+            recipe_yaml,
+            &attribute_schema,
+            &known_item_types_after,
+        )
+        .unwrap();
         assert_eq!(
             schema
                 .resolve("plugin-forged-blade")

@@ -471,8 +471,12 @@ async fn main() {
             )
         });
     let crafting_schema_path = config_dir.join("crafting.schema.yaml");
-    let crafting_schema =
-        character::CraftingSchema::from_file(&crafting_schema_path, &known_item_types).unwrap_or_else(|e| {
+    let crafting_schema = character::CraftingSchema::from_file(
+        &crafting_schema_path,
+        &schema,
+        &known_item_types,
+    )
+    .unwrap_or_else(|e| {
             panic!(
                 "failed to load the declared recipe schema at {} (see config/crafting.schema.example.yaml): {e}",
                 crafting_schema_path.display()
