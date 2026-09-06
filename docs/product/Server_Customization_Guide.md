@@ -133,6 +133,36 @@ recipes:
 
 `make quickstart` seeds the item catalog entries its own shipped `crafting.schema.example.yaml`/`equipment.schema.example.yaml` need (`wolf-fang`, `iron-ore`, `wolf-fang-dagger`, `herb`, `water-flask`, `healing-tonic`, `iron-helmet`, `cloth-cap`, `iron-sword`) via `make items ARGS="ensure ..."` before starting `server` — see the Makefile's `quickstart` target for the exact commands it runs.
 
+**Professions and XP (#289) — two optional per-recipe hooks, no new core concept.** A recipe can declare `requires` and/or `grants` entries against any stat already declared in `stats.schema.yaml` — a "profession" is nothing more than a dev-declared stat (e.g. `profession.blacksmithing_xp`) that one recipe's `grants` writes and another's `requires` reads back. Core adds no XP curve, level-up event, or recipe-unlock-by-level logic of its own:
+
+```yaml
+recipes:
+  - key: wolf-fang-dagger
+    category: blacksmithing
+    inputs:
+      - item_type: wolf-fang
+        amount: 3
+      - item_type: iron-ore
+        amount: 2
+    output:
+      item_type: wolf-fang-dagger
+      amount: 1
+    requires:
+      - stat: profession.blacksmithing_level
+        min: 5
+    grants:
+      - stat: profession.blacksmithing_xp
+        amount: 10
+        below: 500
+        chance: 0.5
+```
+
+- `requires` (zero or more `{stat, min}`): gates the recipe behind a minimum *current* value for a declared stat — `CraftItem` is rejected before the craft's own transaction even opens if unmet, naming the stat, the required minimum, and the character's current value.
+- `grants` (zero or more `{stat, amount, below?, chance?}`): applied atomically with the craft's item exchange, on success. Unlike `equipment.schema.yaml`'s `stat_deltas` (which *rejects* an out-of-bounds write), a grant *clamps* to the stat's declared `min`/`max` — a capped growth stat like profession XP already at its max never blocks the craft that produced it, it just stops growing.
+  - `below` (optional): skips the grant entirely — no delta at all — once the character's current value for `stat` is no longer strictly less than it. Lets a recipe stop teaching XP well before the stat's own declared max (e.g. "you've outleveled this recipe, but you can still craft it").
+  - `chance` (optional, `(0.0, 1.0]`, defaults to always-applies when omitted): independent per-grant probability the delta fires at all on an otherwise-successful craft.
+- Both `requires`/`grants` stat keys, and a declared `chance`, are validated at load time — an unknown stat key or an out-of-range `chance` fails loudly, naming the recipe and the bad value. Full mechanism: [`docs/specs/Data_Model_Spec.md`](../specs/Data_Model_Spec.md), "Crafting" section.
+
 **Currencies (`currency.schema.yaml`, #217/#218).** Declares one or more currencies, each a flat integer balance per `(character, currency_key)` with an optional cosmetic denomination ladder computed at read time. Start from [`config/currency.schema.example.yaml`](../../config/currency.schema.example.yaml). Required by `make quickstart`.
 
 **Party types (`party.schema.yaml`, #178).** Declares party types and their member caps — start from [`config/party.schema.example.yaml`](../../config/party.schema.example.yaml). The first declared entry is what `PartyInvite` gets when the client doesn't name a type; omitting `max_members` on an entry means no cap. Required by `make quickstart`. See [`docs/specs/Chat_Spec.md`](../specs/Chat_Spec.md), "Party/group" section.
