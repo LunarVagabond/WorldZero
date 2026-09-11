@@ -10,7 +10,7 @@ namespace WorldZeroTestGrounds.Scenes.UI;
 // party's JoinGroupLayer. Any offer change resets both sides' confirmed
 // flag server-side (the anti-scam mechanism), so this panel always
 // re-renders the whole state from the latest TradeStateChanged rather
-// than trying to track confirmation locally.
+// than trying to track confirmation locally. Layout lives in TradePanel.tscn.
 public partial class TradePanel : Control
 {
     private LineEdit _targetEdit = null!;
@@ -19,82 +19,43 @@ public partial class TradePanel : Control
 
     public override void _Ready()
     {
-        SetAnchorsPreset(LayoutPreset.FullRect);
-        var box = UiHelpers.CreateScrollableColumn(this);
+        _targetEdit = GetNode<LineEdit>("%TargetEdit");
+        _incomingRequestLabel = GetNode<Label>("%IncomingRequestLabel");
+        _stateLabel = GetNode<Label>("%StateLabel");
 
-        var requestSection = UiHelpers.Section(box, "Request a trade");
-        var targetRow = new HBoxContainer();
-        requestSection.AddChild(targetRow);
-        _targetEdit = new LineEdit { PlaceholderText = "target entity id", SizeFlagsHorizontal = SizeFlags.ExpandFill };
         UiHelpers.LockMovementWhileFocused(_targetEdit);
-        targetRow.AddChild(_targetEdit);
-        var useTargetButton = new Button { Text = "Use current target" };
-        useTargetButton.Pressed += () => _targetEdit.Text = GameState.Instance.CurrentTargetEntityId ?? "";
-        targetRow.AddChild(useTargetButton);
-        var requestButton = new Button { Text = "Request trade" };
-        requestButton.Pressed += () => NetworkClient.Instance.SendTradeRequest(_targetEdit.Text.Trim());
-        requestSection.AddChild(requestButton);
+        GetNode<Button>("%UseTargetButton").Pressed += () => _targetEdit.Text = GameState.Instance.CurrentTargetEntityId ?? "";
+        GetNode<Button>("%RequestButton").Pressed += () => NetworkClient.Instance.SendTradeRequest(_targetEdit.Text.Trim());
 
-        var incomingSection = UiHelpers.Section(box, "Incoming request");
-        _incomingRequestLabel = UiHelpers.AddWrappingLabel(incomingSection, "(none)");
-        var incomingRow = new HBoxContainer();
-        incomingSection.AddChild(incomingRow);
-        var acceptButton = new Button { Text = "Accept" };
-        acceptButton.Pressed += () => NetworkClient.Instance.SendTradeRequestResponse(true);
-        incomingRow.AddChild(acceptButton);
-        var declineButton = new Button { Text = "Decline" };
-        declineButton.Pressed += () => NetworkClient.Instance.SendTradeRequestResponse(false);
-        incomingRow.AddChild(declineButton);
+        GetNode<Button>("%AcceptButton").Pressed += () => NetworkClient.Instance.SendTradeRequestResponse(true);
+        GetNode<Button>("%DeclineButton").Pressed += () => NetworkClient.Instance.SendTradeRequestResponse(false);
 
-        var offerSection = UiHelpers.Section(box, "Your offer");
-        var itemRow = new HBoxContainer();
-        offerSection.AddChild(itemRow);
-        var itemEdit = new LineEdit { PlaceholderText = "item_type", SizeFlagsHorizontal = SizeFlags.ExpandFill };
+        var itemEdit = GetNode<LineEdit>("%ItemEdit");
         UiHelpers.LockMovementWhileFocused(itemEdit);
-        itemRow.AddChild(itemEdit);
-        var itemQtyEdit = new LineEdit { PlaceholderText = "qty (0 removes)", Text = "1", CustomMinimumSize = new Vector2(90, 0) };
+        var itemQtyEdit = GetNode<LineEdit>("%ItemQtyEdit");
         UiHelpers.LockMovementWhileFocused(itemQtyEdit);
-        itemRow.AddChild(itemQtyEdit);
-        var offerItemButton = new Button { Text = "Offer item" };
-        offerItemButton.Pressed += () =>
+        GetNode<Button>("%OfferItemButton").Pressed += () =>
         {
             if (long.TryParse(itemQtyEdit.Text.Trim(), out var qty))
             {
                 NetworkClient.Instance.SendTradeOfferItem(itemEdit.Text.Trim(), qty);
             }
         };
-        itemRow.AddChild(offerItemButton);
 
-        var currencyRow = new HBoxContainer();
-        offerSection.AddChild(currencyRow);
-        var currencyEdit = new LineEdit { PlaceholderText = "currency_key", SizeFlagsHorizontal = SizeFlags.ExpandFill };
+        var currencyEdit = GetNode<LineEdit>("%CurrencyEdit");
         UiHelpers.LockMovementWhileFocused(currencyEdit);
-        currencyRow.AddChild(currencyEdit);
-        var currencyAmountEdit = new LineEdit { PlaceholderText = "amount (0 removes)", Text = "1", CustomMinimumSize = new Vector2(90, 0) };
+        var currencyAmountEdit = GetNode<LineEdit>("%CurrencyAmountEdit");
         UiHelpers.LockMovementWhileFocused(currencyAmountEdit);
-        currencyRow.AddChild(currencyAmountEdit);
-        var offerCurrencyButton = new Button { Text = "Offer currency" };
-        offerCurrencyButton.Pressed += () =>
+        GetNode<Button>("%OfferCurrencyButton").Pressed += () =>
         {
             if (long.TryParse(currencyAmountEdit.Text.Trim(), out var amount))
             {
                 NetworkClient.Instance.SendTradeOfferCurrency(currencyEdit.Text.Trim(), amount);
             }
         };
-        currencyRow.AddChild(offerCurrencyButton);
 
-        var confirmRow = new HBoxContainer();
-        offerSection.AddChild(confirmRow);
-        var confirmButton = new Button { Text = "Confirm" };
-        confirmButton.Pressed += () => NetworkClient.Instance.SendTradeConfirm();
-        confirmRow.AddChild(confirmButton);
-        var cancelButton = new Button { Text = "Cancel trade" };
-        cancelButton.Pressed += () => NetworkClient.Instance.SendTradeCancel();
-        confirmRow.AddChild(cancelButton);
-
-        box.AddChild(new HSeparator());
-        UiHelpers.AddWrappingLabel(box, "Active trade state:");
-        _stateLabel = UiHelpers.AddWrappingLabel(box, "(no active trade)");
+        GetNode<Button>("%ConfirmButton").Pressed += () => NetworkClient.Instance.SendTradeConfirm();
+        GetNode<Button>("%CancelButton").Pressed += () => NetworkClient.Instance.SendTradeCancel();
 
         var nc = NetworkClient.Instance;
         nc.OnTradeRequestReceived += msg => _incomingRequestLabel.Text = $"From {msg.FromEntityId}";

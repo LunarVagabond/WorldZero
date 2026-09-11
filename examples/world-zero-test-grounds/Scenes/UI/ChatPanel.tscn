@@ -1,0 +1,65 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://Scenes/UI/ChatPanel.cs" id="1"]
+
+[node name="ChatPanel" type="Control"]
+anchor_right = 1.0
+anchor_bottom = 1.0
+script = ExtResource("1")
+
+[node name="Scroll" type="ScrollContainer" parent="."]
+anchor_right = 1.0
+anchor_bottom = 1.0
+horizontal_scroll_mode = 0
+
+[node name="Box" type="VBoxContainer" parent="Scroll"]
+layout_mode = 2
+size_flags_horizontal = 3
+
+[node name="JoinRow" type="HBoxContainer" parent="Scroll/Box"]
+layout_mode = 2
+
+[node name="ChannelNameEdit" type="LineEdit" parent="Scroll/Box/JoinRow"]
+unique_name_in_owner = true
+layout_mode = 2
+custom_minimum_size = Vector2(150, 0)
+placeholder_text = "channel name"
+
+[node name="JoinButton" type="Button" parent="Scroll/Box/JoinRow"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Join"
+
+[node name="LeaveButton" type="Button" parent="Scroll/Box/JoinRow"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Leave selected"
+
+[node name="ActiveChannelLabel" type="Label" parent="Scroll/Box"]
+layout_mode = 2
+text = "Active channel (to send to):"
+
+[node name="JoinedChannels" type="OptionButton" parent="Scroll/Box"]
+unique_name_in_owner = true
+layout_mode = 2
+
+[node name="Log" type="RichTextLabel" parent="Scroll/Box"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_vertical = 3
+custom_minimum_size = Vector2(0, 150)
+scroll_following = true
+
+[node name="SendRow" type="HBoxContainer" parent="Scroll/Box"]
+layout_mode = 2
+
+[node name="MessageEdit" type="LineEdit" parent="Scroll/Box/SendRow"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+placeholder_text = "message"
+
+[node name="SendButton" type="Button" parent="Scroll/Box/SendRow"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Send"

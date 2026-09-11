@@ -10,9 +10,8 @@ namespace WorldZeroTestGrounds.Scenes.UI;
 // CharacterOptions — the upgrade this project's plan found in the
 // actual `character.proto` beyond what PROMPT.md §3.3 described (a
 // real "ask for options, let the player pick" flow exists now, not
-// just a client-side-cosmetic choice). Split into small named
-// Build*Section methods rather than one long _Ready(), same reasoning
-// as LoginPanel.
+// just a client-side-cosmetic choice). Layout lives in
+// CharacterSelectPanel.tscn.
 public partial class CharacterSelectPanel : Control
 {
     private ItemList _characterList = null!;
@@ -26,21 +25,19 @@ public partial class CharacterSelectPanel : Control
 
     public override void _Ready()
     {
-        SetAnchorsPreset(LayoutPreset.FullRect);
+        _characterList = GetNode<ItemList>("%CharacterList");
+        _newNameEdit = GetNode<LineEdit>("%NewNameEdit");
+        _archetypeOption = GetNode<OptionButton>("%ArchetypeOption");
+        _statusLabel = GetNode<Label>("%StatusLabel");
+        _deleteConfirm = GetNode<ConfirmationDialog>("%DeleteConfirm");
+        _deleteConfirm.Confirmed += OnDeleteConfirmed;
 
-        var panel = new PanelContainer();
-        panel.SetAnchorsPreset(LayoutPreset.Center);
-        AddChild(panel);
-
-        var root = new VBoxContainer { CustomMinimumSize = new Vector2(420, 0) };
-        panel.AddChild(root);
-
-        root.AddChild(new Label { Text = "Select a character", HorizontalAlignment = HorizontalAlignment.Center });
-        BuildTwoClientWarning(root);
-        BuildStatusLabel(root);
-        BuildExistingCharactersSection(root);
-        BuildCreateCharacterSection(root);
-        BuildUtilitySection(root);
+        GetNode<Button>("%SelectButton").Pressed += OnSelectHighlighted;
+        GetNode<Button>("%DeleteButton").Pressed += OnDeletePressed;
+        GetNode<Button>("%CreateButton").Pressed += OnCreatePressed;
+        GetNode<Button>("%AutoButton").Pressed += OnAutoPressed;
+        GetNode<Button>("%BackButton").Pressed += OnBackToRealmSelectPressed;
+        GetNode<Button>("%DisconnectButton").Pressed += () => NetworkClient.Instance.Disconnect();
 
         var nc = NetworkClient.Instance;
         nc.OnCharacterList += HandleCharacterList;
@@ -48,90 +45,6 @@ public partial class CharacterSelectPanel : Control
         nc.OnCharacterCreated += created => nc.SendSelectCharacter(created.CharacterId);
         nc.OnCharacterError += HandleCharacterError;
         nc.OnCharacterDeleted += _ => NetworkClient.Instance.SendListCharacters();
-    }
-
-    private static void BuildTwoClientWarning(Control parent)
-    {
-        // World Zero already refuses to let the same character be
-        // SelectCharacter'd from two connections at once (real
-        // server-side blocking, `realm-directory`'s login_policy — a
-        // second client using the SAME account gets a hard Error here,
-        // not a silent success). That error used to render into a tiny
-        // unstyled label at the very bottom of this panel, easy to miss
-        // entirely — from the outside it just looked like the second
-        // client's "Auto" button did nothing. Made loud and explicit.
-        UiHelpers.AddWrappingLabel(parent,
-            "Testing with two clients? Each one needs a DIFFERENT account — click Register on each, don't Login/Resume the same account twice.")
-            .Modulate = AppTheme.Warning;
-    }
-
-    private void BuildStatusLabel(Control parent)
-    {
-        _statusLabel = UiHelpers.AddWrappingLabel(parent);
-        _statusLabel.Modulate = AppTheme.Error;
-    }
-
-    private void BuildExistingCharactersSection(Control parent)
-    {
-        var section = UiHelpers.Section(parent, "Your characters");
-        _characterList = new ItemList { CustomMinimumSize = new Vector2(0, 120) };
-        section.AddChild(_characterList);
-
-        var selectButton = new Button { Text = "Select highlighted" };
-        selectButton.Pressed += OnSelectHighlighted;
-        section.AddChild(selectButton);
-
-        // #307: permanent, no undo — behind a real confirmation dialog
-        // rather than a bare button, since a mis-click here can't be
-        // taken back (DeleteCharacter's own doc comment: no soft-delete).
-        var deleteButton = new Button { Text = "Delete highlighted" };
-        _deleteConfirm = new ConfirmationDialog { DialogText = "Permanently delete this character? This cannot be undone." };
-        _deleteConfirm.Confirmed += OnDeleteConfirmed;
-        section.AddChild(_deleteConfirm);
-        deleteButton.Pressed += OnDeletePressed;
-        section.AddChild(deleteButton);
-    }
-
-    private void BuildCreateCharacterSection(Control parent)
-    {
-        var section = UiHelpers.Section(parent, "Create new character");
-
-        section.AddChild(new Label { Text = "Name" });
-        _newNameEdit = new LineEdit { PlaceholderText = "Character name" };
-        section.AddChild(_newNameEdit);
-
-        section.AddChild(new Label { Text = "Archetype (real server-declared options, §3.3)" });
-        _archetypeOption = new OptionButton();
-        section.AddChild(_archetypeOption);
-
-        var createButton = new Button { Text = "Create + select" };
-        createButton.Pressed += OnCreatePressed;
-        section.AddChild(createButton);
-    }
-
-    private void BuildUtilitySection(Control parent)
-    {
-        var section = UiHelpers.Section(parent, "");
-        var autoButton = new Button { Text = "Auto: pick first, or create if none" };
-        autoButton.Pressed += OnAutoPressed;
-        section.AddChild(autoButton);
-
-        // There is no in-session "go back" — the wire protocol's
-        // realm(2)->character(3) handshake is strictly forward-only
-        // (server.rs's `handle_session`: a SelectRealm sent after the
-        // realm phase has ended fails to parse as the expected
-        // message_type and the server closes the connection). So
-        // "back to realm select" has to be a real reconnect: disconnect,
-        // open a fresh socket, and Resume the same session token —
-        // Resume replies with Authenticated same as Login, which
-        // Main.cs already routes into RealmSelect.
-        var backButton = new Button { Text = "Back to realm select" };
-        backButton.Pressed += OnBackToRealmSelectPressed;
-        section.AddChild(backButton);
-
-        var disconnectButton = new Button { Text = "Disconnect (use a different account)" };
-        disconnectButton.Pressed += () => NetworkClient.Instance.Disconnect();
-        section.AddChild(disconnectButton);
     }
 
     private async void OnBackToRealmSelectPressed()

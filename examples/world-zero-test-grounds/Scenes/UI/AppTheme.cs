@@ -2,13 +2,12 @@ using Godot;
 
 namespace WorldZeroTestGrounds.Scenes.UI;
 
-// The one place this project's visual identity is defined (#307) — every
-// panel here is built entirely in code (no .tscn/editor access), so a
-// single `Theme` applied at the root and inherited by every child Control
-// is the only practical way to make the whole app read as one system
-// instead of Godot's unstyled default gray. Panels themselves are
-// unchanged (still `UiHelpers.CreateScrollableColumn`/`Section`) — this
-// file only ever adds visual styling, never layout logic.
+// The one place this project's visual identity is defined (#307) — panel
+// layout lives in each panel's own .tscn, so a single `Theme` applied to
+// every top-level panel and inherited by its children is the only
+// practical way to make the whole app read as one system instead of
+// Godot's unstyled default gray. This file only ever adds visual
+// styling, never layout logic.
 public static class AppTheme
 {
     // The three colors already in ad hoc use across Login/CharacterSelect/

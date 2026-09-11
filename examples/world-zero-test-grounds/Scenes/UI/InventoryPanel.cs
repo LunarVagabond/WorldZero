@@ -11,6 +11,9 @@ namespace WorldZeroTestGrounds.Scenes.UI;
 // server-side handling since). Equipment gets its own EquipmentPanel;
 // trade gets its own TradePanel; this panel keeps Use/Drop/MoveToSlot,
 // since those are all "act on this exact stack in my inventory" actions.
+// Static frame lives in InventoryPanel.tscn; the item rows are still
+// built here since their count varies at runtime with the account's
+// actual inventory.
 public partial class InventoryPanel : Control
 {
     private VBoxContainer _rows = null!;
@@ -18,16 +21,8 @@ public partial class InventoryPanel : Control
 
     public override void _Ready()
     {
-        SetAnchorsPreset(LayoutPreset.FullRect);
-        var box = UiHelpers.CreateScrollableColumn(this);
-
-        UiHelpers.AddWrappingLabel(box,
-            "Quantities push live via ItemChanged. Use/Drop/Move-to-slot are all real backend actions — see the Equipment and Trade tabs for those.")
-            .Modulate = AppTheme.Warning;
-
-        _emptyLabel = UiHelpers.AddWrappingLabel(box, "(no items — grant some via the Admin tab, or Craft)");
-        _rows = new VBoxContainer { SizeFlagsHorizontal = SizeFlags.ExpandFill };
-        box.AddChild(_rows);
+        _rows = GetNode<VBoxContainer>("%Rows");
+        _emptyLabel = GetNode<Label>("%EmptyLabel");
 
         var nc = NetworkClient.Instance;
         nc.OnItemChanged += _ => Refresh();

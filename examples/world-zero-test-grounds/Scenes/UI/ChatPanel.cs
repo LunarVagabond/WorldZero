@@ -8,6 +8,7 @@ namespace WorldZeroTestGrounds.Scenes.UI;
 // resolved from the Joined reply and never re-derivable except by
 // re-joining (§14) — this panel keeps the name->id map in GameState so
 // re-selecting a previously joined channel doesn't need a fresh Join.
+// Layout lives in ChatPanel.tscn.
 public partial class ChatPanel : Control
 {
     private LineEdit _channelNameEdit = null!;
@@ -17,37 +18,18 @@ public partial class ChatPanel : Control
 
     public override void _Ready()
     {
-        SetAnchorsPreset(LayoutPreset.FullRect);
-        var box = UiHelpers.CreateScrollableColumn(this);
+        _channelNameEdit = GetNode<LineEdit>("%ChannelNameEdit");
+        _joinedChannels = GetNode<OptionButton>("%JoinedChannels");
+        _messageEdit = GetNode<LineEdit>("%MessageEdit");
+        _log = GetNode<RichTextLabel>("%Log");
 
-        var joinRow = new HBoxContainer();
-        box.AddChild(joinRow);
-        _channelNameEdit = new LineEdit { PlaceholderText = "channel name", CustomMinimumSize = new Vector2(150, 0) };
         UiHelpers.LockMovementWhileFocused(_channelNameEdit);
-        joinRow.AddChild(_channelNameEdit);
-        var joinButton = new Button { Text = "Join" };
-        joinButton.Pressed += () => NetworkClient.Instance.SendChatJoin(_channelNameEdit.Text.Trim());
-        joinRow.AddChild(joinButton);
-        var leaveButton = new Button { Text = "Leave selected" };
-        leaveButton.Pressed += OnLeaveSelected;
-        joinRow.AddChild(leaveButton);
-
-        box.AddChild(new Label { Text = "Active channel (to send to):" });
-        _joinedChannels = new OptionButton();
-        box.AddChild(_joinedChannels);
-
-        _log = new RichTextLabel { ScrollFollowing = true, SizeFlagsVertical = SizeFlags.ExpandFill, CustomMinimumSize = new Vector2(0, 150) };
-        box.AddChild(_log);
-
-        var sendRow = new HBoxContainer();
-        box.AddChild(sendRow);
-        _messageEdit = new LineEdit { PlaceholderText = "message", SizeFlagsHorizontal = SizeFlags.ExpandFill };
         UiHelpers.LockMovementWhileFocused(_messageEdit);
         _messageEdit.TextSubmitted += _ => OnSend();
-        sendRow.AddChild(_messageEdit);
-        var sendButton = new Button { Text = "Send" };
-        sendButton.Pressed += OnSend;
-        sendRow.AddChild(sendButton);
+
+        GetNode<Button>("%JoinButton").Pressed += () => NetworkClient.Instance.SendChatJoin(_channelNameEdit.Text.Trim());
+        GetNode<Button>("%LeaveButton").Pressed += OnLeaveSelected;
+        GetNode<Button>("%SendButton").Pressed += OnSend;
 
         var nc = NetworkClient.Instance;
         nc.OnChatJoined += msg => RefreshChannelOptions(msg.Channel);

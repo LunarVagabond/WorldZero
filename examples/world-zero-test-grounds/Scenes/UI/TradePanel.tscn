@@ -1,0 +1,169 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://Scenes/UI/TradePanel.cs" id="1"]
+
+[node name="TradePanel" type="Control"]
+anchor_right = 1.0
+anchor_bottom = 1.0
+script = ExtResource("1")
+
+[node name="Scroll" type="ScrollContainer" parent="."]
+anchor_right = 1.0
+anchor_bottom = 1.0
+horizontal_scroll_mode = 0
+
+[node name="Box" type="VBoxContainer" parent="Scroll"]
+layout_mode = 2
+size_flags_horizontal = 3
+
+[node name="RequestSection" type="PanelContainer" parent="Scroll/Box"]
+layout_mode = 2
+
+[node name="RequestBox" type="VBoxContainer" parent="Scroll/Box/RequestSection"]
+layout_mode = 2
+
+[node name="Header" type="Label" parent="Scroll/Box/RequestSection/RequestBox"]
+layout_mode = 2
+modulate = Color(0.75, 0.85, 1, 1)
+text = "Request a trade"
+
+[node name="HeaderSep" type="HSeparator" parent="Scroll/Box/RequestSection/RequestBox"]
+layout_mode = 2
+
+[node name="TargetRow" type="HBoxContainer" parent="Scroll/Box/RequestSection/RequestBox"]
+layout_mode = 2
+
+[node name="TargetEdit" type="LineEdit" parent="Scroll/Box/RequestSection/RequestBox/TargetRow"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+placeholder_text = "target entity id"
+
+[node name="UseTargetButton" type="Button" parent="Scroll/Box/RequestSection/RequestBox/TargetRow"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Use current target"
+
+[node name="RequestButton" type="Button" parent="Scroll/Box/RequestSection/RequestBox"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Request trade"
+
+[node name="IncomingSection" type="PanelContainer" parent="Scroll/Box"]
+layout_mode = 2
+
+[node name="IncomingBox" type="VBoxContainer" parent="Scroll/Box/IncomingSection"]
+layout_mode = 2
+
+[node name="Header" type="Label" parent="Scroll/Box/IncomingSection/IncomingBox"]
+layout_mode = 2
+modulate = Color(0.75, 0.85, 1, 1)
+text = "Incoming request"
+
+[node name="HeaderSep" type="HSeparator" parent="Scroll/Box/IncomingSection/IncomingBox"]
+layout_mode = 2
+
+[node name="IncomingRequestLabel" type="Label" parent="Scroll/Box/IncomingSection/IncomingBox"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+autowrap_mode = 3
+text = "(none)"
+
+[node name="IncomingRow" type="HBoxContainer" parent="Scroll/Box/IncomingSection/IncomingBox"]
+layout_mode = 2
+
+[node name="AcceptButton" type="Button" parent="Scroll/Box/IncomingSection/IncomingBox/IncomingRow"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Accept"
+
+[node name="DeclineButton" type="Button" parent="Scroll/Box/IncomingSection/IncomingBox/IncomingRow"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Decline"
+
+[node name="OfferSection" type="PanelContainer" parent="Scroll/Box"]
+layout_mode = 2
+
+[node name="OfferBox" type="VBoxContainer" parent="Scroll/Box/OfferSection"]
+layout_mode = 2
+
+[node name="Header" type="Label" parent="Scroll/Box/OfferSection/OfferBox"]
+layout_mode = 2
+modulate = Color(0.75, 0.85, 1, 1)
+text = "Your offer"
+
+[node name="HeaderSep" type="HSeparator" parent="Scroll/Box/OfferSection/OfferBox"]
+layout_mode = 2
+
+[node name="ItemRow" type="HBoxContainer" parent="Scroll/Box/OfferSection/OfferBox"]
+layout_mode = 2
+
+[node name="ItemEdit" type="LineEdit" parent="Scroll/Box/OfferSection/OfferBox/ItemRow"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+placeholder_text = "item_type"
+
+[node name="ItemQtyEdit" type="LineEdit" parent="Scroll/Box/OfferSection/OfferBox/ItemRow"]
+unique_name_in_owner = true
+layout_mode = 2
+custom_minimum_size = Vector2(90, 0)
+placeholder_text = "qty (0 removes)"
+text = "1"
+
+[node name="OfferItemButton" type="Button" parent="Scroll/Box/OfferSection/OfferBox/ItemRow"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Offer item"
+
+[node name="CurrencyRow" type="HBoxContainer" parent="Scroll/Box/OfferSection/OfferBox"]
+layout_mode = 2
+
+[node name="CurrencyEdit" type="LineEdit" parent="Scroll/Box/OfferSection/OfferBox/CurrencyRow"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+placeholder_text = "currency_key"
+
+[node name="CurrencyAmountEdit" type="LineEdit" parent="Scroll/Box/OfferSection/OfferBox/CurrencyRow"]
+unique_name_in_owner = true
+layout_mode = 2
+custom_minimum_size = Vector2(90, 0)
+placeholder_text = "amount (0 removes)"
+text = "1"
+
+[node name="OfferCurrencyButton" type="Button" parent="Scroll/Box/OfferSection/OfferBox/CurrencyRow"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Offer currency"
+
+[node name="ConfirmRow" type="HBoxContainer" parent="Scroll/Box/OfferSection/OfferBox"]
+layout_mode = 2
+
+[node name="ConfirmButton" type="Button" parent="Scroll/Box/OfferSection/OfferBox/ConfirmRow"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Confirm"
+
+[node name="CancelButton" type="Button" parent="Scroll/Box/OfferSection/OfferBox/ConfirmRow"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Cancel trade"
+
+[node name="Sep" type="HSeparator" parent="Scroll/Box"]
+layout_mode = 2
+
+[node name="StateHint" type="Label" parent="Scroll/Box"]
+layout_mode = 2
+size_flags_horizontal = 3
+autowrap_mode = 3
+text = "Active trade state:"
+
+[node name="StateLabel" type="Label" parent="Scroll/Box"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+autowrap_mode = 3
+text = "(no active trade)"

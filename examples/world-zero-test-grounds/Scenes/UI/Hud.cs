@@ -11,39 +11,21 @@ namespace WorldZeroTestGrounds.Scenes.UI;
 // only one subsystem's contents are ever visible at a time, and the
 // active tab's output gets the whole dock width rather than splitting
 // it with every other panel side by side (the previous
-// CollapsiblePanel-row layout).
+// CollapsiblePanel-row layout). Static tabs are instanced in Hud.tscn;
+// the Admin tab stays dynamic here since its presence depends on the
+// account's role.
 public partial class Hud : Control
 {
+    private static readonly PackedScene AdminPanelScene = GD.Load<PackedScene>("res://Scenes/UI/AdminPanel.tscn");
+
     private TabContainer _tabs = null!;
     private Control _inventoryTab = null!;
     private Control? _adminTab;
 
     public override void _Ready()
     {
-        // Full-width strip pinned to the bottom edge, sized relative to
-        // the viewport rather than a hardcoded size.
-        AnchorLeft = 0f;
-        AnchorRight = 1f;
-        AnchorTop = 1f;
-        AnchorBottom = 1f;
-        OffsetLeft = 8;
-        OffsetRight = -8;
-        OffsetBottom = -8;
-        OffsetTop = -320;
-
-        _tabs = new TabContainer();
-        _tabs.SetAnchorsPreset(LayoutPreset.FullRect);
-        AddChild(_tabs);
-
-        AddTab("Debug", new DebugOverlay());
-        AddTab("Chat", new ChatPanel());
-        AddTab("Party", new PartyPanel());
-        AddTab("Guild", new GuildPanel());
-        AddTab("Craft", new CraftingPanel());
-        _inventoryTab = new InventoryPanel();
-        AddTab("Inventory", _inventoryTab);
-        AddTab("Equipment", new EquipmentPanel());
-        AddTab("Trade", new TradePanel());
+        _tabs = GetNode<TabContainer>("%Tabs");
+        _inventoryTab = GetNode<Control>("%Inventory");
 
         GameState.Instance.RolesChanged += OnRolesChanged;
         OnRolesChanged();
@@ -67,14 +49,6 @@ public partial class Hud : Control
         }
     }
 
-    private void AddTab(string title, Control content)
-    {
-        content.Name = title;
-        content.SizeFlagsHorizontal = SizeFlags.ExpandFill;
-        content.SizeFlagsVertical = SizeFlags.ExpandFill;
-        _tabs.AddChild(content);
-    }
-
     private void OnRolesChanged()
     {
         // #307: `qa` is a lighter-weight way to grant a test account the
@@ -89,8 +63,11 @@ public partial class Hud : Control
 
         if (shouldShow)
         {
-            _adminTab = new AdminPanel();
-            AddTab("Admin", _adminTab);
+            _adminTab = (Control)AdminPanelScene.Instantiate();
+            _adminTab.Name = "Admin";
+            _adminTab.SizeFlagsHorizontal = SizeFlags.ExpandFill;
+            _adminTab.SizeFlagsVertical = SizeFlags.ExpandFill;
+            _tabs.AddChild(_adminTab);
         }
         else if (_adminTab is not null)
         {

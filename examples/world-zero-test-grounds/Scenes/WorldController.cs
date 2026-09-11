@@ -1,4 +1,3 @@
-using System;
 using System.Collections.Generic;
 using Godot;
 using WorldZeroTestGrounds.Movement;
@@ -11,7 +10,10 @@ namespace WorldZeroTestGrounds.Scenes;
 // The 3D "barely-dressed debug tool" scene (PROMPT.md §18's closing
 // note) — primitive geometry only. Server (x, y) maps to this scene's
 // (X, Z) ground plane; Y is purely a client-side visual convenience the
-// server has no opinion about (§5.1's 2D-only limitation).
+// server has no opinion about (§5.1's 2D-only limitation). Static
+// structure (lights, floor, camera, self visual) lives in
+// WorldController.tscn; spawned entities are instanced from
+// Scenes/Entities/PlayerCapsule.tscn and NpcBox.tscn.
 public partial class WorldController : Node3D
 {
     // Known zone footprints from PROMPT.md §5.2's shipped content —
@@ -38,6 +40,9 @@ public partial class WorldController : Node3D
     // first real ZoneChanged corrects it.
     private const string DefaultInitialZoneId = "greenwood-forest";
 
+    private static readonly PackedScene PlayerCapsuleScene = GD.Load<PackedScene>("res://Scenes/Entities/PlayerCapsule.tscn");
+    private static readonly PackedScene NpcBoxScene = GD.Load<PackedScene>("res://Scenes/Entities/NpcBox.tscn");
+
     private Camera3D _camera = null!;
     private MeshInstance3D _floor = null!;
     private Node3D _selfVisual = null!;
@@ -61,7 +66,21 @@ public partial class WorldController : Node3D
 
     public override void _Ready()
     {
-        SetupEnvironment();
+        _camera = GetNode<Camera3D>("%Camera");
+        _floor = GetNode<MeshInstance3D>("%Floor");
+        _selfVisual = GetNode<Node3D>("%Self");
+        _entitiesRoot = GetNode<Node3D>("%Entities");
+
+        // The sky/ambient setup has no plain-value tscn representation
+        // worth hand-authoring (enum-heavy Environment resource) — the
+        // WorldEnvironment node itself lives in the scene, its resource
+        // is built here.
+        GetNode<WorldEnvironment>("%WorldEnvironment").Environment = new Godot.Environment
+        {
+            BackgroundMode = Godot.Environment.BGMode.Sky,
+            Sky = new Sky { SkyMaterial = new ProceduralSkyMaterial() },
+            AmbientLightSource = Godot.Environment.AmbientSource.Sky,
+        };
 
         var nc = NetworkClient.Instance;
         nc.OnJoined += HandleJoined;
@@ -74,69 +93,20 @@ public partial class WorldController : Node3D
         nc.OnPong += HandlePong;
     }
 
-    private void SetupEnvironment()
+    private static Node3D InstantiateCapsule(Color color)
     {
-        var light = new DirectionalLight3D
-        {
-            RotationDegrees = new Vector3(-55, -35, 0),
-            LightEnergy = 1.1f,
-        };
-        AddChild(light);
-
-        var env = new Godot.Environment
-        {
-            BackgroundMode = Godot.Environment.BGMode.Sky,
-            Sky = new Sky { SkyMaterial = new ProceduralSkyMaterial() },
-            AmbientLightSource = Godot.Environment.AmbientSource.Sky,
-        };
-        var worldEnv = new WorldEnvironment { Environment = env };
-        AddChild(worldEnv);
-
-        _floor = new MeshInstance3D
-        {
-            Mesh = new PlaneMesh { Size = new Vector2(300, 300) },
-            MaterialOverride = new StandardMaterial3D { AlbedoColor = new Color(0.25f, 0.32f, 0.22f) },
-        };
-        AddChild(_floor);
-
-        _entitiesRoot = new Node3D { Name = "Entities" };
-        AddChild(_entitiesRoot);
-
-        _selfVisual = BuildCapsule(new Color(0.2f, 0.6f, 1f));
-        _selfVisual.Name = "Self";
-        AddChild(_selfVisual);
-
-        _camera = new Camera3D
-        {
-            Position = new Vector3(0, 9, 10),
-        };
-        AddChild(_camera);
-        _camera.LookAt(new Vector3(0, 0, 0), Vector3.Up);
-    }
-
-    private static Node3D BuildCapsule(Color color)
-    {
-        var root = new Node3D();
-        var mesh = new MeshInstance3D
-        {
-            Mesh = new CapsuleMesh { Radius = 0.4f, Height = PlayerHeight },
-            Position = new Vector3(0, PlayerHeight / 2f, 0),
-            MaterialOverride = new StandardMaterial3D { AlbedoColor = color },
-        };
-        root.AddChild(mesh);
+        var root = (Node3D)PlayerCapsuleScene.Instantiate();
+        root.GetNode<MeshInstance3D>("%Mesh").MaterialOverride = new StandardMaterial3D { AlbedoColor = color };
         return root;
     }
 
-    private static Node3D BuildBox(Color color, float size = 1.5f)
+    private static Node3D InstantiateBox(Color color, float size = 1.5f)
     {
-        var root = new Node3D();
-        var mesh = new MeshInstance3D
-        {
-            Mesh = new BoxMesh { Size = new Vector3(size, size, size) },
-            Position = new Vector3(0, size / 2f, 0),
-            MaterialOverride = new StandardMaterial3D { AlbedoColor = color },
-        };
-        root.AddChild(mesh);
+        var root = (Node3D)NpcBoxScene.Instantiate();
+        var mesh = root.GetNode<MeshInstance3D>("%Mesh");
+        ((BoxMesh)mesh.Mesh).Size = new Vector3(size, size, size);
+        mesh.Position = new Vector3(0, size / 2f, 0);
+        mesh.MaterialOverride = new StandardMaterial3D { AlbedoColor = color };
         return root;
     }
 
@@ -454,10 +424,10 @@ public partial class WorldController : Node3D
         bool isNpc = entityType.StartsWith("npc");
         bool isCube = entityType == "npc.evil_cube";
         var color = isCube ? new Color(0.85f, 0.15f, 0.15f) : isNpc ? new Color(0.6f, 0.5f, 0.2f) : new Color(0.9f, 0.7f, 0.2f);
-        Node3D visualNode = isNpc ? BuildBox(color, isCube ? 1.8f : 1.2f) : BuildCapsule(color);
+        Node3D visualNode = isNpc ? InstantiateBox(color, isCube ? 1.8f : 1.2f) : InstantiateCapsule(color);
         visualNode.Name = $"Entity_{entityId}";
         BuildPickable(visualNode, isNpc ? 1.2f : 0.6f).SetMeta("entity_id", entityId);
-        AddChild(visualNode);
+        _entitiesRoot.AddChild(visualNode);
 
         var label = new Label3D
         {

@@ -1,0 +1,66 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://Scenes/UI/RealmSelectPanel.cs" id="1"]
+
+[node name="RealmSelectPanel" type="Control"]
+anchor_right = 1.0
+anchor_bottom = 1.0
+script = ExtResource("1")
+
+[node name="Center" type="CenterContainer" parent="."]
+anchor_right = 1.0
+anchor_bottom = 1.0
+
+[node name="Panel" type="PanelContainer" parent="Center"]
+layout_mode = 2
+
+[node name="Root" type="VBoxContainer" parent="Center/Panel"]
+layout_mode = 2
+custom_minimum_size = Vector2(420, 0)
+
+[node name="Title" type="Label" parent="Center/Panel/Root"]
+layout_mode = 2
+horizontal_alignment = 1
+text = "Select a realm"
+
+[node name="StatusLabel" type="Label" parent="Center/Panel/Root"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+autowrap_mode = 3
+modulate = Color(1, 0.35, 0.35, 1)
+
+[node name="RealmSection" type="PanelContainer" parent="Center/Panel/Root"]
+layout_mode = 2
+
+[node name="RealmBox" type="VBoxContainer" parent="Center/Panel/Root/RealmSection"]
+layout_mode = 2
+
+[node name="Header" type="Label" parent="Center/Panel/Root/RealmSection/RealmBox"]
+layout_mode = 2
+modulate = Color(0.75, 0.85, 1, 1)
+text = "Available realms"
+
+[node name="HeaderSep" type="HSeparator" parent="Center/Panel/Root/RealmSection/RealmBox"]
+layout_mode = 2
+
+[node name="RealmList" type="ItemList" parent="Center/Panel/Root/RealmSection/RealmBox"]
+unique_name_in_owner = true
+layout_mode = 2
+custom_minimum_size = Vector2(0, 160)
+
+[node name="SelectButton" type="Button" parent="Center/Panel/Root/RealmSection/RealmBox"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Select highlighted"
+
+[node name="UtilitySection" type="PanelContainer" parent="Center/Panel/Root"]
+layout_mode = 2
+
+[node name="UtilityBox" type="VBoxContainer" parent="Center/Panel/Root/UtilitySection"]
+layout_mode = 2
+
+[node name="RefreshButton" type="Button" parent="Center/Panel/Root/UtilitySection/UtilityBox"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Refresh list"
