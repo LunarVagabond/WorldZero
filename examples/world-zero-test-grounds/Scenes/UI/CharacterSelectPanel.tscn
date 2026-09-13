@@ -1,0 +1,129 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://Scenes/UI/CharacterSelectPanel.cs" id="1"]
+
+[node name="CharacterSelectPanel" type="Control"]
+anchor_right = 1.0
+anchor_bottom = 1.0
+script = ExtResource("1")
+
+[node name="Center" type="CenterContainer" parent="."]
+anchor_right = 1.0
+anchor_bottom = 1.0
+
+[node name="Panel" type="PanelContainer" parent="Center"]
+layout_mode = 2
+
+[node name="Root" type="VBoxContainer" parent="Center/Panel"]
+layout_mode = 2
+custom_minimum_size = Vector2(420, 0)
+
+[node name="Title" type="Label" parent="Center/Panel/Root"]
+layout_mode = 2
+horizontal_alignment = 1
+text = "Select a character"
+
+[node name="TwoClientWarning" type="Label" parent="Center/Panel/Root"]
+layout_mode = 2
+size_flags_horizontal = 3
+autowrap_mode = 3
+modulate = Color(0.9, 0.85, 0.4, 1)
+text = "Testing with two clients? Each one needs a DIFFERENT account — click Register on each, don't Login/Resume the same account twice."
+
+[node name="StatusLabel" type="Label" parent="Center/Panel/Root"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+autowrap_mode = 3
+modulate = Color(1, 0.35, 0.35, 1)
+
+[node name="ExistingSection" type="PanelContainer" parent="Center/Panel/Root"]
+layout_mode = 2
+
+[node name="ExistingBox" type="VBoxContainer" parent="Center/Panel/Root/ExistingSection"]
+layout_mode = 2
+
+[node name="Header" type="Label" parent="Center/Panel/Root/ExistingSection/ExistingBox"]
+layout_mode = 2
+modulate = Color(0.75, 0.85, 1, 1)
+text = "Your characters"
+
+[node name="HeaderSep" type="HSeparator" parent="Center/Panel/Root/ExistingSection/ExistingBox"]
+layout_mode = 2
+
+[node name="CharacterList" type="ItemList" parent="Center/Panel/Root/ExistingSection/ExistingBox"]
+unique_name_in_owner = true
+layout_mode = 2
+custom_minimum_size = Vector2(0, 120)
+
+[node name="SelectButton" type="Button" parent="Center/Panel/Root/ExistingSection/ExistingBox"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Select highlighted"
+
+[node name="DeleteButton" type="Button" parent="Center/Panel/Root/ExistingSection/ExistingBox"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Delete highlighted"
+
+[node name="DeleteConfirm" type="ConfirmationDialog" parent="Center/Panel/Root/ExistingSection/ExistingBox"]
+unique_name_in_owner = true
+title = "Please Confirm..."
+dialog_text = "Permanently delete this character? This cannot be undone."
+
+[node name="CreateSection" type="PanelContainer" parent="Center/Panel/Root"]
+layout_mode = 2
+
+[node name="CreateBox" type="VBoxContainer" parent="Center/Panel/Root/CreateSection"]
+layout_mode = 2
+
+[node name="Header" type="Label" parent="Center/Panel/Root/CreateSection/CreateBox"]
+layout_mode = 2
+modulate = Color(0.75, 0.85, 1, 1)
+text = "Create new character"
+
+[node name="HeaderSep" type="HSeparator" parent="Center/Panel/Root/CreateSection/CreateBox"]
+layout_mode = 2
+
+[node name="NameLabel" type="Label" parent="Center/Panel/Root/CreateSection/CreateBox"]
+layout_mode = 2
+text = "Name"
+
+[node name="NewNameEdit" type="LineEdit" parent="Center/Panel/Root/CreateSection/CreateBox"]
+unique_name_in_owner = true
+layout_mode = 2
+placeholder_text = "Character name"
+
+[node name="ArchetypeLabel" type="Label" parent="Center/Panel/Root/CreateSection/CreateBox"]
+layout_mode = 2
+text = "Archetype (real server-declared options, §3.3)"
+
+[node name="ArchetypeOption" type="OptionButton" parent="Center/Panel/Root/CreateSection/CreateBox"]
+unique_name_in_owner = true
+layout_mode = 2
+
+[node name="CreateButton" type="Button" parent="Center/Panel/Root/CreateSection/CreateBox"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Create + select"
+
+[node name="UtilitySection" type="PanelContainer" parent="Center/Panel/Root"]
+layout_mode = 2
+
+[node name="UtilityBox" type="VBoxContainer" parent="Center/Panel/Root/UtilitySection"]
+layout_mode = 2
+
+[node name="AutoButton" type="Button" parent="Center/Panel/Root/UtilitySection/UtilityBox"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Auto: pick first, or create if none"
+
+[node name="BackButton" type="Button" parent="Center/Panel/Root/UtilitySection/UtilityBox"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Back to realm select"
+
+[node name="DisconnectButton" type="Button" parent="Center/Panel/Root/UtilitySection/UtilityBox"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Disconnect (use a different account)"

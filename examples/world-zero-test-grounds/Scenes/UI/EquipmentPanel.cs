@@ -13,42 +13,22 @@ namespace WorldZeroTestGrounds.Scenes.UI;
 // request, and the server's real Error reply (surfaced via the event
 // log, same as every other rejected action in this project) is the only
 // available feedback for "that's not equippable" or "wrong slot name."
+// Layout lives in EquipmentPanel.tscn.
 public partial class EquipmentPanel : Control
 {
     private Label _equippedLabel = null!;
 
     public override void _Ready()
     {
-        SetAnchorsPreset(LayoutPreset.FullRect);
-        var box = UiHelpers.CreateScrollableColumn(this);
+        _equippedLabel = GetNode<Label>("%EquippedLabel");
 
-        UiHelpers.AddWrappingLabel(box,
-            "There's no wire message exposing which item_types are equippable or what slot they use — this just sends the request and shows the server's real Error if it's rejected.")
-            .Modulate = AppTheme.Warning;
-
-        var equipSection = UiHelpers.Section(box, "Equip");
-        var equipRow = new HBoxContainer();
-        equipSection.AddChild(equipRow);
-        var itemEdit = new LineEdit { PlaceholderText = "item_type", SizeFlagsHorizontal = SizeFlags.ExpandFill };
+        var itemEdit = GetNode<LineEdit>("%ItemEdit");
         UiHelpers.LockMovementWhileFocused(itemEdit);
-        equipRow.AddChild(itemEdit);
-        var equipButton = new Button { Text = "Equip" };
-        equipButton.Pressed += () => NetworkClient.Instance.SendEquipItem(itemEdit.Text.Trim());
-        equipRow.AddChild(equipButton);
+        GetNode<Button>("%EquipButton").Pressed += () => NetworkClient.Instance.SendEquipItem(itemEdit.Text.Trim());
 
-        var unequipSection = UiHelpers.Section(box, "Unequip");
-        var unequipRow = new HBoxContainer();
-        unequipSection.AddChild(unequipRow);
-        var slotEdit = new LineEdit { PlaceholderText = "slot", SizeFlagsHorizontal = SizeFlags.ExpandFill };
+        var slotEdit = GetNode<LineEdit>("%SlotEdit");
         UiHelpers.LockMovementWhileFocused(slotEdit);
-        unequipRow.AddChild(slotEdit);
-        var unequipButton = new Button { Text = "Unequip" };
-        unequipButton.Pressed += () => NetworkClient.Instance.SendUnequipItem(slotEdit.Text.Trim());
-        unequipRow.AddChild(unequipButton);
-
-        box.AddChild(new HSeparator());
-        UiHelpers.AddWrappingLabel(box, "Currently equipped:");
-        _equippedLabel = UiHelpers.AddWrappingLabel(box, "(nothing)");
+        GetNode<Button>("%UnequipButton").Pressed += () => NetworkClient.Instance.SendUnequipItem(slotEdit.Text.Trim());
 
         var nc = NetworkClient.Instance;
         nc.OnEquipmentChanged += _ => Refresh();

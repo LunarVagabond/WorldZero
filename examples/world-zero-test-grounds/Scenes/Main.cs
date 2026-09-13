@@ -10,6 +10,8 @@ namespace WorldZeroTestGrounds.Scenes;
 // PROMPT.md §2.5) and swaps which panel is visible as GameState's
 // connection-state machine advances. Individual panels only handle
 // their own screen's input; every cross-cutting transition lives here.
+// The node tree (World + UI CanvasLayer with the four panels) lives in
+// Main.tscn.
 public partial class Main : Node
 {
     // World Zero has no client-auto-joined channel of its own (§10 —
@@ -30,27 +32,20 @@ public partial class Main : Node
 
     public override void _Ready()
     {
-        _world = new WorldController { Name = "World" };
-        AddChild(_world);
-
-        var uiLayer = new CanvasLayer { Name = "UI" };
-        AddChild(uiLayer);
+        _world = GetNode<WorldController>("%World");
+        _loginPanel = GetNode<LoginPanel>("%LoginPanel");
+        _realmSelectPanel = GetNode<RealmSelectPanel>("%RealmSelectPanel");
+        _characterSelectPanel = GetNode<CharacterSelectPanel>("%CharacterSelectPanel");
+        _hud = GetNode<Hud>("%Hud");
 
         // #307: one shared Theme, assigned to each top-level panel
-        // individually — `uiLayer` is a CanvasLayer, not a Control, so
-        // there's no single ancestor to set `.Theme` on once for every
-        // panel to inherit from.
-        _loginPanel = new LoginPanel { Name = "LoginPanel", Theme = AppTheme.Instance };
-        uiLayer.AddChild(_loginPanel);
-
-        _realmSelectPanel = new RealmSelectPanel { Name = "RealmSelectPanel", Visible = false, Theme = AppTheme.Instance };
-        uiLayer.AddChild(_realmSelectPanel);
-
-        _characterSelectPanel = new CharacterSelectPanel { Name = "CharacterSelectPanel", Visible = false, Theme = AppTheme.Instance };
-        uiLayer.AddChild(_characterSelectPanel);
-
-        _hud = new Hud { Name = "Hud", Visible = false, Theme = AppTheme.Instance };
-        uiLayer.AddChild(_hud);
+        // individually — the UI CanvasLayer is a CanvasLayer, not a
+        // Control, so there's no single ancestor to set `.Theme` on
+        // once for every panel to inherit from.
+        _loginPanel.Theme = AppTheme.Instance;
+        _realmSelectPanel.Theme = AppTheme.Instance;
+        _characterSelectPanel.Theme = AppTheme.Instance;
+        _hud.Theme = AppTheme.Instance;
 
         GameState.Instance.ConnectionStateChanged += OnConnectionStateChanged;
 
