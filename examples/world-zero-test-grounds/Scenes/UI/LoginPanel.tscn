@@ -1,0 +1,147 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://Scenes/UI/LoginPanel.cs" id="1"]
+
+[node name="LoginPanel" type="Control"]
+anchor_right = 1.0
+anchor_bottom = 1.0
+script = ExtResource("1")
+
+[node name="Center" type="CenterContainer" parent="."]
+anchor_right = 1.0
+anchor_bottom = 1.0
+
+[node name="Panel" type="PanelContainer" parent="Center"]
+layout_mode = 2
+
+[node name="Root" type="VBoxContainer" parent="Center/Panel"]
+layout_mode = 2
+custom_minimum_size = Vector2(380, 0)
+
+[node name="Title" type="Label" parent="Center/Panel/Root"]
+layout_mode = 2
+horizontal_alignment = 1
+text = "World Zero Test Grounds"
+
+[node name="MultiClientWarning" type="Label" parent="Center/Panel/Root"]
+layout_mode = 2
+size_flags_horizontal = 3
+autowrap_mode = 3
+modulate = Color(0.9, 0.85, 0.4, 1)
+text = "Running a second client on this machine? Register a NEW account below for it — the server hard-blocks selecting the same character from two connections at once, so reusing this one's default credentials will get the other client stuck."
+
+[node name="ServerSection" type="PanelContainer" parent="Center/Panel/Root"]
+layout_mode = 2
+
+[node name="ServerBox" type="VBoxContainer" parent="Center/Panel/Root/ServerSection"]
+layout_mode = 2
+
+[node name="Header" type="Label" parent="Center/Panel/Root/ServerSection/ServerBox"]
+layout_mode = 2
+modulate = Color(0.75, 0.85, 1, 1)
+text = "Server"
+
+[node name="HeaderSep" type="HSeparator" parent="Center/Panel/Root/ServerSection/ServerBox"]
+layout_mode = 2
+
+[node name="HostLabel" type="Label" parent="Center/Panel/Root/ServerSection/ServerBox"]
+layout_mode = 2
+text = "Host"
+
+[node name="HostEdit" type="LineEdit" parent="Center/Panel/Root/ServerSection/ServerBox"]
+unique_name_in_owner = true
+layout_mode = 2
+
+[node name="PortLabel" type="Label" parent="Center/Panel/Root/ServerSection/ServerBox"]
+layout_mode = 2
+text = "Port"
+
+[node name="PortEdit" type="LineEdit" parent="Center/Panel/Root/ServerSection/ServerBox"]
+unique_name_in_owner = true
+layout_mode = 2
+
+[node name="AccountSection" type="PanelContainer" parent="Center/Panel/Root"]
+layout_mode = 2
+
+[node name="AccountBox" type="VBoxContainer" parent="Center/Panel/Root/AccountSection"]
+layout_mode = 2
+
+[node name="Header" type="Label" parent="Center/Panel/Root/AccountSection/AccountBox"]
+layout_mode = 2
+modulate = Color(0.75, 0.85, 1, 1)
+text = "Account"
+
+[node name="HeaderSep" type="HSeparator" parent="Center/Panel/Root/AccountSection/AccountBox"]
+layout_mode = 2
+
+[node name="UserLabel" type="Label" parent="Center/Panel/Root/AccountSection/AccountBox"]
+layout_mode = 2
+text = "Username"
+
+[node name="UserEdit" type="LineEdit" parent="Center/Panel/Root/AccountSection/AccountBox"]
+unique_name_in_owner = true
+layout_mode = 2
+
+[node name="PassLabel" type="Label" parent="Center/Panel/Root/AccountSection/AccountBox"]
+layout_mode = 2
+text = "Password"
+
+[node name="PassEdit" type="LineEdit" parent="Center/Panel/Root/AccountSection/AccountBox"]
+unique_name_in_owner = true
+layout_mode = 2
+secret = true
+
+[node name="ButtonRow" type="HBoxContainer" parent="Center/Panel/Root/AccountSection/AccountBox"]
+layout_mode = 2
+
+[node name="RegisterButton" type="Button" parent="Center/Panel/Root/AccountSection/AccountBox/ButtonRow"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Register"
+
+[node name="LoginButton" type="Button" parent="Center/Panel/Root/AccountSection/AccountBox/ButtonRow"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Login"
+
+[node name="ResumeSection" type="PanelContainer" parent="Center/Panel/Root"]
+layout_mode = 2
+
+[node name="ResumeBox" type="VBoxContainer" parent="Center/Panel/Root/ResumeSection"]
+layout_mode = 2
+
+[node name="Header" type="Label" parent="Center/Panel/Root/ResumeSection/ResumeBox"]
+layout_mode = 2
+modulate = Color(0.75, 0.85, 1, 1)
+text = "Resume a saved account"
+
+[node name="HeaderSep" type="HSeparator" parent="Center/Panel/Root/ResumeSection/ResumeBox"]
+layout_mode = 2
+
+[node name="ResumeHint" type="Label" parent="Center/Panel/Root/ResumeSection/ResumeBox"]
+layout_mode = 2
+size_flags_horizontal = 3
+autowrap_mode = 3
+text = "Stored per-username, not \"last session\" — safe to use even with another client window open on this machine."
+
+[node name="ResumeRow" type="HBoxContainer" parent="Center/Panel/Root/ResumeSection/ResumeBox"]
+layout_mode = 2
+
+[node name="SavedSessions" type="OptionButton" parent="Center/Panel/Root/ResumeSection/ResumeBox/ResumeRow"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+
+[node name="ResumeButton" type="Button" parent="Center/Panel/Root/ResumeSection/ResumeBox/ResumeRow"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Resume"
+
+[node name="StatusLabel" type="Label" parent="Center/Panel/Root"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+autowrap_mode = 3
+modulate = Color(1, 0.35, 0.35, 1)

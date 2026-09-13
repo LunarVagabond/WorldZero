@@ -1,0 +1,75 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://Scenes/UI/DebugOverlay.cs" id="1"]
+
+[node name="DebugOverlay" type="Control"]
+anchor_right = 1.0
+anchor_bottom = 1.0
+script = ExtResource("1")
+
+[node name="Scroll" type="ScrollContainer" parent="."]
+anchor_right = 1.0
+anchor_bottom = 1.0
+horizontal_scroll_mode = 0
+
+[node name="Box" type="VBoxContainer" parent="Scroll"]
+layout_mode = 2
+size_flags_horizontal = 3
+
+[node name="IdsLabel" type="Label" parent="Scroll/Box"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+autowrap_mode = 3
+
+[node name="PosLabel" type="Label" parent="Scroll/Box"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+autowrap_mode = 3
+
+[node name="PingLabel" type="Label" parent="Scroll/Box"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+autowrap_mode = 3
+
+[node name="RosterLabel" type="Label" parent="Scroll/Box"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+autowrap_mode = 3
+
+[node name="PartyGuildLabel" type="Label" parent="Scroll/Box"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+autowrap_mode = 3
+
+[node name="StatsLabel" type="Label" parent="Scroll/Box"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+autowrap_mode = 3
+
+[node name="Sep" type="HSeparator" parent="Scroll/Box"]
+layout_mode = 2
+
+[node name="LogHeader" type="HBoxContainer" parent="Scroll/Box"]
+layout_mode = 2
+
+[node name="LogHeaderLabel" type="Label" parent="Scroll/Box/LogHeader"]
+layout_mode = 2
+text = "Event log"
+
+[node name="ShowQuietCheck" type="CheckBox" parent="Scroll/Box/LogHeader"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "show movement spam (Move/Moved)"
+
+[node name="EventLog" type="RichTextLabel" parent="Scroll/Box"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_vertical = 3
+custom_minimum_size = Vector2(0, 260)
+scroll_following = true

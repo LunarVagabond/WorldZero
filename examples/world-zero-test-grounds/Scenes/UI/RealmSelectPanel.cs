@@ -11,7 +11,7 @@ namespace WorldZeroTestGrounds.Scenes.UI;
 // single row — but it's still real, live data (name/open-or-bound/
 // character_count/live_connection_count straight off `RealmList`), not
 // a hardcoded picker, so the flow is already correct for whenever #130
-// lands. Same Build*Section pattern as LoginPanel/CharacterSelectPanel.
+// lands. Layout lives in RealmSelectPanel.tscn.
 //
 // `character_count` is a realm-wide population census, not "characters
 // I can select here" — for an `open` realm (OSRS-style: one character
@@ -32,49 +32,17 @@ public partial class RealmSelectPanel : Control
 
     public override void _Ready()
     {
-        SetAnchorsPreset(LayoutPreset.FullRect);
+        _statusLabel = GetNode<Label>("%StatusLabel");
+        _realmList = GetNode<ItemList>("%RealmList");
+        _realmList.ItemActivated += index => SelectIndex((int)index);
 
-        var panel = new PanelContainer();
-        panel.SetAnchorsPreset(LayoutPreset.Center);
-        AddChild(panel);
-
-        var root = new VBoxContainer { CustomMinimumSize = new Vector2(420, 0) };
-        panel.AddChild(root);
-
-        root.AddChild(new Label { Text = "Select a realm", HorizontalAlignment = HorizontalAlignment.Center });
-        BuildStatusLabel(root);
-        BuildRealmListSection(root);
-        BuildUtilitySection(root);
+        GetNode<Button>("%SelectButton").Pressed += () =>
+            SelectIndex(_realmList.GetSelectedItems() is { Length: > 0 } sel ? sel[0] : -1);
+        GetNode<Button>("%RefreshButton").Pressed += RefreshOnShow;
 
         var nc = NetworkClient.Instance;
         nc.OnRealmList += HandleRealmList;
         nc.OnRealmError += HandleRealmError;
-    }
-
-    private void BuildStatusLabel(Control parent)
-    {
-        _statusLabel = UiHelpers.AddWrappingLabel(parent);
-        _statusLabel.Modulate = AppTheme.Error;
-    }
-
-    private void BuildRealmListSection(Control parent)
-    {
-        var section = UiHelpers.Section(parent, "Available realms");
-        _realmList = new ItemList { CustomMinimumSize = new Vector2(0, 160) };
-        section.AddChild(_realmList);
-        _realmList.ItemActivated += index => SelectIndex((int)index);
-
-        var selectButton = new Button { Text = "Select highlighted" };
-        selectButton.Pressed += () => SelectIndex(_realmList.GetSelectedItems() is { Length: > 0 } sel ? sel[0] : -1);
-        section.AddChild(selectButton);
-    }
-
-    private void BuildUtilitySection(Control parent)
-    {
-        var section = UiHelpers.Section(parent, "");
-        var refreshButton = new Button { Text = "Refresh list" };
-        refreshButton.Pressed += RefreshOnShow;
-        section.AddChild(refreshButton);
     }
 
     private void HandleRealmError(string msg)

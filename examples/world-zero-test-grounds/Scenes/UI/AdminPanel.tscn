@@ -1,0 +1,151 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://Scenes/UI/AdminPanel.cs" id="1"]
+
+[node name="AdminPanel" type="Control"]
+anchor_right = 1.0
+anchor_bottom = 1.0
+script = ExtResource("1")
+
+[node name="Scroll" type="ScrollContainer" parent="."]
+anchor_right = 1.0
+anchor_bottom = 1.0
+horizontal_scroll_mode = 0
+
+[node name="Box" type="VBoxContainer" parent="Scroll"]
+layout_mode = 2
+size_flags_horizontal = 3
+
+[node name="Hint" type="Label" parent="Scroll/Box"]
+layout_mode = 2
+size_flags_horizontal = 3
+autowrap_mode = 3
+text = "Every command here is re-checked server-side against your account's real \"admin\" or \"qa\" role — this panel only ever shows for an account that already announced it has one of them."
+
+[node name="GrantSection" type="PanelContainer" parent="Scroll/Box"]
+layout_mode = 2
+
+[node name="GrantBox" type="VBoxContainer" parent="Scroll/Box/GrantSection"]
+layout_mode = 2
+
+[node name="Header" type="Label" parent="Scroll/Box/GrantSection/GrantBox"]
+layout_mode = 2
+modulate = Color(0.75, 0.85, 1, 1)
+text = "Grant item (/grant)"
+
+[node name="HeaderSep" type="HSeparator" parent="Scroll/Box/GrantSection/GrantBox"]
+layout_mode = 2
+
+[node name="ItemEdit" type="LineEdit" parent="Scroll/Box/GrantSection/GrantBox"]
+unique_name_in_owner = true
+layout_mode = 2
+placeholder_text = "item_type (e.g. iron-ore)"
+
+[node name="QtyEdit" type="LineEdit" parent="Scroll/Box/GrantSection/GrantBox"]
+unique_name_in_owner = true
+layout_mode = 2
+placeholder_text = "quantity"
+text = "1"
+
+[node name="GrantButton" type="Button" parent="Scroll/Box/GrantSection/GrantBox"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Grant to self"
+
+[node name="CurrencySection" type="PanelContainer" parent="Scroll/Box"]
+layout_mode = 2
+
+[node name="CurrencyBox" type="VBoxContainer" parent="Scroll/Box/CurrencySection"]
+layout_mode = 2
+
+[node name="Header" type="Label" parent="Scroll/Box/CurrencySection/CurrencyBox"]
+layout_mode = 2
+modulate = Color(0.75, 0.85, 1, 1)
+text = "Grant currency (/grantcurrency)"
+
+[node name="HeaderSep" type="HSeparator" parent="Scroll/Box/CurrencySection/CurrencyBox"]
+layout_mode = 2
+
+[node name="KeyEdit" type="LineEdit" parent="Scroll/Box/CurrencySection/CurrencyBox"]
+unique_name_in_owner = true
+layout_mode = 2
+placeholder_text = "currency_key (e.g. gold)"
+
+[node name="AmountEdit" type="LineEdit" parent="Scroll/Box/CurrencySection/CurrencyBox"]
+unique_name_in_owner = true
+layout_mode = 2
+placeholder_text = "amount"
+text = "100"
+
+[node name="CurrencyGrantButton" type="Button" parent="Scroll/Box/CurrencySection/CurrencyBox"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Grant to self"
+
+[node name="CubeSection" type="PanelContainer" parent="Scroll/Box"]
+layout_mode = 2
+
+[node name="CubeBox" type="VBoxContainer" parent="Scroll/Box/CubeSection"]
+layout_mode = 2
+
+[node name="Header" type="Label" parent="Scroll/Box/CubeSection/CubeBox"]
+layout_mode = 2
+modulate = Color(0.75, 0.85, 1, 1)
+text = "Evil Cube (/killcube, /respawncube)"
+
+[node name="HeaderSep" type="HSeparator" parent="Scroll/Box/CubeSection/CubeBox"]
+layout_mode = 2
+
+[node name="Row" type="HBoxContainer" parent="Scroll/Box/CubeSection/CubeBox"]
+layout_mode = 2
+
+[node name="KillButton" type="Button" parent="Scroll/Box/CubeSection/CubeBox/Row"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Kill cube"
+
+[node name="RespawnButton" type="Button" parent="Scroll/Box/CubeSection/CubeBox/Row"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Respawn cube"
+
+[node name="TeleportSection" type="PanelContainer" parent="Scroll/Box"]
+layout_mode = 2
+
+[node name="TeleportBox" type="VBoxContainer" parent="Scroll/Box/TeleportSection"]
+layout_mode = 2
+
+[node name="Header" type="Label" parent="Scroll/Box/TeleportSection/TeleportBox"]
+layout_mode = 2
+modulate = Color(0.75, 0.85, 1, 1)
+text = "Teleport (/teleport, admin/QA only)"
+
+[node name="HeaderSep" type="HSeparator" parent="Scroll/Box/TeleportSection/TeleportBox"]
+layout_mode = 2
+
+[node name="Row" type="HBoxContainer" parent="Scroll/Box/TeleportSection/TeleportBox"]
+layout_mode = 2
+
+[node name="XEdit" type="LineEdit" parent="Scroll/Box/TeleportSection/TeleportBox/Row"]
+unique_name_in_owner = true
+layout_mode = 2
+custom_minimum_size = Vector2(60, 0)
+placeholder_text = "x"
+
+[node name="YEdit" type="LineEdit" parent="Scroll/Box/TeleportSection/TeleportBox/Row"]
+unique_name_in_owner = true
+layout_mode = 2
+custom_minimum_size = Vector2(60, 0)
+placeholder_text = "y"
+
+[node name="ZEdit" type="LineEdit" parent="Scroll/Box/TeleportSection/TeleportBox/Row"]
+unique_name_in_owner = true
+layout_mode = 2
+custom_minimum_size = Vector2(60, 0)
+placeholder_text = "z"
+text = "0"
+
+[node name="TeleportButton" type="Button" parent="Scroll/Box/TeleportSection/TeleportBox"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Teleport self"

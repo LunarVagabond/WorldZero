@@ -1,0 +1,67 @@
+[gd_scene load_steps=10 format=3]
+
+[ext_resource type="Script" path="res://Scenes/UI/Hud.cs" id="1"]
+[ext_resource type="PackedScene" path="res://Scenes/UI/DebugOverlay.tscn" id="2"]
+[ext_resource type="PackedScene" path="res://Scenes/UI/ChatPanel.tscn" id="3"]
+[ext_resource type="PackedScene" path="res://Scenes/UI/PartyPanel.tscn" id="4"]
+[ext_resource type="PackedScene" path="res://Scenes/UI/GuildPanel.tscn" id="5"]
+[ext_resource type="PackedScene" path="res://Scenes/UI/CraftingPanel.tscn" id="6"]
+[ext_resource type="PackedScene" path="res://Scenes/UI/InventoryPanel.tscn" id="7"]
+[ext_resource type="PackedScene" path="res://Scenes/UI/EquipmentPanel.tscn" id="8"]
+[ext_resource type="PackedScene" path="res://Scenes/UI/TradePanel.tscn" id="9"]
+
+[node name="Hud" type="Control"]
+anchor_top = 1.0
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 8.0
+offset_top = -320.0
+offset_right = -8.0
+offset_bottom = -8.0
+script = ExtResource("1")
+
+[node name="Tabs" type="TabContainer" parent="."]
+unique_name_in_owner = true
+anchor_right = 1.0
+anchor_bottom = 1.0
+
+[node name="Debug" parent="Tabs" instance=ExtResource("2")]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+
+[node name="Chat" parent="Tabs" instance=ExtResource("3")]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+
+[node name="Party" parent="Tabs" instance=ExtResource("4")]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+
+[node name="Guild" parent="Tabs" instance=ExtResource("5")]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+
+[node name="Craft" parent="Tabs" instance=ExtResource("6")]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+
+[node name="Inventory" parent="Tabs" instance=ExtResource("7")]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+
+[node name="Equipment" parent="Tabs" instance=ExtResource("8")]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+
+[node name="Trade" parent="Tabs" instance=ExtResource("9")]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3

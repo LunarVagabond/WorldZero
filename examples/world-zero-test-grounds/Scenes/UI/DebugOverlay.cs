@@ -6,7 +6,8 @@ namespace WorldZeroTestGrounds.Scenes.UI;
 
 // The §16 dashboard — "the single most useful thing for the human
 // running this tool to actually watch World Zero's real lifecycle
-// during manual testing — don't skip it or make it minimal."
+// during manual testing — don't skip it or make it minimal." Layout
+// lives in DebugOverlay.tscn.
 public partial class DebugOverlay : Control
 {
     private Label _idsLabel = null!;
@@ -20,37 +21,19 @@ public partial class DebugOverlay : Control
 
     public override void _Ready()
     {
-        SetAnchorsPreset(LayoutPreset.FullRect);
-        var box = UiHelpers.CreateScrollableColumn(this);
-
-        _idsLabel = NewLabel(box);
-        _posLabel = NewLabel(box);
-        _pingLabel = NewLabel(box);
-        _rosterLabel = NewLabel(box);
-        _partyGuildLabel = NewLabel(box);
-        _statsLabel = NewLabel(box);
-
-        box.AddChild(new HSeparator());
-        var logHeader = new HBoxContainer();
-        box.AddChild(logHeader);
-        logHeader.AddChild(new Label { Text = "Event log" });
-        _showQuietCheck = new CheckBox { Text = "show movement spam (Move/Moved)" };
+        _idsLabel = GetNode<Label>("%IdsLabel");
+        _posLabel = GetNode<Label>("%PosLabel");
+        _pingLabel = GetNode<Label>("%PingLabel");
+        _rosterLabel = GetNode<Label>("%RosterLabel");
+        _partyGuildLabel = GetNode<Label>("%PartyGuildLabel");
+        _statsLabel = GetNode<Label>("%StatsLabel");
+        _eventLog = GetNode<RichTextLabel>("%EventLog");
+        _showQuietCheck = GetNode<CheckBox>("%ShowQuietCheck");
         _showQuietCheck.Toggled += _ => RebuildLog();
-        logHeader.AddChild(_showQuietCheck);
-
-        _eventLog = new RichTextLabel
-        {
-            ScrollFollowing = true,
-            SizeFlagsVertical = SizeFlags.ExpandFill,
-            CustomMinimumSize = new Vector2(0, 260),
-        };
-        box.AddChild(_eventLog);
 
         GameState.Instance.EventLogged += OnEventLogged;
         RebuildLog();
     }
-
-    private static Label NewLabel(Control parent) => UiHelpers.AddWrappingLabel(parent);
 
     private void RebuildLog()
     {
